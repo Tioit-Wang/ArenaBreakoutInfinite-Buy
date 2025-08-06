@@ -1,0 +1,21 @@
+{
+    "files.exclude": {
+        "**/__pycache__": true,
+        "**/*.pyc": true,
+        "**/.pytest_cache": true,
+        "**/.coverage": true,
+        "**/.DS_Store": true,
+        "**/*.pyo": true,
+        "**/*.pyd": true,
+        ".Python": true,
+        "pip-log.txt": true,
+        "pip-delete-this-directory.txt": true,
+        ".env": true,
+        // ".venv": true,
+        "env/": true,
+        "venv/": true,
+        "ENV/": true,
+        ".claude/": true,
+        ".mypy_cache": true
+    }
+}
