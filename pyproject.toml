@@ -10,4 +10,8 @@ dependencies = [
     "pyautogui>=0.9.54",
     "pyscreeze>=1.0.1",
     "ahk[binary]",
+    "pytesseract>=0.3.13",
 ]
+
+[project.scripts]
+wg1-gui = "gui_app:main"

@@ -1,0 +1,70 @@
+{
+    "templates": {
+        "首页按钮": {
+            "path": "images\\btn_home.png",
+            "confidence": 0.85
+        },
+        "市场按钮": {
+            "path": "images\\btn_market.png",
+            "confidence": 0.85
+        },
+        "市场搜索栏": {
+            "path": "images\\input_search.png",
+            "confidence": 0.85
+        },
+        "市场搜索按钮": {
+            "path": "images\\btn_search.png",
+            "confidence": 0.85
+        },
+        "购买按钮": {
+            "path": "images\\btn_buy.png",
+            "confidence": 0.88
+        },
+        "购买成功": {
+            "path": "images\\buy_ok.png",
+            "confidence": 0.9
+        },
+        "商品关闭位置": {
+            "path": "images\\btn_close.png",
+            "confidence": 0.85
+        },
+        "刷新按钮": {
+            "path": "images\\btn_refresh.png",
+            "confidence": 0.85
+        }
+    },
+    "points": {
+        "第一个商品": {
+            "x": 560,
+            "y": 314
+        },
+        "数量输入框": {
+            "x": 1313,
+            "y": 662
+        }
+    },
+    "rects": {
+        "价格区域": {
+            "x1": 1037,
+            "y1": 548,
+            "x2": 1414,
+            "y2": 600
+        }
+    },
+    "purchase": {
+        "item_name": "",
+        "price_threshold": 0,
+        "target_total": 0,
+        "max_per_order": 120
+    },
+    "purchase_items": [
+        {
+            "enabled": true,
+            "item_name": "维也娜柠檬",
+            "price_threshold": 800,
+            "target_total": 2,
+            "max_per_order": 1,
+            "purchased": 1
+        }
+    ]
+}
