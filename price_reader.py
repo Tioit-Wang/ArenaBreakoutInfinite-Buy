@@ -79,6 +79,40 @@ def _ocr_digits(bin_img) -> List[int]:
     return vals
 
 
+def _ocr_digit_boxes(bin_img) -> List[Tuple[int, int]]:
+    """Return list of (value, x_center) for each detected numeric token.
+
+    Falls back to empty list if OCR is unavailable.
+    """
+    if pytesseract is None:
+        return []
+    _maybe_init_tesseract()
+    config = "--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789,"
+    try:
+        data = pytesseract.image_to_data(
+            bin_img, config=config, output_type=pytesseract.Output.DICT
+        )
+    except Exception:
+        return []
+    out: List[Tuple[int, int]] = []
+    n = len(data.get("text", []))
+    for i in range(n):
+        txt = data.get("text", [""])[i] or ""
+        digits = "".join(ch for ch in txt if ch.isdigit())
+        if not digits:
+            continue
+        try:
+            val = int(digits)
+        except Exception:
+            continue
+        try:
+            x = int(data.get("left", [0])[i]) + int(data.get("width", [0])[i]) // 2
+        except Exception:
+            x = int(data.get("left", [0])[i])
+        out.append((val, x))
+    return out
+
+
 def read_lowest_price_from_roi(
     region: Tuple[int, int, int, int],
     price_min: int = 10,
@@ -103,6 +137,49 @@ def read_lowest_price_from_roi(
     if not cand:
         return None
     return min(cand)
+
+
+def read_price_and_stock_from_roi(
+    region: Tuple[int, int, int, int],
+    price_min: int = 10,
+    price_max: int = 10_000_000,
+    qty_min: int = 0,
+    qty_max: int = 1_000_000,
+    debug_save: Optional[str] = None,
+) -> Tuple[int, int]:
+    """Capture region and return (price, quantity). Missing values -> 0.
+
+    Heuristic: split by the region mid-X; take price from left side and
+    quantity from right side. Choose a reasonable candidate within range.
+    """
+    if cv2 is None or np is None or pytesseract is None:
+        print("[OCR] ȱ������: �밲װ opencv-python��pytesseract������ϵͳ��װ Tesseract��")
+        return 0, 0
+    pil = pyautogui.screenshot(region=region)
+    proc = _preprocess_for_digits(pil)
+    if proc is None:
+        return 0, 0
+    if debug_save:
+        try:
+            cv2.imwrite(debug_save, proc)
+        except Exception:
+            pass
+    boxes = _ocr_digit_boxes(proc)
+    if not boxes:
+        return 0, 0
+    # midpoint along X to split left (price) vs right (qty)
+    mid_x = region[2] // 2
+    left_vals = [v for v, x in boxes if x <= mid_x and price_min <= v <= price_max]
+    right_vals = [v for v, x in boxes if x > mid_x and qty_min <= v <= qty_max]
+    price = 0
+    qty = 0
+    if left_vals:
+        # choose the minimum as the displayed level is usually the target price
+        price = min(left_vals)
+    if right_vals:
+        # choose the maximum quantity observed on the right
+        qty = max(right_vals)
+    return int(price or 0), int(qty or 0)
 
 
 def _load_key_mapping(path: str = "key_mapping.json") -> dict:
@@ -140,3 +217,27 @@ def read_lowest_price_from_config(
         return None
     save = os.path.join("images", "_debug_price_roi.png") if debug else None
     return read_lowest_price_from_roi(region, debug_save=save)
+
+
+def read_price_and_stock_from_config(
+    mapping_path: str = "key_mapping.json", debug: bool = False
+) -> Tuple[int, int]:
+    """Read ROI from mapping and return (price, quantity). 0 means not found."""
+    mapping = _load_key_mapping(mapping_path)
+    tl = mapping.get("�۸���������")
+    br = mapping.get("�۸���������")
+    if not (isinstance(tl, dict) and isinstance(br, dict)):
+        print("[OCR] key_mapping.json ȱ�� '�۸���������/����'�����ȱ궨 ROI��")
+        return 0, 0
+    try:
+        l, t = int(tl["x"]), int(tl["y"])
+        r, b = int(br["x"]), int(br["y"])
+        if r <= l or b <= t:
+            print("[OCR] ROI ��Ч���������겻ӦС���������ꡣ")
+            return 0, 0
+        region = (l, t, r - l, b - t)
+    except Exception:
+        print("[OCR] ���� ROI ʧ�ܣ����� key_mapping.json��")
+        return 0, 0
+    save = os.path.join("images", "_debug_price_roi.png") if debug else None
+    return read_price_and_stock_from_roi(region, debug_save=save)

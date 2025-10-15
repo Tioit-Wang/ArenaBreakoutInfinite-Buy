@@ -3,6 +3,7 @@ import os
 import random
 import time
 from typing import Dict, List, Optional
+import threading
 
 import pyautogui
 from ahk import AHK
@@ -11,12 +12,14 @@ class ImageBasedAutomator:
     """基于模板图片的自动化点击器。保留以便必要时回落使用。"""
 
     def __init__(
-        self, image_dir: str = "images", confidence: float = 0.8, wait_time: float = 1.0
+        self, image_dir: str = "images", confidence: float = 0.8, wait_time: float = 1.0,
+        stop_event: Optional[threading.Event] = None,
     ):
         self.image_dir = image_dir
         self.confidence = confidence
         self.wait_time = wait_time
         self.ahk = AHK()
+        self._stop_event = stop_event
 
         if not os.path.isdir(self.image_dir):
             raise FileNotFoundError(
@@ -40,6 +43,8 @@ class ImageBasedAutomator:
 
         start = time.time()
         while time.time() - start < timeout:
+            if self._stop_event is not None and self._stop_event.is_set():
+                return False
             try:
                 location = pyautogui.locateCenterOnScreen(
                     image_path, confidence=self.confidence
@@ -51,14 +56,24 @@ class ImageBasedAutomator:
                             location.x, location.y, button=button, coord_mode="Screen"
                         )
                         if i < clicks - 1:
-                            time.sleep(random.uniform(interval * 0.8, interval * 1.2))
-                    time.sleep(
-                        random.uniform(self.wait_time * 0.8, self.wait_time * 1.2)
-                    )
+                            _end = time.time() + random.uniform(interval * 0.8, interval * 1.2)
+                            while time.time() < _end:
+                                if self._stop_event is not None and self._stop_event.is_set():
+                                    return False
+                                time.sleep(0.02)
+                    _end = time.time() + random.uniform(self.wait_time * 0.8, self.wait_time * 1.2)
+                    while time.time() < _end:
+                        if self._stop_event is not None and self._stop_event.is_set():
+                            return False
+                        time.sleep(0.02)
                     return True
             except pyautogui.PyAutoGUIException as e:
                 print(f"匹配 '{image_name}' 时发生异常: {e}")
-            time.sleep(0.5)
+            _end = time.time() + 0.5
+            while time.time() < _end:
+                if self._stop_event is not None and self._stop_event.is_set():
+                    return False
+                time.sleep(0.02)
 
         print(f"在 {timeout} 秒内未找到模板 '{image_name}'。")
         return False
@@ -67,9 +82,17 @@ class ImageBasedAutomator:
         if clear_first:
             self.ahk.send("^a")
             self.ahk.send("{Delete}")
-            time.sleep(0.3)
+            _end = time.time() + 0.3
+            while time.time() < _end:
+                if self._stop_event is not None and self._stop_event.is_set():
+                    return
+                time.sleep(0.02)
         self.ahk.send(text)
-        time.sleep(random.uniform(self.wait_time * 0.8, self.wait_time * 1.2))
+        _end = time.time() + random.uniform(self.wait_time * 0.8, self.wait_time * 1.2)
+        while time.time() < _end:
+            if self._stop_event is not None and self._stop_event.is_set():
+                return
+            time.sleep(0.02)
 
 
 class MappingAutomator:
@@ -81,6 +104,7 @@ class MappingAutomator:
         wait_time: float = 1.0,
         image_automator: Optional[ImageBasedAutomator] = None,
         allow_image_fallback: bool = True,
+        stop_event: Optional[threading.Event] = None,
     ) -> None:
         self.wait_time = wait_time
         self.mapping_path = mapping_path
@@ -88,6 +112,7 @@ class MappingAutomator:
         self.image_automator = image_automator
         self.ahk = AHK()
         self.key_mapping: Dict[str, Dict[str, int]] = {}
+        self._stop_event = stop_event
         self._load_mapping()
 
     def _load_mapping(self) -> None:
@@ -122,9 +147,15 @@ class MappingAutomator:
         button: str = "left",
     ) -> None:
         for i in range(max(1, clicks)):
+            if self._stop_event is not None and self._stop_event.is_set():
+                return
             self.ahk.click(int(x), int(y), button=button, coord_mode="Screen")
             if i < clicks - 1:
-                time.sleep(random.uniform(interval * 0.8, interval * 1.2))
+                _end = time.time() + random.uniform(interval * 0.8, interval * 1.2)
+                while time.time() < _end:
+                    if self._stop_event is not None and self._stop_event.is_set():
+                        return
+                    time.sleep(0.02)
 
     def click_by_labels(
         self,
@@ -140,7 +171,11 @@ class MappingAutomator:
         x, y = pt.get("x"), pt.get("y")
         print(f"使用坐标点击: {label_candidates[0]} -> ({x}, {y})")
         self.click_point(x, y, clicks=clicks, interval=interval, button=button)
-        time.sleep(random.uniform(self.wait_time * 0.8, self.wait_time * 1.2))
+        _end = time.time() + random.uniform(self.wait_time * 0.8, self.wait_time * 1.2)
+        while time.time() < _end:
+            if self._stop_event is not None and self._stop_event.is_set():
+                break
+            time.sleep(0.02)
         return True
 
     def _click_preferring_mapping(

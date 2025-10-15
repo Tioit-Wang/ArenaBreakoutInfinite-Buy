@@ -48,6 +48,13 @@ class AutoBuyer:
         if self._thread and self._thread.is_alive():
             return
         self._stop.clear()
+        # propagate stop event to automators for immediate cancellation
+        try:
+            self.automator._stop_event = self._stop
+            if getattr(self.automator, "image_automator", None) is not None:
+                self.automator.image_automator._stop_event = self._stop
+        except Exception:
+            pass
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
@@ -76,7 +83,8 @@ class AutoBuyer:
             self.log("未能点击【搜索按钮】，终止。")
             return False
         self.log("已完成搜索，等待结果…")
-        time.sleep(1.8)
+        if self._stop.wait(1.8):
+            return False
         return True
 
     def _run(self) -> None:
@@ -89,7 +97,8 @@ class AutoBuyer:
             # Enter first item detail (required)
             if not self.automator._click_preferring_mapping(["第一个商品", "第一个商品位置", "第1个商品"], None, required=True):
                 self.log("未定位到第一个商品，重试…")
-                time.sleep(1.0)
+                if self._stop.wait(1.0):
+                    break
                 continue
 
             # Read price via ROI
@@ -97,7 +106,8 @@ class AutoBuyer:
             if price is None:
                 self.log("未能解析价格，关闭详情并刷新…")
                 self.automator._click_preferring_mapping(["商品关闭位置", "关闭"], "btn_close.png", required=False)
-                time.sleep(0.8)
+                if self._stop.wait(0.8):
+                    break
                 continue
 
             self.log(f"读取价格: {price}")
@@ -110,19 +120,22 @@ class AutoBuyer:
                 else:
                     self.log("定位数量输入框失败，放弃本次购买…")
                     self.automator._click_preferring_mapping(["商品关闭位置", "关闭"], "btn_close.png", required=False)
-                    time.sleep(0.8)
+                    if self._stop.wait(0.8):
+                        break
                     continue
 
                 # Buy
                 if not self.automator._click_preferring_mapping(["购买按钮", "买入按钮", "提交购买"], "btn_buy.png", required=True):
                     self.log("点击购买失败，关闭详情…")
                     self.automator._click_preferring_mapping(["商品关闭位置", "关闭"], "btn_close.png", required=False)
-                    time.sleep(0.8)
+                    if self._stop.wait(0.8):
+                        break
                     continue
 
                 # Optional: verify success by template (if provided)
                 # For MVP, assume success after a short wait
-                time.sleep(1.2)
+                if self._stop.wait(1.2):
+                    break
                 self._purchased += qty
                 self.log(f"购买成功，累计已购: {self._purchased}/{self.target_total}")
 
@@ -189,6 +202,13 @@ class MultiBuyer:
         if self._thread and self._thread.is_alive():
             return
         self._stop.clear()
+        # propagate stop event to automators for immediate cancellation
+        try:
+            self.automator._stop_event = self._stop
+            if getattr(self.automator, "image_automator", None) is not None:
+                self.automator.image_automator._stop_event = self._stop
+        except Exception:
+            pass
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
@@ -212,7 +232,8 @@ class MultiBuyer:
         if not self.automator._click_preferring_mapping(["市场搜索按钮", "搜索按钮"], "btn_search.png", required=True):
             self.log("未能点击【搜索按钮】")
             return False
-        time.sleep(1.2)
+        if self._stop.wait(1.2):
+            return True
         return True
 
     def _attempt_one(self, idx: int, it: Dict[str, Any]) -> None:

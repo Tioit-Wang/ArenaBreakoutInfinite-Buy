@@ -803,4 +803,23 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    # Wrap preview to also display OCR results for price ROI
+    try:
+        _ORIG_PREVIEW = App._preview_image  # type: ignore[attr-defined]
+
+        def _preview_with_values(self: App, path: str, title: str = "Ԥ��") -> None:  # type: ignore[name-defined]
+            _ORIG_PREVIEW(self, path, title)
+            try:
+                import os as _os
+                if _os.path.basename(path) == "_debug_price_roi.png":
+                    from price_reader import read_price_and_stock_from_config
+                    p, q = read_price_and_stock_from_config(mapping_path="key_mapping.json", debug=False)
+                    messagebox.showinfo("OCR ���", f"�۸�: {p}    ����: {q}")
+            except Exception:
+                pass
+
+        App._preview_image = _preview_with_values  # type: ignore[assignment]
+    except Exception:
+        pass
+
     main()
