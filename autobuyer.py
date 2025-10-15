@@ -104,7 +104,7 @@ class AutoBuyer:
             # Read price via ROI
             price = read_lowest_price_from_config(mapping_path="key_mapping.json", debug=False)
             if price is None:
-                self.log("未能解析价格，关闭详情并刷新…")
+                self.log("未能解析价格，关闭详情后重试…")
                 self.automator._click_preferring_mapping(["商品关闭位置", "关闭"], "btn_close.png", required=False)
                 if self._stop.wait(0.8):
                     break
@@ -143,8 +143,8 @@ class AutoBuyer:
                 self.automator._click_preferring_mapping(["商品关闭位置", "关闭"], "btn_close.png", required=False)
                 time.sleep(0.6)
             else:
-                # Not buying — close detail and refresh by re-entering next loop
-                self.log("价格高于阈值，关闭详情刷新…")
+                # Not buying — close detail and retry by re-entering next loop
+                self.log("价格高于阈值，关闭详情后重试…")
                 self.automator._click_preferring_mapping(["商品关闭位置", "关闭"], "btn_close.png", required=False)
                 time.sleep(0.6)
 
@@ -237,43 +237,105 @@ class MultiBuyer:
         return True
 
     def _attempt_one(self, idx: int, it: Dict[str, Any]) -> None:
-        # Enter first item
-        if not self.automator._click_preferring_mapping(["第一个商品", "第一个商品位置", "第1个商品"], None, required=True):
-            self.log(f"[{it['item_name']}] 未定位到第一个商品")
+        """After search results are visible, loop open/close details.
+
+        If condition not met, close detail and immediately reopen details
+        instead of navigating back home and re-searching.
+        Bounded retry loop to avoid deadlocks.
+        """
+        name = str(it.get("item_name", ""))
+        try:
+            threshold = int(it.get("price_threshold", 0))
+            target_total = int(it.get("target_total", 0))
+            max_per_order = int(it.get("max_per_order", 120))
+        except Exception:
+            self.log(f"[{name}] 配置无效（阈值/目标/每单），跳过。")
             return
 
-        price = read_lowest_price_from_config(mapping_path="key_mapping.json", debug=False)
-        if price is None:
-            self.log(f"[{it['item_name']}] 未解析到价格")
-            self.automator._click_preferring_mapping(["商品关闭位置", "关闭"], "btn_close.png", required=False)
-            time.sleep(0.4)
-            return
+        # Safety: don't spin forever if UI is abnormal
+        max_loops = 20
+        loops = 0
 
-        self.log(f"[{it['item_name']}] 读取价格: {price}")
-        if price <= int(it.get("price_threshold", 0)) and int(it.get("purchased", 0)) < int(it.get("target_total", 0)):
-            remaining = int(it.get("target_total", 0)) - int(it.get("purchased", 0))
-            qty = max(1, min(int(it.get("max_per_order", 120)), remaining))
-            # Quantity input
-            if self.automator._click_preferring_mapping(["数量输入框", "数量输入"], "input_quantity.png", required=True):
-                self.automator.type_text(str(qty), clear_first=True)
+        while not self._stop.is_set():
+            loops += 1
+            if loops > max_loops:
+                self.log(f"[{name}] 连续尝试超过 {max_loops} 次，暂停该商品。")
+                break
+
+            # Already done for this item?
+            try:
+                purchased_now = int(it.get("purchased", 0))
+            except Exception:
+                purchased_now = 0
+            if purchased_now >= target_total:
+                self.log(f"[{name}] 已达目标 {purchased_now}/{target_total}，结束该商品循环。")
+                break
+
+            # Enter first item detail
+            if not self.automator._click_preferring_mapping([
+                "第一个商品", "第一个商品位置", "第1个商品"
+            ], None, required=True):
+                self.log(f"[{name}] 未定位到第一个商品，稍后重试。")
+                if self._stop.wait(0.8):
+                    break
+                # 无法进入详情时，退出本轮，由上层重新导航
+                break
+
+            # Read price
+            price = read_lowest_price_from_config(mapping_path="key_mapping.json", debug=False)
+            if price is None:
+                self.log(f"[{name}] 未能解析价格，关闭详情后直接重试…")
+                self.automator._click_preferring_mapping(["商品关闭位置", "关闭"], "btn_close.png", required=False)
+                if self._stop.wait(0.5):
+                    break
+                # 不刷新，直接下一轮打开详情
+                continue
+
+            self.log(f"[{name}] 读取价格: {price}")
+            if price <= threshold and purchased_now < target_total:
+                # Decide quantity for this order
+                remaining = target_total - purchased_now
+                qty = max(1, min(max_per_order, remaining))
+
+                # Quantity input
+                if self.automator._click_preferring_mapping(["数量输入框", "数量输入"], "input_quantity.png", required=True):
+                    self.automator.type_text(str(qty), clear_first=True)
+                else:
+                    self.log(f"[{name}] 定位数量输入框失败，关闭详情重试…")
+                    self.automator._click_preferring_mapping(["商品关闭位置", "关闭"], "btn_close.png", required=False)
+                    if self._stop.wait(0.4):
+                        break
+                    continue
+
+                # Buy
+                if not self.automator._click_preferring_mapping(["购买按钮", "买入按钮", "提交购买"], "btn_buy.png", required=True):
+                    self.log(f"[{name}] 点击购买失败，关闭详情…")
+                    self.automator._click_preferring_mapping(["商品关闭位置", "关闭"], "btn_close.png", required=False)
+                    if self._stop.wait(0.4):
+                        break
+                    continue
+
+                if self._stop.wait(1.0):
+                    break
+
+                it["purchased"] = int(it.get("purchased", 0)) + qty
+                self.log(f"[{name}] 购买成功，累计 {it['purchased']}/{target_total}")
+                self.on_item_update(idx, dict(it))
+
+                # Close detail and continue loop if still below target
+                self.automator._click_preferring_mapping(["商品关闭位置", "关闭"], "btn_close.png", required=False)
+                if self._stop.wait(0.5):
+                    break
+                # 若未达目标，继续开启详情，避免回到首页
+                continue
             else:
-                self.log(f"[{it['item_name']}] 定位数量输入框失败")
+                # Not buying this round: close and directly reopen later (no refresh, no home)
+                self.log(f"[{name}] 价格高于阈值或已完成，关闭详情后直接重试…")
                 self.automator._click_preferring_mapping(["商品关闭位置", "关闭"], "btn_close.png", required=False)
-                return
-            # Buy
-            if not self.automator._click_preferring_mapping(["购买按钮", "买入按钮", "提交购买"], "btn_buy.png", required=True):
-                self.log(f"[{it['item_name']}] 点击购买失败")
-                self.automator._click_preferring_mapping(["商品关闭位置", "关闭"], "btn_close.png", required=False)
-                return
-            time.sleep(1.0)
-            it["purchased"] = int(it.get("purchased", 0)) + qty
-            self.log(f"[{it['item_name']}] 购买成功，累计 {it['purchased']}/{it['target_total']}")
-            self.on_item_update(idx, dict(it))
-            self.automator._click_preferring_mapping(["商品关闭位置", "关闭"], "btn_close.png", required=False)
-        else:
-            self.log(f"[{it['item_name']}] 高于阈值或已完成，刷新下一个")
-            self.automator._click_preferring_mapping(["商品关闭位置", "关闭"], "btn_close.png", required=False)
-            time.sleep(0.3)
+                if self._stop.wait(0.5):
+                    break
+                # 继续 while 循环，直接再次打开详情
+                continue
 
     def _run(self) -> None:
         while not self._stop.is_set():
