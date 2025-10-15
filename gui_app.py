@@ -666,9 +666,25 @@ class App(tk.Tk):
         ttk.Checkbutton(p3, text="自动分割", variable=self.var_lab_auto_split, command=self._lab_render).pack(side=tk.LEFT, padx=(12, 0))
         self.var_lab_refine = tk.BooleanVar(value=True)
         ttk.Checkbutton(p3, text="裁剪细读", variable=self.var_lab_refine, command=self._lab_render).pack(side=tk.LEFT)
+        # Chart mode controls (for bar-chart style images)
+        self.var_lab_chart_mode = tk.BooleanVar(value=False)
+        ttk.Checkbutton(p3, text="图表模式(条形图)", variable=self.var_lab_chart_mode, command=self._lab_render).pack(side=tk.LEFT, padx=(12, 0))
+        ttk.Label(p3, text="最大刻度").pack(side=tk.LEFT, padx=(12, 0))
+        self.var_lab_chart_max = tk.IntVar(value=100_000_000)
+        try:
+            tk.Spinbox(p3, from_=1, to=2_000_000_000, increment=1000, textvariable=self.var_lab_chart_max, width=12, command=self._lab_render).pack(side=tk.LEFT, padx=(4, 0))
+        except Exception:
+            ttk.Entry(p3, textvariable=self.var_lab_chart_max, width=12).pack(side=tk.LEFT, padx=(4, 0))
+        self.var_lab_chart_k = tk.BooleanVar(value=True)
+        ttk.Checkbutton(p3, text="K单位", variable=self.var_lab_chart_k, command=self._lab_render).pack(side=tk.LEFT, padx=(8, 0))
+        # Interference removal toggles
+        self.var_lab_rm_hbars = tk.BooleanVar(value=True)
+        self.var_lab_rm_vsep = tk.BooleanVar(value=True)
+        ttk.Checkbutton(p3, text="去横条", variable=self.var_lab_rm_hbars, command=self._lab_render).pack(side=tk.LEFT, padx=(12, 0))
+        ttk.Checkbutton(p3, text="去中线", variable=self.var_lab_rm_vsep, command=self._lab_render).pack(side=tk.LEFT)
 
         # Help text
-        tip = ttk.Label(frm, text="说明：先检测数字，再自动或按阈值分为左(价格)/右(数量)。数值越小，左侧范围越窄；越大，右侧范围越窄。",
+        tip = ttk.Label(frm, text="说明：普通模式：检测数字并按左右分割为价格/数量；图表模式：在深色条形图中，条长映射数量，条末数值为价格，支持K单位。",
                         foreground="#666")
         tip.pack(fill=tk.X, pady=(0, 4))
 
@@ -679,6 +695,24 @@ class App(tk.Tk):
         self.lab_prev.pack(padx=10, pady=10, anchor="w")
         self.lab_result = ttk.Label(frm, text="未加载")
         self.lab_result.pack(pady=(0, 4), anchor="w")
+
+        # Pairing results table (chart mode)
+        pairs_box = ttk.LabelFrame(frm, text="配对结果（自上而下）")
+        pairs_box.pack(fill=tk.X, pady=(2, 6))
+        self.pairs_tree = ttk.Treeview(pairs_box, columns=("idx", "price", "qty"), show="headings", height=6)
+        self.pairs_tree.heading("idx", text="序")
+        self.pairs_tree.heading("price", text="价格")
+        self.pairs_tree.heading("qty", text="数量")
+        self.pairs_tree.column("idx", width=40, anchor="e")
+        self.pairs_tree.column("price", width=120, anchor="e")
+        self.pairs_tree.column("qty", width=160, anchor="e")
+        self.pairs_tree.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        sbp = ttk.Scrollbar(pairs_box, orient=tk.VERTICAL, command=self.pairs_tree.yview)
+        sbp.pack(side=tk.RIGHT, fill=tk.Y)
+        self.pairs_tree.configure(yscrollcommand=sbp.set)
+        act2 = ttk.Frame(frm)
+        act2.pack(fill=tk.X)
+        ttk.Button(act2, text="复制结果", command=self._pairs_copy_to_clipboard).pack(side=tk.LEFT)
 
         # Step-by-step panel with scroll
         step_box = ttk.LabelFrame(frm, text="步骤预览（图像处理 → 候选框 → 分割 → 裁剪 → 识别）")
@@ -779,6 +813,257 @@ class App(tk.Tk):
             self.var_lab_variant.set("auto")
         self._lab_render()
 
+    # ---------- Chart-mode helpers for OCR Lab ----------
+    def _fmt_k(self, n: int) -> str:
+        try:
+            use_k = bool(self.var_lab_chart_k.get())
+        except Exception:
+            use_k = True
+        if not use_k:
+            return f"{n:,}"
+        sgn = "-" if n < 0 else ""
+        a = abs(int(n))
+        if a >= 1000:
+            val = a / 1000.0
+            if val >= 100:
+                txt = f"{val:,.0f}K"
+            else:
+                txt = f"{val:,.1f}K"
+            return sgn + txt
+        return sgn + f"{a:,}"
+
+    @staticmethod
+    def _parse_number_k(txt: str) -> int | None:
+        if not txt:
+            return None
+        s = txt.strip()
+        # keep digits, dot, comma, and K/k
+        filt = []
+        for ch in s:
+            if ch.isdigit() or ch in ".,kK":
+                filt.append(ch)
+            # Treat common lookalikes
+            elif ch in ["·", "•"]:
+                filt.append(".")
+        s2 = "".join(filt)
+        if not s2:
+            return None
+        mult = 1
+        if s2.endswith("k") or s2.endswith("K"):
+            mult = 1000
+            s2 = s2[:-1]
+        # normalize comma to dot for decimals
+        s2 = s2.replace(",", ".")
+        try:
+            val = float(s2)
+        except Exception:
+            # try to extract pure digits
+            digits = "".join(ch for ch in s2 if ch.isdigit())
+            if not digits:
+                return None
+            try:
+                val = float(digits)
+            except Exception:
+                return None
+        try:
+            return int(round(val * mult))
+        except Exception:
+            return None
+
+    def _lab_detect_chart_and_draw(self, pil_img):
+        try:
+            import numpy as _np  # type: ignore
+            import cv2 as _cv2  # type: ignore
+            import pytesseract as _pt  # type: ignore
+            from PIL import ImageDraw  # type: ignore
+        except Exception:
+            return pil_img, 0, 0, "[Chart] 缺少 OpenCV/Tesseract 依赖，无法进行条形图模式识别。"
+
+        # Parameters
+        try:
+            vmax = int(self.var_lab_chart_max.get() or 100_000_000)
+        except Exception:
+            vmax = 100_000_000
+
+        bgr = _cv2.cvtColor(_np.array(pil_img), _cv2.COLOR_RGB2BGR)
+        H, W = bgr.shape[:2]
+        bgr32 = bgr.astype(_np.float32)
+
+        # Color projection tailored for dark bg and gray bars
+        bg_bgr = _np.array([8, 7, 7], dtype=_np.float32)
+        bar_bgr = _np.array([96, 104, 103], dtype=_np.float32)
+        V = bar_bgr - bg_bgr
+        Vn = float(_np.dot(V, V)) or 1.0
+        proj = _np.sum((bgr32 - bg_bgr[None, None, :]) * V[None, None, :], axis=2) / Vn
+        proj = _np.clip(proj, 0.0, 1.0)
+        proj8 = (proj * 255.0).astype(_np.uint8)
+        try:
+            _, th = _cv2.threshold(proj8, 0, 255, _cv2.THRESH_BINARY + _cv2.THRESH_OTSU)
+        except Exception:
+            th = (proj8 > 32).astype(_np.uint8) * 255
+
+        # Morph to bridge bars; keep dashed gridlines thin so they won't form big contours
+        k = _cv2.getStructuringElement(_cv2.MORPH_RECT, (15, 3))
+        x = _cv2.morphologyEx(th, _cv2.MORPH_CLOSE, k, iterations=1)
+        k2 = _cv2.getStructuringElement(_cv2.MORPH_RECT, (3, 3))
+        x = _cv2.morphologyEx(x, _cv2.MORPH_OPEN, k2, iterations=1)
+
+        # Optional: remove wide thin horizontal bars (进度条)
+        try:
+            if bool(getattr(self, "var_lab_rm_hbars", tk.BooleanVar(value=True)).get()):
+                cnts_tmp, _ = _cv2.findContours((x > 0).astype(_np.uint8), _cv2.RETR_EXTERNAL, _cv2.CHAIN_APPROX_SIMPLE)
+                for c in cnts_tmp:
+                    rx, ry, rw, rh = _cv2.boundingRect(c)
+                    if rw >= max(60, W // 6) and rh > 0 and (rw / max(1, rh)) >= 8.0:
+                        _cv2.rectangle(x, (rx, ry), (rx + rw, ry + rh), color=0, thickness=-1)
+        except Exception:
+            pass
+
+        # Optional: remove middle vertical separator
+        try:
+            if bool(getattr(self, "var_lab_rm_vsep", tk.BooleanVar(value=True)).get()):
+                colsum = x.sum(axis=0).astype(_np.float32) / 255.0
+                xc = int(colsum.argmax()) if colsum.size else -1
+                ratio = float(colsum[xc] / max(1.0, H)) if xc >= 0 else 0.0
+                if 0 <= xc < W and 0.35 * W <= xc <= 0.65 * W and ratio >= 0.55:
+                    left = max(0, xc - 3); right = min(W, xc + 4)
+                    x[:, left:right] = 0
+        except Exception:
+            pass
+
+        try:
+            cnts, _ = _cv2.findContours((x > 0).astype(_np.uint8), _cv2.RETR_EXTERNAL, _cv2.CHAIN_APPROX_SIMPLE)
+        except ValueError:
+            _tmp, cnts, _ = _cv2.findContours((x > 0).astype(_np.uint8), _cv2.RETR_EXTERNAL, _cv2.CHAIN_APPROX_SIMPLE)  # type: ignore
+
+        cand = []  # list of (y, x, w, h)
+        for c in cnts:
+            rx, ry, rw, rh = _cv2.boundingRect(c)
+            ar = rw / max(1.0, float(rh))
+            if rw >= max(60, int(W * 0.15)) and 6 <= rh <= int(H * 0.12) and ar >= 4.0:
+                cand.append((ry, rx, rw, rh))
+        # merge overlapping/stacked candidates by proximity of Y and overlap in X
+        cand.sort(key=lambda t: t[0])
+        bars = []
+        for (ry, rx, rw, rh) in cand:
+            if not bars:
+                bars.append([ry, rx, rx + rw, ry + rh])
+            else:
+                y_t, x_l, x_r, y_b = bars[-1]
+                if abs(ry - y_t) <= 4 and not (rx > x_r or (rx + rw) < x_l):
+                    bars[-1][0] = min(y_t, ry)
+                    bars[-1][1] = min(x_l, rx)
+                    bars[-1][2] = max(x_r, rx + rw)
+                    bars[-1][3] = max(y_b, ry + rh)
+                else:
+                    bars.append([ry, rx, rx + rw, ry + rh])
+
+        if not bars:
+            return self._lab_detect_and_draw(pil_img)  # fallback to generic path
+
+        # Normalize geometry
+        min_x = min(b[1] for b in bars)
+        max_r = max(b[2] for b in bars)
+        chart_w = max(1, max_r - min_x)
+
+        # OCR prices near bar ends
+        results = []  # (price, qty, (bar_x1,bar_y1,bar_x2,bar_y2), (px1,py1,px2,py2))
+        for (y_t, x_l, x_r, y_b) in bars:
+            y_mid = int((y_t + y_b) / 2)
+            h = max(1, y_b - y_t)
+            # ROI to the right of bar end
+            x1 = min(W - 1, x_r + 2)
+            x2 = min(W, x_r + max(40, int(W * 0.25)))
+            y1 = max(0, int(y_mid - h * 0.7))
+            y2 = min(H, int(y_mid + h * 0.7))
+            crop = pil_img.crop((x1, y1, x2, y2))
+            price_val = 0
+            price_box = None
+            try:
+                for psm in (7, 6, 13):
+                    cfg = f"--oem 3 --psm {psm} -c tessedit_char_whitelist=0123456789kK.,"
+                    d = _pt.image_to_data(crop, config=cfg, output_type=_pt.Output.DICT)
+                    n = len(d.get("text", []))
+                    for i in range(n):
+                        s = d.get("text", [""])[i] or ""
+                        v = self._parse_number_k(s)
+                        if v is not None:
+                            if int(v) >= int(price_val or 0):
+                                price_val = int(v)
+                                try:
+                                    l = int(d.get("left", [0])[i]); t = int(d.get("top", [0])[i])
+                                    w = int(d.get("width", [0])[i]); h = int(d.get("height", [0])[i])
+                                    price_box = (x1 + l, y1 + t, x1 + l + w, y1 + t + h)
+                                except Exception:
+                                    price_box = (x1, y1, x2, y2)
+                # derive qty from bar length
+                L = max(0, x_r - min_x)
+                qty_val = int(round(vmax * (L / float(chart_w))))
+                if price_box is None:
+                    price_box = (x1, y1, x2, y2)
+                results.append((int(price_val or 0), int(qty_val or 0), (x_l, y_t, x_r, y_b), price_box))
+            except Exception:
+                continue
+
+        # choose min price
+        price, qty = 0, 0
+        sel_bar = None
+        sel_price_box = None
+        if results:
+            results.sort(key=lambda t: (t[0] if t[0] > 0 else 1e18, -t[1]))
+            price, qty, sel_bar, sel_price_box = results[0]
+
+        # Save pairs for UI table (top-to-bottom order)
+        try:
+            results_sorted = sorted(results, key=lambda t: (t[2][1] + t[2][3]) / 2.0)
+            self._lab_pairs = [(i + 1, r[0], r[1]) for i, r in enumerate(results_sorted)]
+        except Exception:
+            self._lab_pairs = []
+
+        # Draw minimalist overlay
+        out = pil_img.copy()
+        dr = ImageDraw.Draw(out)
+        barc = (93, 100, 107)
+        grid = (42, 45, 49)
+        textc = (169, 176, 184)
+        # row separators
+        for (y_t, x_l, x_r, y_b) in bars:
+            yy = int((y_t + y_b) / 2)
+            try:
+                dr.line([(min_x, yy), (max_r, yy)], fill=grid, width=1)
+            except Exception:
+                pass
+        for (_, _, (x_l, y_t, x_r, y_b), _) in results:
+            dr.rectangle([x_l, y_t, x_r, y_b], outline=barc, width=1)
+        # candidate price boxes (thin, de-emphasized)
+        candc = (120, 180, 210)
+        for (_pval, _q, _bar, pbox) in results:
+            if pbox:
+                x1, y1, x2, y2 = pbox
+                dr.rectangle([x1, y1, x2, y2], outline=candc, width=1)
+        # selected price box (distinct color, 1px)
+        selc = (0, 213, 255)
+        if sel_price_box:
+            x1, y1, x2, y2 = sel_price_box
+            dr.rectangle([x1, y1, x2, y2], outline=selc, width=1)
+        # labels
+        for (pval, _q, (x_l, y_t, x_r, y_b), _) in results:
+            lbl = self._fmt_k(int(pval or 0))
+            try:
+                dr.text((x_r + 4, int((y_t + y_b) / 2) - 7), lbl, fill=textc)
+            except Exception:
+                pass
+
+        diag = []
+        diag.append(f"[Chart] bars={len(bars)} vmax={vmax} chart_w={chart_w}")
+        show = results[:6]
+        for (pv, qv, (x_l, y_t, x_r, y_b), pbox) in show:
+            pb = f"({pbox[0]},{pbox[1]},{pbox[2]-pbox[0]},{pbox[3]-pbox[1]})" if pbox else "()"
+            diag.append(f"  price={pv} qty={qv} bar=({x_l},{y_t},{x_r-x_l},{y_b-y_t}) price_box={pb}")
+        return out, int(price or 0), int(qty or 0), "\n".join(diag)
+
+    # (Tab4 UI removed per需求)
+
     def _lab_render(self) -> None:
         # Update split label & ensure formatting
         try:
@@ -798,7 +1083,11 @@ class App(tk.Tk):
         else:
             name, pil = next(((n, p) for (n, p) in self._lab_variants if n == variant), self._lab_variants[0])
 
-        img, price, qty, diag = self._lab_detect_and_draw(pil)
+        # Chart mode branch
+        if bool(getattr(self, "var_lab_chart_mode", tk.BooleanVar(value=False)).get()):
+            img, price, qty, diag = self._lab_detect_chart_and_draw(pil)
+        else:
+            img, price, qty, diag = self._lab_detect_and_draw(pil)
         self._lab_cur_img = img
         if price and qty:
             status, color = "正常", "#0a7e07"
@@ -820,13 +1109,25 @@ class App(tk.Tk):
             self.lab_diag.configure(state=tk.DISABLED)
         except Exception:
             pass
+        # Update pairs table (chart mode only)
+        try:
+            for iid in self.pairs_tree.get_children(""):
+                self.pairs_tree.delete(iid)
+            if bool(getattr(self, "var_lab_chart_mode", tk.BooleanVar(value=False)).get()):
+                pairs = getattr(self, "_lab_pairs", []) or []
+                for (idx, p, q) in pairs:
+                    self.pairs_tree.insert("", tk.END, values=(idx, p, q))
+        except Exception:
+            pass
         # Show
         self._lab_show_image(img)
-        # Also render step-by-step panel and crop previews
+        # Also render step-by-step panel
         try:
-            self._lab_render_steps(raw_pil=self._lab_pil or pil, variant_pil=pil)
+            if bool(getattr(self, "var_lab_chart_mode", tk.BooleanVar(value=False)).get()):
+                self._lab_render_steps_chart(raw_pil=self._lab_pil or pil)
+            else:
+                self._lab_render_steps(raw_pil=self._lab_pil or pil, variant_pil=pil)
         except Exception:
-            # steps are auxiliary; ignore rendering errors
             pass
 
     def _lab_pick_best_variant(self):
@@ -1041,6 +1342,25 @@ class App(tk.Tk):
             messagebox.showinfo("保存", f"已保存: {out}")
         except Exception as e:
             messagebox.showerror("保存", f"失败: {e}")
+
+    def _pairs_copy_to_clipboard(self) -> None:
+        try:
+            pairs = getattr(self, "_lab_pairs", []) or []
+            if not pairs:
+                return
+            lines = ["序\t价格\t数量"]
+            for (idx, p, q) in pairs:
+                lines.append(f"{idx}\t{p}\t{q}")
+            txt = "\n".join(lines)
+            self.clipboard_clear()
+            self.clipboard_append(txt)
+            try:
+                self.update()
+            except Exception:
+                pass
+            messagebox.showinfo("复制", "已复制到剪贴板。")
+        except Exception:
+            pass
 
     # ---------- Lab: step-by-step rendering & saving ----------
     def _lab_render_steps(self, *, raw_pil, variant_pil):
@@ -1359,7 +1679,151 @@ class App(tk.Tk):
         ts = time.strftime("%Y%m%d_%H%M%S")
         out_dir = os.path.join("images", f"proc_{ts}")
         os.makedirs(out_dir, exist_ok=True)
-        # Reproduce steps similar to _lab_render_steps and dump to files
+        # Branch by mode
+        if bool(getattr(self, "var_lab_chart_mode", tk.BooleanVar(value=False)).get()):
+            # Chart-mode dump
+            dumps: list[tuple[str, Any]] = []
+            # 01 原图
+            dumps.append(("step_01_raw.png", pil.copy()))
+            # 02 颜色投影
+            bg_bgr = _np.array([8, 7, 7], dtype=_np.float32)
+            bar_bgr = _np.array([96, 104, 103], dtype=_np.float32)
+            bgr = _cv2.cvtColor(_np.array(pil), _cv2.COLOR_RGB2BGR)
+            V = bar_bgr - bg_bgr
+            Vn = float(_np.dot(V, V)) or 1.0
+            proj = _np.sum((bgr.astype(_np.float32) - bg_bgr[None, None, :]) * V[None, None, :], axis=2) / Vn
+            proj = _np.clip(proj, 0.0, 1.0)
+            proj8 = (proj * 255.0).astype(_np.uint8)
+            dumps.append(("step_02_projection.png", self._pil_from_cv_gray(proj8)))
+            # 03 阈值
+            try:
+                _, th = _cv2.threshold(proj8, 0, 255, _cv2.THRESH_BINARY + _cv2.THRESH_OTSU)
+            except Exception:
+                th = (proj8 > 32).astype(_np.uint8) * 255
+            dumps.append(("step_03_otsu.png", self._pil_from_cv_gray(th)))
+            # 04 形态学
+            k = _cv2.getStructuringElement(_cv2.MORPH_RECT, (15, 3))
+            x = _cv2.morphologyEx(th, _cv2.MORPH_CLOSE, k, iterations=1)
+            k2 = _cv2.getStructuringElement(_cv2.MORPH_RECT, (3, 3))
+            x = _cv2.morphologyEx(x, _cv2.MORPH_OPEN, k2, iterations=1)
+            dumps.append(("step_04_morph.png", self._pil_from_cv_gray(x)))
+            # 05 去横条
+            try:
+                if bool(getattr(self, "var_lab_rm_hbars", tk.BooleanVar(value=True)).get()):
+                    x2b = x.copy(); H,W = x.shape[:2]
+                    cnts_tmp, _ = _cv2.findContours((x2b > 0).astype(_np.uint8), _cv2.RETR_EXTERNAL, _cv2.CHAIN_APPROX_SIMPLE)
+                    for c in cnts_tmp:
+                        rx, ry, rw, rh = _cv2.boundingRect(c)
+                        if rw >= max(60, W // 6) and rh > 0 and (rw / max(1, rh)) >= 8.0:
+                            _cv2.rectangle(x2b, (rx, ry), (rx + rw, ry + rh), color=0, thickness=-1)
+                    x = x2b
+            except Exception:
+                pass
+            dumps.append(("step_05_rm_hbar.png", self._pil_from_cv_gray(x)))
+            # 06 去中线
+            try:
+                if bool(getattr(self, "var_lab_rm_vsep", tk.BooleanVar(value=True)).get()):
+                    H,W = x.shape[:2]
+                    colsum = x.sum(axis=0).astype(_np.float32) / 255.0
+                    xc = int(colsum.argmax()) if colsum.size else -1
+                    ratio = float(colsum[xc] / max(1.0, H)) if xc >= 0 else 0.0
+                    if 0 <= xc < W and 0.35 * W <= xc <= 0.65 * W and ratio >= 0.55:
+                        left = max(0, xc - 3); right = min(W, xc + 4)
+                        x[:, left:right] = 0
+            except Exception:
+                pass
+            dumps.append(("step_06_rm_vsep.png", self._pil_from_cv_gray(x)))
+            # 07 候选条形 + 候选价格框 + 选择
+            try:
+                import pytesseract as _pt2  # type: ignore
+                from PIL import ImageDraw as _ID  # type: ignore
+                H,W = x.shape[:2]
+                cnts, _ = _cv2.findContours((x > 0).astype(_np.uint8), _cv2.RETR_EXTERNAL, _cv2.CHAIN_APPROX_SIMPLE)
+                bars = []
+                for c in cnts:
+                    rx, ry, rw, rh = _cv2.boundingRect(c)
+                    ar = rw / max(1.0, float(rh))
+                    if rw >= max(60, int(W * 0.15)) and 6 <= rh <= int(H * 0.12) and ar >= 4.0:
+                        bars.append((ry, rx, rx + rw, ry + rh))
+                bars.sort(key=lambda t: t[0])
+                # Draw candidate bars image
+                im_bars = pil.copy(); dr = _ID.Draw(im_bars)
+                for (y1,x1,x2,y2) in [(b[0], b[1], b[2], b[3]) for b in bars]:
+                    dr.rectangle([x1,y1,x2,y2], outline=(93,100,107), width=1)
+                dumps.append(("step_07_bars.png", im_bars))
+                # OCR candidates and select
+                try:
+                    vmax = int(self.var_lab_chart_max.get() or 100_000_000)
+                except Exception:
+                    vmax = 100_000_000
+                min_x = min(b[1] for b in bars) if bars else 0
+                chart_w = max(1, max((b[2] for b in bars), default=0) - min_x)
+                results = []
+                for (y_t, x_l, x_r, y_b) in bars:
+                    y_mid = int((y_t + y_b) / 2)
+                    h = max(1, y_b - y_t)
+                    rx1 = min(W - 1, x_r + 2); rx2 = min(W, x_r + max(40, int(W * 0.25)))
+                    ry1 = max(0, int(y_mid - h * 0.7)); ry2 = min(H, int(y_mid + h * 0.7))
+                    crop = pil.crop((rx1, ry1, rx2, ry2))
+                    price_val = 0; price_box = None
+                    for psm in (7,6,13):
+                        cfg = f"--oem 3 --psm {psm} -c tessedit_char_whitelist=0123456789kK.,"
+                        try:
+                            d = _pt2.image_to_data(crop, config=cfg, output_type=_pt2.Output.DICT)
+                        except Exception:
+                            continue
+                        n = len(d.get("text", []))
+                        for i in range(n):
+                            s = d.get("text", [""])[i] or ""
+                            v = self._parse_number_k(s)
+                            if v is None:
+                                continue
+                            v = int(v)
+                            if v >= int(price_val or 0):
+                                price_val = v
+                                try:
+                                    l = int(d.get("left", [0])[i]); t = int(d.get("top", [0])[i])
+                                    w = int(d.get("width", [0])[i]); h = int(d.get("height", [0])[i])
+                                    price_box = (rx1 + l, ry1 + t, rx1 + l + w, ry1 + t + h)
+                                except Exception:
+                                    price_box = (rx1, ry1, rx2, ry2)
+                    L = max(0, x_r - min_x)
+                    qty_val = int(round(vmax * (L / float(chart_w)))) if chart_w > 0 else 0
+                    if price_box is None:
+                        price_box = (rx1, ry1, rx2, ry2)
+                    results.append((int(price_val or 0), int(qty_val or 0), (x_l, y_t, x_r, y_b), price_box))
+                # draw candidate price boxes
+                im_cand = im_bars.copy(); dr = _ID.Draw(im_cand)
+                for (_pv,_q,_bar,px) in results:
+                    dr.rectangle([px[0],px[1],px[2],px[3]], outline=(120,180,210), width=1)
+                dumps.append(("step_08_price_candidates.png", im_cand))
+                # selected
+                if results:
+                    results.sort(key=lambda t: (t[0] if t[0] > 0 else 1e18, -t[1]))
+                    pv, qv, bar, px = results[0]
+                    im_sel = im_cand.copy(); dr = _ID.Draw(im_sel)
+                    dr.rectangle([px[0],px[1],px[2],px[3]], outline=(0,213,255), width=1)
+                    dumps.append(("step_09_selected_price.png", im_sel))
+                    # final annotated
+                    final = im_sel.copy(); dr = _ID.Draw(final)
+                    dr.text((px[2] + 4, int((px[1] + px[3]) / 2) - 7), self._fmt_k(pv), fill=(169,176,184))
+                    dumps.append(("step_10_final.png", final))
+            except Exception:
+                pass
+
+            # Write
+            ok = 0
+            for name, im in dumps:
+                try:
+                    p = os.path.join(out_dir, name)
+                    im.save(p)
+                    ok += 1
+                except Exception:
+                    continue
+            messagebox.showinfo("保存流程", f"已保存 {ok} 步到 {out_dir}")
+            return
+
+        # Reproduce steps similar to _lab_render_steps and dump to files (normal mode)
         # For brevity, we reuse the same code path but capture intermediate images
         dumps: list[tuple[str, Any]] = []
         try:
@@ -1460,6 +1924,210 @@ class App(tk.Tk):
             except Exception:
                 continue
         messagebox.showinfo("保存流程", f"已保存 {ok} 步到 {out_dir}")
+
+    def _lab_render_steps_chart(self, *, raw_pil):
+        try:
+            from PIL import Image, ImageTk, ImageDraw  # type: ignore
+            import numpy as _np  # type: ignore
+            import cv2 as _cv2  # type: ignore
+            import pytesseract as _pt  # type: ignore
+        except Exception:
+            # Minimal fallback: just show raw
+            for w in self.lab_steps_inner.winfo_children():
+                w.destroy()
+            self._lab_step_tkimgs.clear()
+            lbl = ttk.Label(self.lab_steps_inner, text="缺少 OpenCV/Tesseract，无法展示图表模式步骤。")
+            lbl.grid(row=0, column=0, sticky="w", padx=8, pady=6)
+            imgtk = ImageTk.PhotoImage(raw_pil)
+            self._lab_step_tkimgs.append(imgtk)
+            ttk.Label(self.lab_steps_inner, image=imgtk).grid(row=1, column=0, sticky="w", padx=8, pady=4)
+            return
+
+        # Clear container
+        for w in self.lab_steps_inner.winfo_children():
+            w.destroy()
+        self._lab_step_tkimgs.clear()
+
+        def _to_pil_gray(arr):
+            try:
+                return Image.fromarray(arr)
+            except Exception:
+                return raw_pil
+        def _draw_rects(base, rects, color, w=1):
+            im = base.copy()
+            dr = ImageDraw.Draw(im)
+            for (x1, y1, x2, y2) in rects:
+                try:
+                    dr.rectangle([x1, y1, x2, y2], outline=color, width=w)
+                except Exception:
+                    pass
+            return im
+
+        steps: list[tuple[str, Any]] = []
+        steps.append(("原图", raw_pil.copy()))
+
+        # 颜色投影
+        bgr = _cv2.cvtColor(_np.array(raw_pil), _cv2.COLOR_RGB2BGR)
+        H, W = bgr.shape[:2]
+        bg_bgr = _np.array([8, 7, 7], dtype=_np.float32)
+        bar_bgr = _np.array([96, 104, 103], dtype=_np.float32)
+        V = bar_bgr - bg_bgr
+        Vn = float(_np.dot(V, V)) or 1.0
+        proj = _np.sum((bgr.astype(_np.float32) - bg_bgr[None, None, :]) * V[None, None, :], axis=2) / Vn
+        proj = _np.clip(proj, 0.0, 1.0)
+        proj8 = (proj * 255.0).astype(_np.uint8)
+        steps.append(("颜色投影", _to_pil_gray(proj8)))
+
+        # 阈值
+        try:
+            _, th = _cv2.threshold(proj8, 0, 255, _cv2.THRESH_BINARY + _cv2.THRESH_OTSU)
+        except Exception:
+            th = (proj8 > 32).astype(_np.uint8) * 255
+        steps.append(("阈值(Otsu)", _to_pil_gray(th)))
+
+        # 形态学(闭->开)
+        k = _cv2.getStructuringElement(_cv2.MORPH_RECT, (15, 3))
+        x = _cv2.morphologyEx(th, _cv2.MORPH_CLOSE, k, iterations=1)
+        k2 = _cv2.getStructuringElement(_cv2.MORPH_RECT, (3, 3))
+        x = _cv2.morphologyEx(x, _cv2.MORPH_OPEN, k2, iterations=1)
+        steps.append(("形态学(闭→开)", _to_pil_gray(x)))
+
+        # 去横条
+        if bool(getattr(self, "var_lab_rm_hbars", tk.BooleanVar(value=True)).get()):
+            try:
+                x2b = x.copy()
+                cnts_tmp, _ = _cv2.findContours((x2b > 0).astype(_np.uint8), _cv2.RETR_EXTERNAL, _cv2.CHAIN_APPROX_SIMPLE)
+                for c in cnts_tmp:
+                    rx, ry, rw, rh = _cv2.boundingRect(c)
+                    if rw >= max(60, W // 6) and rh > 0 and (rw / max(1, rh)) >= 8.0:
+                        _cv2.rectangle(x2b, (rx, ry), (rx + rw, ry + rh), color=0, thickness=-1)
+                x = x2b
+            except Exception:
+                pass
+        steps.append(("去横条", _to_pil_gray(x)))
+
+        # 去中线
+        if bool(getattr(self, "var_lab_rm_vsep", tk.BooleanVar(value=True)).get()):
+            try:
+                colsum = x.sum(axis=0).astype(_np.float32) / 255.0
+                xc = int(colsum.argmax()) if colsum.size else -1
+                ratio = float(colsum[xc] / max(1.0, H)) if xc >= 0 else 0.0
+                if 0 <= xc < W and 0.35 * W <= xc <= 0.65 * W and ratio >= 0.55:
+                    left = max(0, xc - 3); right = min(W, xc + 4)
+                    x[:, left:right] = 0
+            except Exception:
+                pass
+        steps.append(("去中线", _to_pil_gray(x)))
+
+        # 候选条形
+        cnts, _ = _cv2.findContours((x > 0).astype(_np.uint8), _cv2.RETR_EXTERNAL, _cv2.CHAIN_APPROX_SIMPLE)
+        cand = []
+        for c in cnts:
+            rx, ry, rw, rh = _cv2.boundingRect(c)
+            ar = rw / max(1.0, float(rh))
+            if rw >= max(60, int(W * 0.15)) and 6 <= rh <= int(H * 0.12) and ar >= 4.0:
+                cand.append((ry, rx, rx + rw, ry + rh))
+        cand.sort(key=lambda t: t[0])
+        steps.append(("候选条形(1px)", _draw_rects(raw_pil, cand, (93, 100, 107), 1)))
+
+        # OCR候选与选择
+        try:
+            try:
+                vmax = int(self.var_lab_chart_max.get() or 100_000_000)
+            except Exception:
+                vmax = 100_000_000
+            min_x = min(b[1] for b in cand) if cand else 0
+            chart_w = max(1, max((b[2] for b in cand), default=0) - min_x)
+
+            results = []  # (price, qty, bar_rect, price_box)
+            for (y_t, x_l, x_r, y_b) in cand:
+                y_mid = int((y_t + y_b) / 2)
+                h = max(1, y_b - y_t)
+                rx1 = min(W - 1, x_r + 2)
+                rx2 = min(W, x_r + max(40, int(W * 0.25)))
+                ry1 = max(0, int(y_mid - h * 0.7))
+                ry2 = min(H, int(y_mid + h * 0.7))
+                crop = raw_pil.crop((rx1, ry1, rx2, ry2))
+                price_val = 0
+                price_box = None
+                for psm in (7, 6, 13):
+                    cfg = f"--oem 3 --psm {psm} -c tessedit_char_whitelist=0123456789kK.,"
+                    try:
+                        d = _pt.image_to_data(crop, config=cfg, output_type=_pt.Output.DICT)
+                    except Exception:
+                        continue
+                    n = len(d.get("text", []))
+                    for i in range(n):
+                        s = d.get("text", [""])[i] or ""
+                        v = self._parse_number_k(s)
+                        if v is None:
+                            continue
+                        v = int(v)
+                        if v >= int(price_val or 0):
+                            price_val = v
+                            try:
+                                l = int(d.get("left", [0])[i]); t = int(d.get("top", [0])[i])
+                                w = int(d.get("width", [0])[i]); h = int(d.get("height", [0])[i])
+                                price_box = (rx1 + l, ry1 + t, rx1 + l + w, ry1 + t + h)
+                            except Exception:
+                                price_box = (rx1, ry1, rx2, ry2)
+                L = max(0, x_r - min_x)
+                qty_val = int(round(vmax * (L / float(chart_w)))) if chart_w > 0 else 0
+                if price_box is None:
+                    price_box = (rx1, ry1, rx2, ry2)
+                results.append((int(price_val or 0), int(qty_val or 0), (x_l, y_t, x_r, y_b), price_box))
+
+            # 可视化：候选价格框（淡色），最终选择（高亮1px）
+            candc = (120, 180, 210)
+            selc = (0, 213, 255)
+            img_cand = _draw_rects(raw_pil, [p for (_a,_b,_c,p) in results], candc, 1)
+            steps.append(("候选价格框(1px)", img_cand))
+            if results:
+                results.sort(key=lambda t: (t[0] if t[0] > 0 else 1e18, -t[1]))
+                _, _, sel_bar, sel_pbox = results[0]
+                img_sel = _draw_rects(img_cand, [sel_pbox], selc, 1)
+                steps.append(("选择价格(1px高亮)", img_sel))
+            # 最终图（含文本）
+            if results:
+                try:
+                    from PIL import ImageDraw as _ID  # type: ignore
+                    final = raw_pil.copy()
+                    dr = _ID.Draw(final)
+                    for (_pv, _qv, (x1,y1,x2,y2), _px) in results:
+                        dr.rectangle([x1,y1,x2,y2], outline=(93,100,107), width=1)
+                    pv, qv, _bar, px = results[0]
+                    dr.rectangle([px[0],px[1],px[2],px[3]], outline=selc, width=1)
+                    dr.text((px[2] + 4, int((px[1] + px[3]) / 2) - 7), self._fmt_k(pv), fill=(169,176,184))
+                    # 结果文案
+                    W0,H0 = final.size
+                    try:
+                        ext = Image.new("RGB", (W0, H0 + 28), (12,12,12))
+                        ext.paste(final, (0,0))
+                        final = ext
+                        dr = _ID.Draw(final)
+                    except Exception:
+                        pass
+                    dr.text((6, final.size[1]-22), f"价格:{pv} 数量:{qv}", fill=(230,230,230))
+                    steps.append(("最终结果", final))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # Render
+        r = 0
+        for name, imgp in steps:
+            ttk.Label(self.lab_steps_inner, text=name).grid(row=r, column=0, sticky="w", padx=8)
+            try:
+                imgtk = ImageTk.PhotoImage(imgp)
+            except Exception:
+                r += 1
+                continue
+            lbl = ttk.Label(self.lab_steps_inner, image=imgtk)
+            lbl.grid(row=r + 1, column=0, sticky="w", padx=8, pady=(0, 6))
+            lbl.image = imgtk
+            self._lab_step_tkimgs.append(imgtk)
+            r += 2
 
     @staticmethod
     def _pil_from_cv_gray(arr):
