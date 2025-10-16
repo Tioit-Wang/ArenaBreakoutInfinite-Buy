@@ -204,7 +204,7 @@ class _RegionSelector:
 
 
 class TemplateRow(ttk.Frame):
-    def __init__(self, master, name: str, data: Dict[str, Any], on_test, on_capture, on_preview):
+    def __init__(self, master, name: str, data: Dict[str, Any], on_test, on_capture, on_preview, on_change=None):
         super().__init__(master)
         self.name = name
         self.var_path = tk.StringVar(value=data.get("path", ""))
@@ -212,29 +212,54 @@ class TemplateRow(ttk.Frame):
         self.on_test = on_test
         self.on_capture = on_capture
         self.on_preview = on_preview
+        self.on_change = on_change
 
         ttk.Label(self, text=name, width=12).grid(row=0, column=0, sticky="w", padx=4, pady=2)
 
-        # 路径不再展示具体文件路径，仅显示是否已设置
-        self.path_status = ttk.Label(self, text=("未设置" if not self.var_path.get().strip() else "已设置"), width=8)
+        # 路径状态：未设置 / 已设置 / 缺失
+        self.path_status = ttk.Label(self, text="", width=8)
         self.path_status.grid(row=0, column=1, sticky="w", padx=4)
-        # 当路径变量变化时，更新状态文案
+        # 当路径变量变化时，更新状态文案（并检测文件是否存在）
+        def _update_path_status() -> None:
+            p = self.get_path()
+            if not p:
+                self.path_status.configure(text="未设置")
+            elif os.path.exists(p):
+                self.path_status.configure(text="已设置")
+            else:
+                self.path_status.configure(text="缺失")
+        def _on_path_change(*_):
+            _update_path_status()
+            if self.on_change:
+                try:
+                    self.on_change()
+                except Exception:
+                    pass
         try:
-            self.var_path.trace_add("write", lambda *_: self.path_status.configure(
-                text=("未设置" if not self.get_path() else "已设置")
-            ))
+            self.var_path.trace_add("write", _on_path_change)
         except Exception:
             pass
+        _update_path_status()
 
         ttk.Label(self, text="置信度").grid(row=0, column=3, padx=4)
-        s = ttk.Scale(self, from_=0.5, to=0.99, orient=tk.HORIZONTAL, variable=self.var_conf)
-        s.grid(row=0, column=4, sticky="we", padx=4)
+        # 数值输入框 0-1，步长 0.01
+        try:
+            sp = ttk.Spinbox(self, from_=0.0, to=1.0, increment=0.01, textvariable=self.var_conf, width=6, format="%.2f")
+        except Exception:
+            sp = tk.Spinbox(self, from_=0.0, to=1.0, increment=0.01, textvariable=self.var_conf, width=6)
+        sp.grid(row=0, column=4, sticky="w", padx=4)
+        # autosave on change
+        if self.on_change:
+            try:
+                self.var_conf.trace_add("write", lambda *_: self.on_change())
+            except Exception:
+                pass
         ttk.Button(self, text="测试识别", command=lambda: self.on_test(self.name, self.get_path(), self.get_confidence())).grid(row=0, column=5, padx=4)
         ttk.Button(self, text="截图", command=lambda: self.on_capture(self)).grid(row=0, column=6, padx=4)
         ttk.Button(self, text="预览", command=lambda: self.on_preview(self.get_path(), f"预览 - {self.name}")).grid(row=0, column=7, padx=4)
 
-        # 仅让置信度滑条所在列可拉伸
-        self.columnconfigure(4, weight=1)
+        # 保持布局稳定
+        self.columnconfigure(4, weight=0)
 
     def get_path(self) -> str:
         return self.var_path.get().strip()
@@ -251,6 +276,9 @@ class App(tk.Tk):
         super().__init__()
         self.title("基于图像识别的自动购买助手")
         self.geometry("980x680")
+        # Autosave scheduler
+        self._autosave_after_id: str | None = None
+        self._autosave_delay_ms: int = 300
 
         # Config
         ensure_default_config("config.json")
@@ -284,6 +312,27 @@ class App(tk.Tk):
             "商品关闭位置": "btn_close",
             "刷新按钮": "btn_refresh",
         }
+
+    # ---------- Autosave ----------
+    def _schedule_autosave(self) -> None:
+        try:
+            if self._autosave_after_id is not None:
+                try:
+                    self.after_cancel(self._autosave_after_id)
+                except Exception:
+                    pass
+                self._autosave_after_id = None
+            self._autosave_after_id = self.after(self._autosave_delay_ms, self._do_autosave)
+        except Exception:
+            # Fallback to immediate save if scheduling fails
+            self._do_autosave()
+
+    def _do_autosave(self) -> None:
+        self._autosave_after_id = None
+        try:
+            self._save_and_sync(silent=True)
+        except Exception:
+            pass
 
     # ---------- Tab1 ----------
     def _build_tab1(self) -> None:
@@ -332,8 +381,8 @@ class App(tk.Tk):
                     messagebox.showerror("截图", f"保存失败: {e}")
                     return
                 row.var_path.set(path)
-                # Persist immediately
-                self._save_and_sync(silent=True)
+                # Autosave (debounced)
+                self._schedule_autosave()
                 # Modal preview
                 self._preview_image(path, f"预览 - {row.name}")
 
@@ -342,12 +391,124 @@ class App(tk.Tk):
         # render rows
         rowc = 0
         for key, data in self.cfg.get("templates", {}).items():
-            r = TemplateRow(box_tpl, key, data, on_test=test_match, on_capture=capture_into_row, on_preview=self._preview_image)
+            r = TemplateRow(
+                box_tpl,
+                key,
+                data,
+                on_test=test_match,
+                on_capture=capture_into_row,
+                on_preview=self._preview_image,
+                on_change=self._schedule_autosave,
+            )
             r.grid(row=rowc, column=0, sticky="we", padx=6, pady=2)
             self.template_rows[key] = r
             rowc += 1
 
-        # Points / Rects
+        # 价格区域模板与ROI
+        box_roi = ttk.LabelFrame(outer, text="价格区域模板与ROI")
+        box_roi.pack(fill=tk.X, padx=8, pady=8)
+
+        roi_cfg = self.cfg.get("price_roi", {}) if isinstance(self.cfg.get("price_roi"), dict) else {}
+        self.var_roi_top_tpl = tk.StringVar(value=str(roi_cfg.get("top_template", os.path.join(".", "buy_data_top.png"))))
+        self.var_roi_top_thr = tk.DoubleVar(value=float(roi_cfg.get("top_threshold", 0.55)))
+        self.var_roi_btm_tpl = tk.StringVar(value=str(roi_cfg.get("bottom_template", os.path.join(".", "buy_data_btm.png"))))
+        self.var_roi_btm_thr = tk.DoubleVar(value=float(roi_cfg.get("bottom_threshold", 0.55)))
+        self.var_roi_top_off = tk.IntVar(value=int(roi_cfg.get("top_offset", 0)))
+        self.var_roi_btm_off = tk.IntVar(value=int(roi_cfg.get("bottom_offset", 0)))
+        self.var_roi_lr_pad = tk.IntVar(value=int(roi_cfg.get("lr_pad", 0)))
+
+        # 顶部模板（样式与模板管理一致）
+        ttk.Label(box_roi, text="顶部模板", width=12).grid(row=0, column=0, sticky="w", padx=4, pady=2)
+        self.lab_roi_top_status = ttk.Label(box_roi, text="", width=8)
+        self.lab_roi_top_status.grid(row=0, column=1, sticky="w", padx=4)
+        ttk.Label(box_roi, text="置信度").grid(row=0, column=3, padx=4)
+        try:
+            sp_top = ttk.Spinbox(box_roi, from_=0.0, to=1.0, increment=0.01, textvariable=self.var_roi_top_thr, width=6, format="%.2f")
+        except Exception:
+            sp_top = tk.Spinbox(box_roi, from_=0.0, to=1.0, increment=0.01, textvariable=self.var_roi_top_thr, width=6)
+        sp_top.grid(row=0, column=4, sticky="w", padx=4)
+        ttk.Button(box_roi, text="测试识别", command=lambda: test_match("价格区域-顶部模板", self.var_roi_top_tpl.get().strip(), float(self.var_roi_top_thr.get() or 0.55))).grid(row=0, column=5, padx=4)
+        ttk.Button(box_roi, text="截图", command=lambda: _capture_roi_into(self.var_roi_top_tpl, slug="buy_data_top", title="顶部模板")).grid(row=0, column=6, padx=4)
+        ttk.Button(box_roi, text="预览", command=lambda: self._preview_image(self.var_roi_top_tpl.get().strip(), "预览 - 顶部模板")).grid(row=0, column=7, padx=4)
+
+        # 底部模板（样式与模板管理一致）
+        ttk.Label(box_roi, text="底部模板", width=12).grid(row=1, column=0, sticky="w", padx=4, pady=2)
+        self.lab_roi_btm_status = ttk.Label(box_roi, text="", width=8)
+        self.lab_roi_btm_status.grid(row=1, column=1, sticky="w", padx=4)
+        ttk.Label(box_roi, text="置信度").grid(row=1, column=3, padx=4)
+        try:
+            sp_btm = ttk.Spinbox(box_roi, from_=0.0, to=1.0, increment=0.01, textvariable=self.var_roi_btm_thr, width=6, format="%.2f")
+        except Exception:
+            sp_btm = tk.Spinbox(box_roi, from_=0.0, to=1.0, increment=0.01, textvariable=self.var_roi_btm_thr, width=6)
+        sp_btm.grid(row=1, column=4, sticky="w", padx=4)
+        ttk.Button(box_roi, text="测试识别", command=lambda: test_match("价格区域-底部模板", self.var_roi_btm_tpl.get().strip(), float(self.var_roi_btm_thr.get() or 0.55))).grid(row=1, column=5, padx=4)
+        ttk.Button(box_roi, text="截图", command=lambda: _capture_roi_into(self.var_roi_btm_tpl, slug="buy_data_btm", title="底部模板")).grid(row=1, column=6, padx=4)
+        ttk.Button(box_roi, text="预览", command=lambda: self._preview_image(self.var_roi_btm_tpl.get().strip(), "预览 - 底部模板")).grid(row=1, column=7, padx=4)
+
+        # 偏移/边距 + 预览（保持在下一行）
+        ttk.Label(box_roi, text="顶部偏移").grid(row=2, column=0, padx=4, pady=4, sticky="e")
+        ttk.Entry(box_roi, textvariable=self.var_roi_top_off, width=8).grid(row=2, column=1, sticky="w")
+        ttk.Label(box_roi, text="底部偏移").grid(row=2, column=2, padx=4, pady=4, sticky="e")
+        ttk.Entry(box_roi, textvariable=self.var_roi_btm_off, width=8).grid(row=2, column=3, sticky="w")
+        ttk.Label(box_roi, text="左右边距").grid(row=2, column=4, padx=4, pady=4, sticky="e")
+        ttk.Entry(box_roi, textvariable=self.var_roi_lr_pad, width=8).grid(row=2, column=5, sticky="w")
+        ttk.Button(box_roi, text="预览", command=self._roi_preview_from_screen).grid(row=2, column=6, padx=6)
+
+        # 状态文本更新器
+        def _upd_status(var: tk.StringVar, lab: ttk.Label) -> None:
+            p = var.get().strip()
+            if not p:
+                lab.configure(text="未设置")
+            elif os.path.exists(p):
+                lab.configure(text="已设置")
+            else:
+                lab.configure(text="缺失")
+        def _on_top_tpl(*_):
+            _upd_status(self.var_roi_top_tpl, self.lab_roi_top_status)
+            self._schedule_autosave()
+        def _on_btm_tpl(*_):
+            _upd_status(self.var_roi_btm_tpl, self.lab_roi_btm_status)
+            self._schedule_autosave()
+        try:
+            self.var_roi_top_tpl.trace_add("write", _on_top_tpl)
+            self.var_roi_btm_tpl.trace_add("write", _on_btm_tpl)
+        except Exception:
+            pass
+        _upd_status(self.var_roi_top_tpl, self.lab_roi_top_status)
+        _upd_status(self.var_roi_btm_tpl, self.lab_roi_btm_status)
+
+        # 截图到变量（与模板管理一致的交互）
+        def _capture_roi_into(var: tk.StringVar, *, slug: str, title: str):
+            def _after(bounds: tuple[int, int, int, int] | None):
+                if not bounds:
+                    return
+                x1, y1, x2, y2 = bounds
+                w, h = max(1, x2 - x1), max(1, y2 - y1)
+                try:
+                    import pyautogui  # type: ignore
+                    img = pyautogui.screenshot(region=(x1, y1, w, h))
+                except Exception as e:
+                    messagebox.showerror("截图", f"截屏失败: {e}")
+                    return
+                os.makedirs("images", exist_ok=True)
+                path = os.path.join("images", f"{slug}.png")
+                try:
+                    img.save(path)
+                except Exception as e:
+                    messagebox.showerror("截图", f"保存失败: {e}")
+                    return
+                var.set(path)
+                # 自动保存（去抖）
+                self._schedule_autosave()
+                # 预览
+                self._preview_image(path, f"预览 - {title}")
+
+            self._select_region(_after)
+
+        for i in range(0, 8):
+            box_roi.columnconfigure(i, weight=0)
+
+        # Points（移除价格区域坐标配置，仅保留单点捕获）
         box_pos = ttk.LabelFrame(outer, text="坐标与区域配置")
         box_pos.pack(fill=tk.X, padx=8, pady=8)
 
@@ -369,30 +530,30 @@ class App(tk.Tk):
         ttk.Entry(box_pos, textvariable=self.var_qty_y, width=8).grid(row=1, column=2)
         ttk.Button(box_pos, text="捕获", command=lambda: self._capture_point(self.var_qty_x, self.var_qty_y, label="请将鼠标移动到 数量输入框 上…")).grid(row=1, column=3, padx=4)
 
-        # 价格区域
-        rect = self.cfg.get("rects", {}).get("价格区域", {"x1": 0, "y1": 0, "x2": 0, "y2": 0})
-        self.var_px1 = tk.IntVar(value=int(rect.get("x1", 0)))
-        self.var_py1 = tk.IntVar(value=int(rect.get("y1", 0)))
-        self.var_px2 = tk.IntVar(value=int(rect.get("x2", 0)))
-        self.var_py2 = tk.IntVar(value=int(rect.get("y2", 0)))
-        ttk.Label(box_pos, text="价格区域 左上(x,y)").grid(row=2, column=0, padx=4, pady=4, sticky="e")
-        ttk.Entry(box_pos, textvariable=self.var_px1, width=8).grid(row=2, column=1)
-        ttk.Entry(box_pos, textvariable=self.var_py1, width=8).grid(row=2, column=2)
-        ttk.Button(box_pos, text="捕获左上", command=lambda: self._capture_point(self.var_px1, self.var_py1, label="请移动到 价格区域 左上…")).grid(row=2, column=3, padx=4)
-        ttk.Label(box_pos, text="价格区域 右下(x,y)").grid(row=3, column=0, padx=4, pady=4, sticky="e")
-        ttk.Entry(box_pos, textvariable=self.var_px2, width=8).grid(row=3, column=1)
-        ttk.Entry(box_pos, textvariable=self.var_py2, width=8).grid(row=3, column=2)
-        ttk.Button(box_pos, text="捕获右下", command=lambda: self._capture_point(self.var_px2, self.var_py2, label="请移动到 价格区域 右下…")).grid(row=3, column=3, padx=4)
-
         for i in range(4):
             box_pos.columnconfigure(i, weight=1)
 
-        # Save / Sync controls
-        ctrl = ttk.Frame(outer)
-        ctrl.pack(fill=tk.X, padx=8, pady=8)
-        ttk.Button(ctrl, text="保存配置并同步", command=self._save_and_sync).pack(side=tk.LEFT)
-        ttk.Button(ctrl, text="保存价格区域截图", command=self._save_price_roi_shot).pack(side=tk.LEFT, padx=8)
-        ttk.Button(ctrl, text="预览价格区域", command=self._preview_price_roi).pack(side=tk.LEFT)
+        # ROI 分组变量
+        for v in [
+            self.var_roi_top_tpl,
+            self.var_roi_top_thr,
+            self.var_roi_btm_tpl,
+            self.var_roi_btm_thr,
+            self.var_roi_top_off,
+            self.var_roi_btm_off,
+            self.var_roi_lr_pad,
+        ]:
+            try:
+                v.trace_add("write", lambda *_: self._schedule_autosave())
+            except Exception:
+                pass
+
+        # 单点坐标变量
+        for v in [self.var_first_x, self.var_first_y, self.var_qty_x, self.var_qty_y]:
+            try:
+                v.trace_add("write", lambda *_: self._schedule_autosave())
+            except Exception:
+                pass
 
     def _capture_point(self, var_x: tk.IntVar, var_y: tk.IntVar, *, label: str) -> None:
         # Simple countdown prompt
@@ -424,71 +585,242 @@ class App(tk.Tk):
             self.cfg["templates"][key]["path"] = row.get_path()
             self.cfg["templates"][key]["confidence"] = float(row.get_confidence())
 
+        # Flush ROI config
+        self.cfg.setdefault("price_roi", {})
+        self.cfg["price_roi"]["top_template"] = self.var_roi_top_tpl.get().strip()
+        self.cfg["price_roi"]["top_threshold"] = float(self.var_roi_top_thr.get() or 0.55)
+        self.cfg["price_roi"]["bottom_template"] = self.var_roi_btm_tpl.get().strip()
+        self.cfg["price_roi"]["bottom_threshold"] = float(self.var_roi_btm_thr.get() or 0.55)
+        self.cfg["price_roi"]["top_offset"] = int(self.var_roi_top_off.get() or 0)
+        self.cfg["price_roi"]["bottom_offset"] = int(self.var_roi_btm_off.get() or 0)
+        self.cfg["price_roi"]["lr_pad"] = int(self.var_roi_lr_pad.get() or 0)
+
         # Flush points
         self.cfg.setdefault("points", {})
         self.cfg["points"]["第一个商品"] = {"x": int(self.var_first_x.get()), "y": int(self.var_first_y.get())}
         self.cfg["points"]["数量输入框"] = {"x": int(self.var_qty_x.get()), "y": int(self.var_qty_y.get())}
-
-        # Flush rects
-        self.cfg.setdefault("rects", {})
-        self.cfg["rects"]["价格区域"] = {
-            "x1": int(self.var_px1.get()),
-            "y1": int(self.var_py1.get()),
-            "x2": int(self.var_px2.get()),
-            "y2": int(self.var_py2.get()),
-        }
 
         save_config(self.cfg, "config.json")
         sync_to_key_mapping(self.cfg, mapping_path="key_mapping.json")
         if not silent:
             messagebox.showinfo("配置", "已保存并同步至 key_mapping.json")
 
-    # ---------- Region select & ROI snapshot ----------
-    def _save_price_roi_shot(self) -> str | None:
+    # ---------- Region selection & Modal image preview ----------
+
+    # ---------- ROI config helpers ----------
+    def _pick_file_into(self, var: tk.StringVar) -> None:
+        path = filedialog.askopenfilename(title="选择图片", filetypes=[("Image", ".png .jpg .jpeg .bmp"), ("All", "*.*")])
+        if path:
+            var.set(path)
+
+    # ---------- ROI preview using templates ----------
+    def _roi_preview_from_screen(self) -> None:
+        # Validate template paths
+        top_path = self.var_roi_top_tpl.get().strip()
+        btm_path = self.var_roi_btm_tpl.get().strip()
+        if not top_path or not os.path.exists(top_path):
+            messagebox.showwarning("预览", "顶部模板未选择或文件不存在。")
+            return
+        if not btm_path or not os.path.exists(btm_path):
+            messagebox.showwarning("预览", "底部模板未选择或文件不存在。")
+            return
         try:
             import pyautogui  # type: ignore
+            import numpy as _np  # type: ignore
+            import cv2 as _cv2  # type: ignore
         except Exception as e:
-            messagebox.showerror("截图", f"缺少依赖或导入失败: {e}")
-            return None
-        x1 = int(self.var_px1.get()); y1 = int(self.var_py1.get())
-        x2 = int(self.var_px2.get()); y2 = int(self.var_py2.get())
-        if x2 <= x1 or y2 <= y1:
-            messagebox.showwarning("截图", "价格区域坐标无效，请先设置左上/右下。")
-            return None
-        w, h = x2 - x1, y2 - y1
+            messagebox.showerror("预览", f"缺少依赖或导入失败: {e}")
+            return
         try:
-            img = pyautogui.screenshot(region=(x1, y1, w, h))
+            img_pil = pyautogui.screenshot()
         except Exception as e:
-            messagebox.showerror("截图", f"截取失败: {e}")
-            return None
-        os.makedirs("images", exist_ok=True)
-        path = os.path.join("images", "_debug_price_roi.png")
+            messagebox.showerror("预览", f"截屏失败: {e}")
+            return
+        # PIL -> OpenCV BGR
         try:
-            img.save(path)
+            img_rgb = _np.array(img_pil)
+            img_bgr = img_rgb[:, :, ::-1].copy()
         except Exception as e:
-            messagebox.showerror("截图", f"保存失败: {e}")
-            return None
-        self._preview_image(path, "预览 - 价格区域")
-        return path
+            messagebox.showerror("预览", f"图像转换失败: {e}")
+            return
 
-    def _preview_price_roi(self) -> None:
-        # 截图并展示，同时保存一份处理流程供查看
-        path = self._save_price_roi_shot()
-        if not path:
+        # Prepare
+        gray = _cv2.cvtColor(img_bgr, _cv2.COLOR_BGR2GRAY)
+        h, w = gray.shape[:2]
+        top_tmpl = _cv2.imread(str(top_path), _cv2.IMREAD_COLOR)
+        btm_tmpl = _cv2.imread(str(btm_path), _cv2.IMREAD_COLOR)
+        if top_tmpl is None or btm_tmpl is None:
+            messagebox.showwarning("预览", "无法读取模板图片。")
             return
+        tthr = float(self.var_roi_top_thr.get() or 0.55)
+        bthr = float(self.var_roi_btm_thr.get() or 0.55)
+
+        # Search regions: top in upper 50%，bottom in lower 65%
+        top_roi = (0, 0, w, int(h * 0.5))
+        btm_roi = (0, int(h * 0.35), w, int(h * 0.65))
+
+        # Match top template
+        tgray = _cv2.cvtColor(top_tmpl, _cv2.COLOR_BGR2GRAY) if top_tmpl.ndim == 3 else top_tmpl
+        (tx, ty), ts = self._roi_match_template(gray, tgray, top_roi, method=_cv2.TM_CCOEFF_NORMED)
+        # Match bottom template
+        bgray = _cv2.cvtColor(btm_tmpl, _cv2.COLOR_BGR2GRAY) if btm_tmpl.ndim == 3 else btm_tmpl
+        (bx, by), bs = self._roi_match_template(gray, bgray, btm_roi, method=_cv2.TM_CCOEFF_NORMED)
+
+        if ts < tthr or bs < bthr:
+            messagebox.showwarning("预览", f"模板匹配失败：top={ts:.2f} (阈值 {tthr:.2f}), bottom={bs:.2f} (阈值 {bthr:.2f})")
+            return
+
+        # Compute four anchor points
+        tw, th = tgray.shape[1], tgray.shape[0]
+        bw, bh = bgray.shape[1], bgray.shape[0]
+        # top template bottom edge
+        top_bl = (int(tx), int(ty + th - 1))
+        top_br = (int(tx + tw - 1), int(ty + th - 1))
+        # bottom template top edge
+        btm_tl = (int(bx), int(by))
+        btm_tr = (int(bx + bw - 1), int(by))
+
+        # Determine rectangle based on the longer width
+        pick_top = tw >= bw
+        if pick_top:
+            rx1, rx2 = top_bl[0], top_br[0]
+        else:
+            rx1, rx2 = btm_tl[0], btm_tr[0]
+        ry1 = top_bl[1]  # bottom of top template
+        ry2 = btm_tl[1]  # top of bottom template
+
+        # Apply offsets and LR pad
         try:
-            from PIL import Image  # type: ignore
-            pil = Image.open(path).convert("RGB")
+            ry1 += int(self.var_roi_top_off.get() or 0)
+            ry2 += int(self.var_roi_btm_off.get() or 0)
+            pad = int(self.var_roi_lr_pad.get() or 0)
         except Exception:
-            return
-        # 保存流程（与当前调参面板一致）
+            pad = 0
+        rx1 -= pad
+        rx2 += pad
+
+        # Normalize coordinates
+        x_left = max(0, min(rx1, rx2))
+        x_right = min(w - 1, max(rx1, rx2))
+        y_top = max(0, min(ry1, ry2))
+        y_bot = min(h - 1, max(ry1, ry2))
+        if y_bot - y_top < 3:
+            y_bot = min(h - 1, y_top + 3)
+
+        # Save outputs and draw debug
+        os.makedirs("images", exist_ok=True)
+        crop = img_bgr[y_top:y_bot, x_left:x_right]
+        crop_path = os.path.join("images", "price_area_roi.png")
+        dbg_path = os.path.join("images", "price_area_debug.png")
+        _cv2.imwrite(crop_path, crop)
+
+        dbg = img_bgr.copy()
+        # Draw matched rects
+        _cv2.rectangle(dbg, (tx, ty), (tx + tw - 1, ty + th - 1), (0, 200, 255), 2)  # top template box
+        _cv2.rectangle(dbg, (bx, by), (bx + bw - 1, by + bh - 1), (255, 0, 200), 2)  # bottom template box
+        # Draw the anchor lines
+        _cv2.line(dbg, (top_bl[0], top_bl[1]), (top_br[0], top_br[1]), (0, 255, 0), 2, _cv2.LINE_AA)
+        _cv2.line(dbg, (btm_tl[0], btm_tl[1]), (btm_tr[0], btm_tr[1]), (0, 255, 0), 2, _cv2.LINE_AA)
+        # Final ROI
+        _cv2.rectangle(dbg, (int(x_left), int(y_top)), (int(x_right), int(y_bot)), (0, 165, 255), 2)
+        # Labels
         try:
-            old = self.var_lab_img.get()
-            self.var_lab_img.set(path)
-            self._lab_save_steps()
-            self.var_lab_img.set(old)
+            _cv2.putText(dbg, f"top s={ts:.2f}", (tx, max(0, ty - 8)), _cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1, _cv2.LINE_AA)
+            _cv2.putText(dbg, f"bottom s={bs:.2f}", (bx, max(0, by - 8)), _cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 200), 1, _cv2.LINE_AA)
+            _cv2.putText(dbg, f"pick={'top' if pick_top else 'bottom'} w", (x_left, max(0, y_top - 8)), _cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 1, _cv2.LINE_AA)
         except Exception:
             pass
+        _cv2.imwrite(dbg_path, dbg)
+
+        # 预览：左右并排显示 调试图 与 截取图（固定大小、不可调整）
+        try:
+            self._preview_roi_side_by_side(crop_path, dbg_path)
+        except Exception as e:
+            messagebox.showerror("预览", f"显示失败: {e}")
+
+    @staticmethod
+    def _roi_match_template(gray, tmpl_gray, search_roi=None, method=0):
+        try:
+            import cv2 as _cv2  # type: ignore
+        except Exception:
+            return (0, 0), 0.0
+        if search_roi is not None:
+            x, y, w, h = search_roi
+            region = gray[y : y + h, x : x + w]
+        else:
+            x = y = 0
+            region = gray
+        if method == 0:
+            method = _cv2.TM_CCOEFF_NORMED
+        res = _cv2.matchTemplate(region, tmpl_gray, method)
+        _, max_val, _, max_loc = _cv2.minMaxLoc(res)
+        top_left = (max_loc[0] + x, max_loc[1] + y)
+        return top_left, float(max_val)
+
+    def _roi_locate_top(self, gray, bin_img, tmpl_bgr, thr: float):
+        try:
+            import cv2 as _cv2  # type: ignore
+            import numpy as _np  # type: ignore
+            from extract_price_roi import detect_horizontal_lines as _det_hlines  # type: ignore
+        except Exception:
+            return None
+        h, w = gray.shape[:2]
+        tmpl_gray = _cv2.cvtColor(tmpl_bgr, _cv2.COLOR_BGR2GRAY) if tmpl_bgr.ndim == 3 else tmpl_bgr
+        roi = (0, 0, w, int(h * 0.35))
+        (tx, ty), score = self._roi_match_template(gray, tmpl_gray, roi)
+        if score < float(thr or 0.0):
+            return None
+        y_after_template = ty + tmpl_gray.shape[0]
+        band_top = min(h - 1, y_after_template + 1)
+        band_bot = min(h, y_after_template + max(12, int(h * 0.03)))
+        if band_bot <= band_top:
+            return None
+        sub = bin_img[band_top:band_bot, :]
+        lines = _det_hlines(sub, min_rel_len=0.5)
+        if not lines:
+            proj = sub.sum(axis=1)
+            y_local = int(_np.argmax(proj))
+            return band_top + y_local
+        y_local = min(l.y for l in lines)
+        return band_top + y_local
+
+    def _roi_locate_bottom(self, gray, tmpl_bgr, thr: float):
+        try:
+            import cv2 as _cv2  # type: ignore
+        except Exception:
+            return None
+        h, w = gray.shape[:2]
+        tmpl_gray = _cv2.cvtColor(tmpl_bgr, _cv2.COLOR_BGR2GRAY) if tmpl_bgr.ndim == 3 else tmpl_bgr
+        roi = (0, int(h * 0.35), w, int(h * 0.55))
+        (bx, by), score = self._roi_match_template(gray, tmpl_gray, roi)
+        if score < float(thr or 0.0):
+            return None
+        return int(by + tmpl_gray.shape[0] // 2 - 20)
+
+    @staticmethod
+    def _roi_find_buy_button_top(hsv):
+        try:
+            import numpy as _np  # type: ignore
+            import cv2 as _cv2  # type: ignore
+        except Exception:
+            return None
+        h, w = hsv.shape[:2]
+        lower1 = _np.array([5, 80, 120], dtype=_np.uint8)
+        upper1 = _np.array([25, 255, 255], dtype=_np.uint8)
+        mask = _cv2.inRange(hsv, lower1, upper1)
+        mask = _cv2.morphologyEx(mask, _cv2.MORPH_CLOSE, _np.ones((5, 15), _np.uint8), iterations=2)
+        contours, _ = _cv2.findContours(mask, _cv2.RETR_EXTERNAL, _cv2.CHAIN_APPROX_SIMPLE)
+        cand = []
+        for c in contours:
+            x, y, cw, ch = _cv2.boundingRect(c)
+            area = cw * ch
+            ar = cw / max(1.0, float(ch))
+            if y > int(h * 0.6) and area > (w * h) * 0.002 and ar > 2.0:
+                cand.append((area, y))
+        if not cand:
+            return None
+        cand.sort(reverse=True)
+        return int(cand[0][1])
 
     # ---------- Region selection & Modal image preview ----------
     def _select_region(self, on_done):
@@ -534,6 +866,94 @@ class App(tk.Tk):
             except Exception as e:
                 ttk.Label(frm, text=f"无法加载图片: {e}").pack(padx=10, pady=10)
         ttk.Button(frm, text="关闭", command=top.destroy).pack(pady=(0, 10))
+
+    def _preview_roi_side_by_side(self, crop_path: str, dbg_path: str) -> None:
+        # side-by-side fixed-size preview for ROI
+        if not (os.path.exists(crop_path) and os.path.exists(dbg_path)):
+            messagebox.showwarning("预览", "预览图片不存在。")
+            return
+        top = tk.Toplevel(self)
+        top.title("预览 - 价格区域检测")
+        top.transient(self)
+        try:
+            top.grab_set()
+        except Exception:
+            pass
+        # Fixed window size and non-resizable
+        margin = 12
+        img_w, img_h = 460, 520
+        gap = 12
+        total_w = margin + img_w + gap + img_w + margin
+        # header labels + images + footer button
+        header_h = 28
+        footer_h = 56
+        total_h = margin + header_h + img_h + footer_h
+        top.geometry(f"{total_w}x{total_h}")
+        try:
+            top.resizable(False, False)
+            top.minsize(total_w, total_h)
+            top.maxsize(total_w, total_h)
+        except Exception:
+            pass
+
+        frm = ttk.Frame(top)
+        frm.pack(fill=tk.BOTH, expand=True)
+
+        row1 = ttk.Frame(frm)
+        row1.pack(fill=tk.X, padx=margin, pady=(margin, 4))
+        ttk.Label(row1, text="框选图").pack(side=tk.LEFT)
+        ttk.Label(row1, text="截取图").pack(side=tk.RIGHT)
+
+        row2 = ttk.Frame(frm)
+        row2.pack(fill=tk.BOTH, expand=True, padx=margin)
+
+        # left canvas (debug)
+        cv_left = tk.Canvas(row2, width=img_w, height=img_h, highlightthickness=1, highlightbackground="#888")
+        cv_left.pack(side=tk.LEFT)
+        # right canvas (crop)
+        cv_right = tk.Canvas(row2, width=img_w, height=img_h, highlightthickness=1, highlightbackground="#888")
+        cv_right.pack(side=tk.RIGHT)
+
+        # load and fit images
+        from PIL import Image, ImageTk  # type: ignore
+        try:
+            dbg = Image.open(dbg_path).convert("RGB")
+            crop = Image.open(crop_path).convert("RGB")
+        except Exception as e:
+            messagebox.showerror("预览", f"读取图片失败: {e}")
+            try:
+                top.destroy()
+            except Exception:
+                pass
+            return
+
+        def _fit(im: Image.Image, tw: int, th: int) -> Image.Image:
+            w0, h0 = im.size
+            if w0 <= 0 or h0 <= 0:
+                return im
+            sc = min(tw / float(w0), th / float(h0))
+            nw, nh = max(1, int(w0 * sc)), max(1, int(h0 * sc))
+            return im.resize((nw, nh), Image.LANCZOS)
+
+        dbg_fit = _fit(dbg, img_w, img_h)
+        crop_fit = _fit(crop, img_w, img_h)
+        tk_dbg = ImageTk.PhotoImage(dbg_fit)
+        tk_crop = ImageTk.PhotoImage(crop_fit)
+
+        # center in canvas
+        lx = (img_w - tk_dbg.width()) // 2
+        ly = (img_h - tk_dbg.height()) // 2
+        rx = (img_w - tk_crop.width()) // 2
+        ry = (img_h - tk_crop.height()) // 2
+        cv_left.create_image(lx, ly, image=tk_dbg, anchor=tk.NW)
+        cv_right.create_image(rx, ry, image=tk_crop, anchor=tk.NW)
+        # keep refs
+        cv_left.image = tk_dbg
+        cv_right.image = tk_crop
+
+        row3 = ttk.Frame(frm)
+        row3.pack(fill=tk.X, padx=margin, pady=(8, margin))
+        ttk.Button(row3, text="关闭", command=top.destroy).pack(side=tk.RIGHT)
 
     # ---------- Tab2 ----------
     def _build_tab2(self) -> None:

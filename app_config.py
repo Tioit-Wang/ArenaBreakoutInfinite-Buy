@@ -35,6 +35,15 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # Example item definition; users edit in GUI
         # {"enabled": False, "item_name": "", "price_threshold": 0, "target_total": 0, "max_per_order": 120}
     ],
+    "price_roi": {
+        "top_template": os.path.join(".", "buy_data_top.png"),
+        "top_threshold": 0.55,
+        "bottom_template": os.path.join(".", "buy_data_btm.png"),
+        "bottom_threshold": 0.55,
+        "top_offset": 0,
+        "bottom_offset": 0,
+        "lr_pad": 0,
+    },
 }
 
 

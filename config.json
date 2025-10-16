@@ -2,11 +2,11 @@
     "templates": {
         "首页按钮": {
             "path": "images\\btn_home.png",
-            "confidence": 0.8361627906976744
+            "confidence": 0.85
         },
         "市场按钮": {
             "path": "images\\btn_market.png",
-            "confidence": 0.8475581395348837
+            "confidence": 0.85
         },
         "市场搜索栏": {
             "path": "images\\input_search.png",
@@ -66,5 +66,14 @@
             "max_per_order": 1,
             "purchased": 2
         }
-    ]
+    ],
+    "price_roi": {
+        "top_template": "images\\buy_data_top.png",
+        "top_threshold": 0.8,
+        "bottom_template": "images\\buy_data_btm.png",
+        "bottom_threshold": 0.8,
+        "top_offset": 0,
+        "bottom_offset": 0,
+        "lr_pad": 0
+    }
 }
