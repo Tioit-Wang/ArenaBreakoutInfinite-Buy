@@ -44,6 +44,13 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "bottom_offset": 0,
         "lr_pad": 0,
     },
+    "avg_price_area": {
+        # ROI width follows the Buy button width; these control vertical position/size
+        "distance_from_buy_top": 5,
+        "height": 45,
+        # Allowlist for PyTesseract preview (kept configurable for future tuning)
+        "ocr_allowlist": "0123456789KM",
+    },
 }
 
 

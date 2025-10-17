@@ -11,6 +11,10 @@ dependencies = [
     "pyscreeze>=1.0.1",
     "ahk[binary]",
     "pytesseract>=0.3.13",
+    "paddleocr>=3.3.0",
+    "paddlepaddle==3.2.0",
+    "python-bidi==0.4.2",
+    "easyocr>=1.7.2",
 ]
 
 [project.scripts]

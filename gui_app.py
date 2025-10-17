@@ -1,4 +1,4 @@
-import os
+﻿import os
 import threading
 import time
 import tkinter as tk
@@ -302,6 +302,11 @@ class App(tk.Tk):
         # State
         self._buyer: AutoBuyer | None = None
         self._log_lock = threading.Lock()
+        # PaddleOCR instance (lazy init when previewing ROI)
+        self._paddle_ocr = None  # type: ignore
+        self._ocr_lock = threading.Lock()
+        self._ocr_warm_started = False
+        self._ocr_warm_ready = False
         self._tpl_slug_map = {
             "首页按钮": "btn_home",
             "市场按钮": "btn_market",
@@ -312,6 +317,12 @@ class App(tk.Tk):
             "商品关闭位置": "btn_close",
             "刷新按钮": "btn_refresh",
         }
+
+        # Background warm-up OCR to reduce first-click latency
+        try:
+            self.after(200, self._start_ocr_warmup)
+        except Exception:
+            pass
 
     # ---------- Autosave ----------
     def _schedule_autosave(self) -> None:
@@ -402,6 +413,55 @@ class App(tk.Tk):
             )
             r.grid(row=rowc, column=0, sticky="we", padx=6, pady=2)
             self.template_rows[key] = r
+            # 覆盖行的 on_test，以加入详细日志而不修改原控件布局
+            try:
+                def _logged_on_test(nm: str, pth: str, cf: float, *, _row=r):
+                    try:
+                        self._append_log(f"[模板测试] 名称={nm} 路径={pth} 置信度={cf:.2f}")
+                    except Exception:
+                        pass
+                    if not os.path.exists(pth):
+                        msg = f"文件不存在: {pth}"
+                        try:
+                            self._append_log(f"[模板测试] 失败: {msg}")
+                        except Exception:
+                            pass
+                        messagebox.showwarning("模板识别", msg)
+                        return
+                    try:
+                        import pyautogui  # type: ignore
+                        center = pyautogui.locateCenterOnScreen(pth, confidence=cf)
+                        try:
+                            self._append_log("[模板测试] locateCenterOnScreen=" + (f"({center.x},{center.y})" if center else "None"))
+                        except Exception:
+                            pass
+                        box = None
+                        if center is None:
+                            box = pyautogui.locateOnScreen(pth, confidence=cf)
+                            try:
+                                if box:
+                                    self._append_log(f"[模板测试] locateOnScreen=({int(getattr(box,'left',0))},{int(getattr(box,'top',0))},{int(getattr(box,'width',0))},{int(getattr(box,'height',0))})")
+                                else:
+                                    self._append_log("[模板测试] locateOnScreen=None")
+                            except Exception:
+                                pass
+                    except Exception as e:
+                        try:
+                            self._append_log(f"[模板测试] 异常: {e}")
+                        except Exception:
+                            pass
+                        messagebox.showerror("模板识别", f"识别失败: {e}")
+                        return
+                    if center:
+                        messagebox.showinfo("模板识别", f"{nm} 匹配成功: ({center.x}, {center.y})")
+                    elif box:
+                        messagebox.showinfo("模板识别", f"{nm} 匹配成功: 区域=({int(getattr(box,'left',0))},{int(getattr(box,'top',0))},{int(getattr(box,'width',0))},{int(getattr(box,'height',0))})")
+                    else:
+                        messagebox.showwarning("模板识别", f"{nm} 未匹配到，请降低阈值或重截清晰模板。")
+
+                r.on_test = _logged_on_test
+            except Exception:
+                pass
             rowc += 1
 
         # 价格区域模板与ROI
@@ -508,6 +568,41 @@ class App(tk.Tk):
         for i in range(0, 8):
             box_roi.columnconfigure(i, weight=0)
 
+        # 平均单价区域设置（使用“购买按钮”宽度，上方固定距离 + 固定高度）
+        box_avg = ttk.LabelFrame(outer, text="平均单价区域设置")
+        box_avg.pack(fill=tk.X, padx=8, pady=8)
+
+        avg_cfg = self.cfg.get("avg_price_area", {}) if isinstance(self.cfg.get("avg_price_area"), dict) else {}
+        # Defaults: distance 5px, height 45px
+        self.var_avg_dist = tk.IntVar(value=int(avg_cfg.get("distance_from_buy_top", 5)))
+        self.var_avg_height = tk.IntVar(value=int(avg_cfg.get("height", 45)))
+
+        ttk.Label(box_avg, text="距离(px)").grid(row=0, column=0, padx=4, pady=4, sticky="e")
+        try:
+            sp_dist = ttk.Spinbox(box_avg, from_=0, to=2000, increment=1, textvariable=self.var_avg_dist, width=8)
+        except Exception:
+            sp_dist = tk.Spinbox(box_avg, from_=0, to=2000, increment=1, textvariable=self.var_avg_dist, width=8)
+        sp_dist.grid(row=0, column=1, sticky="w")
+
+        ttk.Label(box_avg, text="高度(px)").grid(row=0, column=2, padx=8, pady=4, sticky="e")
+        try:
+            sp_h = ttk.Spinbox(box_avg, from_=1, to=2000, increment=1, textvariable=self.var_avg_height, width=8)
+        except Exception:
+            sp_h = tk.Spinbox(box_avg, from_=1, to=2000, increment=1, textvariable=self.var_avg_height, width=8)
+        sp_h.grid(row=0, column=3, sticky="w")
+
+        ttk.Button(box_avg, text="预览", command=self._avg_price_roi_preview).grid(row=0, column=5, padx=8)
+
+        for i in range(0, 6):
+            box_avg.columnconfigure(i, weight=0)
+
+        # 自动保存（距离/高度）
+        for v in [self.var_avg_dist, self.var_avg_height]:
+            try:
+                v.trace_add("write", lambda *_: self._schedule_autosave())
+            except Exception:
+                pass
+
         # Points（移除价格区域坐标配置，仅保留单点捕获）
         box_pos = ttk.LabelFrame(outer, text="坐标与区域配置")
         box_pos.pack(fill=tk.X, padx=8, pady=8)
@@ -594,6 +689,14 @@ class App(tk.Tk):
         self.cfg["price_roi"]["top_offset"] = int(self.var_roi_top_off.get() or 0)
         self.cfg["price_roi"]["bottom_offset"] = int(self.var_roi_btm_off.get() or 0)
         self.cfg["price_roi"]["lr_pad"] = int(self.var_roi_lr_pad.get() or 0)
+
+        # Flush average price area (distance/height)
+        try:
+            self.cfg.setdefault("avg_price_area", {})
+            self.cfg["avg_price_area"]["distance_from_buy_top"] = int(self.var_avg_dist.get() or 0)
+            self.cfg["avg_price_area"]["height"] = int(self.var_avg_height.get() or 0)
+        except Exception:
+            pass
 
         # Flush points
         self.cfg.setdefault("points", {})
@@ -711,30 +814,13 @@ class App(tk.Tk):
         os.makedirs("images", exist_ok=True)
         crop = img_bgr[y_top:y_bot, x_left:x_right]
         crop_path = os.path.join("images", "price_area_roi.png")
-        dbg_path = os.path.join("images", "price_area_debug.png")
         _cv2.imwrite(crop_path, crop)
 
-        dbg = img_bgr.copy()
-        # Draw matched rects
-        _cv2.rectangle(dbg, (tx, ty), (tx + tw - 1, ty + th - 1), (0, 200, 255), 2)  # top template box
-        _cv2.rectangle(dbg, (bx, by), (bx + bw - 1, by + bh - 1), (255, 0, 200), 2)  # bottom template box
-        # Draw the anchor lines
-        _cv2.line(dbg, (top_bl[0], top_bl[1]), (top_br[0], top_br[1]), (0, 255, 0), 2, _cv2.LINE_AA)
-        _cv2.line(dbg, (btm_tl[0], btm_tl[1]), (btm_tr[0], btm_tr[1]), (0, 255, 0), 2, _cv2.LINE_AA)
-        # Final ROI
-        _cv2.rectangle(dbg, (int(x_left), int(y_top)), (int(x_right), int(y_bot)), (0, 165, 255), 2)
-        # Labels
-        try:
-            _cv2.putText(dbg, f"top s={ts:.2f}", (tx, max(0, ty - 8)), _cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1, _cv2.LINE_AA)
-            _cv2.putText(dbg, f"bottom s={bs:.2f}", (bx, max(0, by - 8)), _cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 200), 1, _cv2.LINE_AA)
-            _cv2.putText(dbg, f"pick={'top' if pick_top else 'bottom'} w", (x_left, max(0, y_top - 8)), _cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 1, _cv2.LINE_AA)
-        except Exception:
-            pass
-        _cv2.imwrite(dbg_path, dbg)
+        # Skip debug image generation; only preview the crop
 
         # 预览：左右并排显示 调试图 与 截取图（固定大小、不可调整）
         try:
-            self._preview_roi_side_by_side(crop_path, dbg_path)
+            self._preview_roi_simple(crop_path)
         except Exception as e:
             messagebox.showerror("预览", f"显示失败: {e}")
 
@@ -867,93 +953,508 @@ class App(tk.Tk):
                 ttk.Label(frm, text=f"无法加载图片: {e}").pack(padx=10, pady=10)
         ttk.Button(frm, text="关闭", command=top.destroy).pack(pady=(0, 10))
 
-    def _preview_roi_side_by_side(self, crop_path: str, dbg_path: str) -> None:
-        # side-by-side fixed-size preview for ROI
-        if not (os.path.exists(crop_path) and os.path.exists(dbg_path)):
-            messagebox.showwarning("预览", "预览图片不存在。")
+    def _preview_roi_simple(self, crop_path: str) -> None:
+        # Simplified preview: left (crop image), right (OCR text + timing)
+        if not os.path.exists(crop_path):
+            messagebox.showwarning("预览", "截取图不存在。")
             return
+        # Run OCR first to get timing/text
+        try:
+            _ann, ocr_texts, ocr_scores, ocr_ms = self._run_paddle_ocr(crop_path)
+        except Exception as e:
+            ocr_texts, ocr_scores, ocr_ms = [], [], -1.0
+
         top = tk.Toplevel(self)
-        top.title("预览 - 价格区域检测")
+        try:
+            top.title("预览 - 价格区域（截取图 + OCR结果）")
+        except Exception:
+            pass
         top.transient(self)
         try:
             top.grab_set()
         except Exception:
             pass
-        # Fixed window size and non-resizable
+
+        # Layout metrics: one image + one text panel
         margin = 12
-        img_w, img_h = 460, 520
+        img_w, img_h = 520, 560
         gap = 12
-        total_w = margin + img_w + gap + img_w + margin
-        # header labels + images + footer button
-        header_h = 28
-        footer_h = 56
-        total_h = margin + header_h + img_h + footer_h
-        top.geometry(f"{total_w}x{total_h}")
+        pane_w = 420
+        total_w = margin + img_w + gap + pane_w + margin
+        total_h = margin + img_h + 70 + margin
         try:
+            top.geometry(f"{total_w}x{total_h}")
             top.resizable(False, False)
-            top.minsize(total_w, total_h)
-            top.maxsize(total_w, total_h)
         except Exception:
             pass
 
         frm = ttk.Frame(top)
         frm.pack(fill=tk.BOTH, expand=True)
 
-        row1 = ttk.Frame(frm)
-        row1.pack(fill=tk.X, padx=margin, pady=(margin, 4))
-        ttk.Label(row1, text="框选图").pack(side=tk.LEFT)
-        ttk.Label(row1, text="截取图").pack(side=tk.RIGHT)
+        # Header row: labels and time
+        header = ttk.Frame(frm)
+        header.pack(fill=tk.X, padx=margin, pady=(margin, 4))
+        ttk.Label(header, text="截取图").pack(side=tk.LEFT)
+        lab_time = ttk.Label(header, text=(f"OCR耗时: {int(ocr_ms)} ms" if ocr_ms >= 0 else "OCR耗时: -"))
+        lab_time.pack(side=tk.RIGHT)
 
-        row2 = ttk.Frame(frm)
-        row2.pack(fill=tk.BOTH, expand=True, padx=margin)
+        body = ttk.Frame(frm)
+        body.pack(fill=tk.BOTH, expand=True, padx=margin)
 
-        # left canvas (debug)
-        cv_left = tk.Canvas(row2, width=img_w, height=img_h, highlightthickness=1, highlightbackground="#888")
-        cv_left.pack(side=tk.LEFT)
-        # right canvas (crop)
-        cv_right = tk.Canvas(row2, width=img_w, height=img_h, highlightthickness=1, highlightbackground="#888")
-        cv_right.pack(side=tk.RIGHT)
+        # Left: crop image canvas
+        cv = tk.Canvas(body, width=img_w, height=img_h, highlightthickness=1, highlightbackground="#888")
+        cv.pack(side=tk.LEFT)
 
-        # load and fit images
-        from PIL import Image, ImageTk  # type: ignore
+        # Right: text results
+        right = ttk.Frame(body, width=pane_w)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=False, padx=(gap, 0))
+        ttk.Label(right, text="OCR结果").pack(anchor="w")
+        txt = tk.Text(right, height=28, wrap="word")
+        txt.pack(fill=tk.BOTH, expand=True)
+
+        # Load crop image
         try:
-            dbg = Image.open(dbg_path).convert("RGB")
+            from PIL import Image, ImageTk  # type: ignore
             crop = Image.open(crop_path).convert("RGB")
+            w0, h0 = crop.size
+            sc = min(img_w / max(1.0, float(w0)), img_h / max(1.0, float(h0)))
+            nw, nh = max(1, int(w0 * sc)), max(1, int(h0 * sc))
+            crop_fit = crop.resize((nw, nh), Image.LANCZOS)
+            tk_crop = ImageTk.PhotoImage(crop_fit)
+            x = (img_w - tk_crop.width()) // 2
+            y = (img_h - tk_crop.height()) // 2
+            cv.create_image(x, y, image=tk_crop, anchor=tk.NW)
+            cv.image = tk_crop
         except Exception as e:
-            messagebox.showerror("预览", f"读取图片失败: {e}")
             try:
-                top.destroy()
+                cv.create_text(10, 10, anchor=tk.NW, text=f"加载截取图失败: {e}")
             except Exception:
                 pass
+
+        # Compose troubleshooting-friendly text
+        from pathlib import Path as _Path
+        _stem = _Path(crop_path).stem
+        _json_path = os.path.join("output", f"{_stem}_res.json")
+        meta_lines = [
+            f"文件: {crop_path}",
+            f"耗时: {int(ocr_ms) if ocr_ms>=0 else '-'} ms",
+            f"结果数: {len(ocr_texts)}",
+            f"JSON: {_json_path}",
+            "",
+        ]
+        body_lines = []
+        if ocr_texts:
+            for i, t in enumerate(ocr_texts):
+                s = ocr_scores[i] if i < len(ocr_scores) else None
+                if s is None:
+                    body_lines.append(f"[{i+1:02d}] {t}")
+                else:
+                    body_lines.append(f"[{i+1:02d}] {t}  (score={s:.3f})")
+        else:
+            body_lines.append("未识别到文本；可能是 ROI 太小/对比度低/字体异常。")
+            body_lines.append("建议：放大 ROI、提升清晰度或对比度后再试。")
+        try:
+            txt.insert("1.0", "\n".join(meta_lines + body_lines))
+            txt.configure(state=tk.DISABLED)
+        except Exception:
+            pass
+
+        footer = ttk.Frame(frm)
+        footer.pack(fill=tk.X, padx=margin, pady=(8, margin))
+        ttk.Button(footer, text="关闭", command=top.destroy).pack(side=tk.RIGHT)
+    def _run_paddle_ocr(self, img_path: str):
+        """Run PaddleOCR and return (annotated_img_path, texts, scores, elapsed_ms)."""
+        ocr = self._ensure_paddle_ocr()
+        os.makedirs("output", exist_ok=True)
+        t0 = time.perf_counter()
+        result = ocr.predict(input=img_path)
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        texts: list[str] = []
+        scores: list[float] = []
+        ann_path = ""
+        from pathlib import Path
+        stem = Path(img_path).stem
+        json_path = os.path.join("output", f"{stem}_res.json")
+        ann_path = os.path.join("output", f"{stem}_ocr_res_img.png")
+        for r in result:
+            try:
+                r.save_to_img("output")
+            except Exception:
+                pass
+            try:
+                r.save_to_json("output")
+            except Exception:
+                pass
+        try:
+            if os.path.exists(json_path):
+                import json
+                with open(json_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                texts = list(map(str, data.get("rec_texts", []) or []))
+                scores = [float(x) for x in (data.get("rec_scores", []) or [])]
+        except Exception:
+            pass
+        return ann_path, texts, scores, float(elapsed_ms)
+
+    def _ensure_paddle_ocr(self):
+        """Ensure a single PaddleOCR instance is initialized and returned."""
+        try:
+            from paddleocr import PaddleOCR  # type: ignore
+        except Exception as e:
+            raise RuntimeError(f"PaddleOCR 导入失败: {e}")
+
+        if getattr(self, "_paddle_ocr", None) is None:
+            try:
+                self._ocr_lock.acquire()
+                if self._paddle_ocr is None:
+                    # Force CPU-only initialization, using default models.
+                    try:
+                        self._paddle_ocr = PaddleOCR(
+                            device="cpu",
+                            use_doc_orientation_classify=False,
+                            use_doc_unwarping=False,
+                            use_textline_orientation=False,
+                        )
+                    except TypeError:
+                        self._paddle_ocr = PaddleOCR(
+                            use_gpu=False,
+                            use_doc_orientation_classify=False,
+                            use_doc_unwarping=False,
+                            use_textline_orientation=False,
+                        )
+            finally:
+                try:
+                    self._ocr_lock.release()
+                except Exception:
+                    pass
+        return self._paddle_ocr
+
+    def _start_ocr_warmup(self) -> None:
+        if getattr(self, "_ocr_warm_started", False):
+            return
+        self._ocr_warm_started = True
+        try:
+            t = threading.Thread(target=self._warmup_paddle_ocr, name="ocr-warmup", daemon=True)
+            t.start()
+        except Exception:
+            self._ocr_warm_started = False
+
+    def _warmup_paddle_ocr(self) -> None:
+        try:
+            ocr = self._ensure_paddle_ocr()
+            # Tiny inference to init graph; ignore outputs
+            try:
+                from PIL import Image  # type: ignore
+                os.makedirs("output", exist_ok=True)
+                warm_img = os.path.join("output", "_warmup_ocr.png")
+                if not os.path.exists(warm_img):
+                    img = Image.new("RGB", (64, 24), color=(255, 255, 255))
+                    img.save(warm_img)
+                _ = ocr.predict(input=warm_img)
+            except Exception:
+                pass
+            self._ocr_warm_ready = True
+        except Exception:
+            self._ocr_warm_ready = False
+
+    def _avg_price_roi_preview(self) -> None:
+        try:
+            import pyautogui  # type: ignore
+            from PIL import Image  # type: ignore
+        except Exception as e:
+            messagebox.showerror("预览", f"缺少依赖或导入失败: {e}")
             return
 
-        def _fit(im: Image.Image, tw: int, th: int) -> Image.Image:
-            w0, h0 = im.size
-            if w0 <= 0 or h0 <= 0:
-                return im
-            sc = min(tw / float(w0), th / float(h0))
+        buy_row = None
+        # early fallback by filename contains 'btn_buy'
+        try:
+            for _name, _row in self.template_rows.items():
+                _p = (_row.get_path() or "").lower()
+                if os.path.basename(_p).startswith("btn_buy") or "btn_buy" in _p:
+                    buy_row = _row
+                    break
+        except Exception:
+            pass
+        for name, row in self.template_rows.items():
+            try:
+                slug = self._template_slug(name)
+            except Exception:
+                slug = None
+            if slug == "btn_buy":
+                buy_row = row
+                break
+        if buy_row is None:
+            messagebox.showwarning("预览", "未在模板管理中找到‘购买按钮’模板，请先配置并截图保存。")
+            return
+        path = buy_row.get_path()
+        if not path or not os.path.exists(path):
+            messagebox.showwarning("预览", "‘购买按钮’模板路径为空或文件不存在。")
+            return
+        try:
+            conf = float(buy_row.get_confidence() or 0.85)
+        except Exception:
+            conf = 0.85
+
+        # 与“识别测试”保持一致：先使用 locateCenterOnScreen，再回退到 locateOnScreen
+        center = None
+        box = None
+        try:
+            center = pyautogui.locateCenterOnScreen(path, confidence=conf)
+        except Exception:
+            center = None
+        diag = []
+        try:
+            _ = center.x  # type: ignore[attr-defined]
+            diag.append("center=ok")
+        except Exception:
+            diag.append("center=none")
+        if center is None:
+            try:
+                box = pyautogui.locateOnScreen(path, confidence=conf)
+            except Exception as e:
+                messagebox.showerror("预览", f"模板匹配失败: {e}")
+                return
+        if center is None and not box:
+            try:
+                flow = "center=none"
+                if 'diag' in locals():
+                    flow = " / ".join(diag)
+            except Exception:
+                flow = "center=none"
+            messagebox.showwarning("预览", f"未匹配到购买按钮\n路径: {path}\n阈值: {conf:.2f}\n流程: {flow}\n建议: 1) DPI=100% 2) 重新截图 3) 降低阈值")
+            return
+
+        # 计算按钮矩形
+        if center is not None:
+            # 用模板尺寸推断矩形
+            try:
+                from PIL import Image as _Image  # type: ignore
+                _img = _Image.open(path)
+                tpl_w, tpl_h = _img.size
+            except Exception:
+                tpl_w, tpl_h = 120, 40  # 兜底尺寸
+            b_w, b_h = int(tpl_w), int(tpl_h)
+            try:
+                cx, cy = int(center.x), int(center.y)
+            except Exception:
+                cx, cy = int(getattr(center, 'x', 0)), int(getattr(center, 'y', 0))
+            b_left = int(cx - b_w // 2)
+            b_top = int(cy - b_h // 2)
+        else:
+            try:
+                b_left, b_top, b_w, b_h = int(box.left), int(box.top), int(box.width), int(box.height)
+            except Exception:
+                b_left = int(getattr(box, 'left', 0))
+                b_top = int(getattr(box, 'top', 0))
+                b_w = int(getattr(box, 'width', 0))
+                b_h = int(getattr(box, 'height', 0))
+        if b_w <= 1 or b_h <= 1:
+            messagebox.showwarning("预览", "检测到的按钮尺寸异常，请重新截图模板。")
+            return
+
+        try:
+            dist = int(self.var_avg_dist.get() or 0)
+            hei = max(1, int(self.var_avg_height.get() or 1))
+        except Exception:
+            dist, hei = 160, 100
+        y_bottom = b_top - dist
+        y_top = y_bottom - hei
+        x_left = b_left
+        width = b_w
+
+        scr_w = self.winfo_screenwidth()
+        scr_h = self.winfo_screenheight()
+        y_top = max(0, min(scr_h - 2, y_top))
+        y_bottom = max(y_top + 1, min(scr_h - 1, y_bottom))
+        x_left = max(0, min(scr_w - 2, x_left))
+        width = max(1, min(width, scr_w - x_left))
+        height = max(1, y_bottom - y_top)
+
+        # 记录ROI与屏幕/按钮信息
+        try:
+            self._append_log(
+                f"[平均单价预览] 屏幕={scr_w}x{scr_h} 按钮=({b_left},{b_top},{b_w},{b_h}) "
+                f"ROI=({x_left},{y_top},{width},{height}) 参数: 距离={dist} 高度={hei}"
+            )
+        except Exception:
+            pass
+
+        try:
+            img = pyautogui.screenshot(region=(x_left, y_top, width, height))
+        except Exception as e:
+            messagebox.showerror("预览", f"截图失败: {e}")
+            return
+        os.makedirs("images", exist_ok=True)
+        crop_path = os.path.join("images", "_avg_price_roi.png")
+        try:
+            img.save(crop_path)
+        except Exception as e:
+            messagebox.showerror("预览", f"保存截图失败: {e}")
+            return
+
+        raw_text = ""
+        cleaned = ""
+        parsed_val = None
+        elapsed_ms = -1.0
+        try:
+            import time as _time
+            import pytesseract  # type: ignore
+            try:
+                from price_reader import _maybe_init_tesseract  # type: ignore
+                _maybe_init_tesseract()
+            except Exception:
+                pass
+            allow = str(self.cfg.get("avg_price_area", {}).get("ocr_allowlist", "0123456789KM"))
+            # Ensure both K/M (upper & lower) are included
+            need = "KMkm"
+            allow_ex = allow + "".join(ch for ch in need if ch not in allow)
+            cfg = f"--oem 3 --psm 6 -c tessedit_char_whitelist={allow_ex}"
+            t0 = _time.perf_counter()
+            raw_text = pytesseract.image_to_string(img, config=cfg) or ""
+            elapsed_ms = (_time.perf_counter() - t0) * 1000.0
+            try:
+                self._append_log(f"[平均单价预览] OCR耗时={int(elapsed_ms)}ms 原始='{(raw_text or '').strip()}'")
+            except Exception:
+                pass
+            up = raw_text.upper()
+            cleaned = "".join(ch for ch in up if ch in "0123456789KM")
+            t = cleaned.strip().upper()
+            if t.endswith("K"):
+                digits = "".join(ch for ch in t[:-1] if ch.isdigit())
+                if digits:
+                    parsed_val = int(digits) * 1000
+            else:
+                digits = "".join(ch for ch in t if ch.isdigit())
+                if digits:
+                    parsed_val = int(digits)
+            try:
+                self._append_log(f"[平均单价预览] 清洗='{cleaned}' 数值={parsed_val if parsed_val is not None else '-'}")
+            except Exception:
+                pass
+        except Exception as e:
+            raw_text = f"[OCR] 失败: {e}"
+            cleaned = ""
+            parsed_val = None
+
+        try:
+            self._preview_avg_price_window(crop_path, raw_text, cleaned, parsed_val, elapsed_ms)
+        except Exception as e:
+            messagebox.showerror("预览", f"显示失败: {e}")
+
+    def _preview_avg_price_window(self, crop_path: str, raw_text: str, cleaned: str, parsed_val, elapsed_ms: float) -> None:
+        if not os.path.exists(crop_path):
+            messagebox.showwarning("预览", "ROI 截图不存在。")
+            return
+        top = tk.Toplevel(self)
+        try:
+            top.title("预览 - 平均单价区域（截图 + PyTesseract OCR）")
+        except Exception:
+            pass
+        top.transient(self)
+        try:
+            top.grab_set()
+        except Exception:
+            pass
+
+        margin = 12
+        img_w, img_h = 520, 560
+        gap = 12
+        pane_w = 460
+        total_w = margin + img_w + gap + pane_w + margin
+        total_h = margin + img_h + 70 + margin
+        try:
+            top.geometry(f"{total_w}x{total_h}")
+            top.resizable(False, False)
+        except Exception:
+            pass
+
+        frm = ttk.Frame(top)
+        frm.pack(fill=tk.BOTH, expand=True)
+
+        header = ttk.Frame(frm)
+        header.pack(fill=tk.X, padx=margin, pady=(margin, 4))
+        ttk.Label(header, text="ROI 截图").pack(side=tk.LEFT)
+        lab_time = ttk.Label(header, text=(f"OCR耗时: {int(elapsed_ms)} ms" if elapsed_ms >= 0 else "OCR耗时: -"))
+        lab_time.pack(side=tk.RIGHT)
+
+        body = ttk.Frame(frm)
+        body.pack(fill=tk.BOTH, expand=True, padx=margin)
+
+        cv = tk.Canvas(body, width=img_w, height=img_h, highlightthickness=1, highlightbackground="#888")
+        cv.pack(side=tk.LEFT)
+
+        right = ttk.Frame(body, width=pane_w)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=False, padx=(gap, 0))
+        ttk.Label(right, text="OCR结果（原始 与 预览）").pack(anchor="w")
+        txt = tk.Text(right, height=28, wrap="word")
+        txt.pack(fill=tk.BOTH, expand=True)
+
+        try:
+            from PIL import Image, ImageTk  # type: ignore
+            crop = Image.open(crop_path).convert("RGB")
+            w0, h0 = crop.size
+            sc = min(img_w / max(1.0, float(w0)), img_h / max(1.0, float(h0)))
             nw, nh = max(1, int(w0 * sc)), max(1, int(h0 * sc))
-            return im.resize((nw, nh), Image.LANCZOS)
+            crop_fit = crop.resize((nw, nh), Image.LANCZOS)
+            tk_crop = ImageTk.PhotoImage(crop_fit)
+            x = (img_w - tk_crop.width()) // 2
+            y = (img_h - tk_crop.height()) // 2
+            cv.create_image(x, y, image=tk_crop, anchor=tk.NW)
+            cv.image = tk_crop
+        except Exception as e:
+            try:
+                cv.create_text(10, 10, anchor=tk.NW, text=f"加载截图失败: {e}")
+            except Exception:
+                pass
 
-        dbg_fit = _fit(dbg, img_w, img_h)
-        crop_fit = _fit(crop, img_w, img_h)
-        tk_dbg = ImageTk.PhotoImage(dbg_fit)
-        tk_crop = ImageTk.PhotoImage(crop_fit)
+        # Build preview as: 清洗前: <unit> <total>  清洗后: {json}
+        raw_disp = raw_text.strip() if isinstance(raw_text, str) else raw_text
+        try:
+            lines_raw = [ln.strip() for ln in (raw_text or "").splitlines() if ln.strip()]
+        except Exception:
+            lines_raw = []
+        raw_unit = lines_raw[0] if len(lines_raw) >= 1 else ""
+        raw_total = lines_raw[1] if len(lines_raw) >= 2 else ""
 
-        # center in canvas
-        lx = (img_w - tk_dbg.width()) // 2
-        ly = (img_h - tk_dbg.height()) // 2
-        rx = (img_w - tk_crop.width()) // 2
-        ry = (img_h - tk_crop.height()) // 2
-        cv_left.create_image(lx, ly, image=tk_dbg, anchor=tk.NW)
-        cv_right.create_image(rx, ry, image=tk_crop, anchor=tk.NW)
-        # keep refs
-        cv_left.image = tk_dbg
-        cv_right.image = tk_crop
+        def _parse_val(s: str):
+            try:
+                up = str(s).upper()
+                mult = 1_000_000 if ("M" in up) else (1000 if ("K" in up) else 1)
+                digits = "".join(ch for ch in up if ch.isdigit())
+                return (int(digits) * mult) if digits else None
+            except Exception:
+                return None
 
-        row3 = ttk.Frame(frm)
-        row3.pack(fill=tk.X, padx=margin, pady=(8, margin))
-        ttk.Button(row3, text="关闭", command=top.destroy).pack(side=tk.RIGHT)
+        val_unit = _parse_val(raw_unit)
+        val_total = _parse_val(raw_total)
+        try:
+            import json as _json
+            json_str = _json.dumps({
+                "unit_price_raw": raw_unit,
+                "total_price_raw": raw_total,
+                "unit_price": val_unit,
+                "total_price": val_total,
+            }, ensure_ascii=False)
+        except Exception:
+            json_str = f"{{'unit_price_raw': '{raw_unit}', 'total_price_raw': '{raw_total}', 'unit_price': {val_unit}, 'total_price': {val_total}}}"
+
+        pre_clean_str = f"{raw_unit} {raw_total}".strip()
+        lines = [
+            f"文件: {crop_path}",
+            f"原始:",
+            f"{raw_disp}",
+            f"清洗前: {pre_clean_str if pre_clean_str else '-'}",
+            f"清洗后: {json_str}",
+        ]
+        try:
+            txt.insert("1.0", "\n".join(lines))
+            txt.configure(state=tk.DISABLED)
+        except Exception:
+            pass
+
+        footer = ttk.Frame(frm)
+        footer.pack(fill=tk.X, padx=margin, pady=(8, margin))
+        ttk.Button(footer, text="关闭", command=top.destroy).pack(side=tk.RIGHT)
 
     # ---------- Tab2 ----------
     def _build_tab2(self) -> None:
@@ -2790,3 +3291,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
