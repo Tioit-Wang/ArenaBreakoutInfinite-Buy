@@ -3,9 +3,10 @@ import threading
 import time
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-from typing import Any, Dict
+import uuid
+from typing import Any, Dict, List, Optional
 
-from app_config import ensure_default_config, load_config, save_config, sync_to_key_mapping
+from app_config import ensure_default_config, load_config, save_config
 from autobuyer import AutoBuyer, MultiBuyer
 
 
@@ -283,6 +284,11 @@ class App(tk.Tk):
         # Config
         ensure_default_config("config.json")
         self.cfg: Dict[str, Any] = load_config("config.json")
+        # Ensure each item has a stable id for history mapping
+        try:
+            self._ensure_item_ids()
+        except Exception:
+            pass
 
         # UI
         nb = ttk.Notebook(self)
@@ -292,12 +298,15 @@ class App(tk.Tk):
         self.tab2 = ttk.Frame(nb)
         nb.add(self.tab1, text="初始化配置")
         nb.add(self.tab2, text="自动购买")
-        self.tab3 = ttk.Frame(nb)
-        nb.add(self.tab3, text="OCR调参")
 
         self._build_tab1()
         self._build_tab2()
-        self._build_tab3()
+        # Reflect initial run state and hotkey hint on the Run button
+        try:
+            self._update_run_controls()
+        except Exception:
+            pass
+        # OCR 调参面板已移除
 
         # State
         self._buyer: AutoBuyer | None = None
@@ -308,19 +317,137 @@ class App(tk.Tk):
         self._ocr_warm_started = False
         self._ocr_warm_ready = False
         self._tpl_slug_map = {
+            # Chinese labels
             "首页按钮": "btn_home",
             "市场按钮": "btn_market",
             "市场搜索栏": "input_search",
             "市场搜索按钮": "btn_search",
             "购买按钮": "btn_buy",
             "购买成功": "buy_ok",
+            "购买失败": "buy_fail",
+            "数量最大按钮": "btn_max",
             "商品关闭位置": "btn_close",
             "刷新按钮": "btn_refresh",
+            "返回按钮": "btn_back",
+            # ASCII keys map to themselves
+            "btn_home": "btn_home",
+            "btn_market": "btn_market",
+            "input_search": "input_search",
+            "btn_search": "btn_search",
+            "btn_buy": "btn_buy",
+            "buy_ok": "buy_ok",
+            "buy_fail": "buy_fail",
+            "btn_max": "btn_max",
+            "btn_close": "btn_close",
+            "btn_refresh": "btn_refresh",
+            "btn_back": "btn_back",
         }
 
         # Background warm-up OCR to reduce first-click latency
         try:
             self.after(200, self._start_ocr_warmup)
+        except Exception:
+            pass
+
+        # Global hotkey (Tk sequence). Bind configured + safe fallback
+        self._bound_toggle_hotkeys: list[str] = []
+        try:
+            self._rebind_toggle_hotkey()
+        except Exception:
+            pass
+
+        # Timer for reflecting run state in UI
+        self._run_state_after_id: str | None = None
+
+    def _get_toggle_hotkey(self) -> str:
+        try:
+            hot = self.cfg.get("hotkeys", {})
+            hk = hot.get("toggle") or hot.get("stop") or "<Control-Alt-t>"
+            if not isinstance(hk, str) or not hk:
+                return "<Control-Alt-t>"
+            return hk
+        except Exception:
+            return "<Control-Alt-t>"
+
+    def _hotkey_to_display(self, seq: str) -> str:
+        s = str(seq or "").strip()
+        if s.startswith("<") and s.endswith(">"):
+            s = s[1:-1]
+        s = s.replace("-", "+")
+        parts = [p for p in s.split("+") if p]
+        disp: list[str] = []
+        for p in parts:
+            lp = p.lower()
+            if lp in ("control", "ctrl"):
+                disp.append("Ctrl")
+            elif lp == "alt":
+                disp.append("Alt")
+            elif lp == "shift":
+                disp.append("Shift")
+            else:
+                if lp.startswith("f") and lp[1:].isdigit():
+                    disp.append("F" + lp[1:])
+                elif len(p) == 1:
+                    disp.append(p.upper())
+                else:
+                    disp.append(p)
+        return "+".join(disp) if disp else "Ctrl+Alt+T"
+
+    def _normalize_tk_hotkey(self, seq: str) -> str:
+        s = str(seq or "").strip()
+        if not s:
+            return "<Control-Alt-t>"
+        # Already Tk-style
+        if s.startswith("<") and s.endswith(">"):
+            return s
+        # Accept forms like Ctrl+Alt+T, ctrl-alt-t, F5, Alt+F5
+        s = s.replace(" ", "").replace("-", "+")
+        parts = [p for p in s.split("+") if p]
+        mods = []
+        key = None
+        for p in parts:
+            lp = p.lower()
+            if lp in ("ctrl", "control"):
+                if "Control" not in mods:
+                    mods.append("Control")
+            elif lp == "alt":
+                if "Alt" not in mods:
+                    mods.append("Alt")
+            elif lp == "shift":
+                if "Shift" not in mods:
+                    mods.append("Shift")
+            else:
+                key = p
+        if key is None:
+            key = "t"
+        lk = key
+        # Function keys keep case (e.g., F5)
+        if len(lk) == 1:
+            lk = lk.lower()
+        return "<" + "-".join(mods + [lk]) + ">"
+
+    def _rebind_toggle_hotkey(self) -> None:
+        # Unbind previous
+        for seq in getattr(self, "_bound_toggle_hotkeys", []) or []:
+            try:
+                self.unbind_all(seq)
+            except Exception:
+                pass
+        self._bound_toggle_hotkeys = []
+        # Bind configured sequence (normalized) and a fallback default
+        cfg_seq = self._normalize_tk_hotkey(self._get_toggle_hotkey())
+        fall_seq = "<Control-Alt-t>"
+        for seq in [cfg_seq, fall_seq]:
+            if seq in self._bound_toggle_hotkeys:
+                continue
+            try:
+                self.bind_all(seq, lambda _e: self._toggle_run())
+                self._bound_toggle_hotkeys.append(seq)
+            except Exception:
+                pass
+        # Refresh button text to reflect current hotkey
+        try:
+            self._update_run_controls()
         except Exception:
             pass
 
@@ -399,12 +526,26 @@ class App(tk.Tk):
 
             self._select_region(_after)
 
-        # render rows
+        # render rows (display Chinese name for known ASCII keys)
         rowc = 0
+        DISPLAY_NAME = {
+            "btn_home": "首页按钮",
+            "btn_market": "市场按钮",
+            "input_search": "市场搜索栏",
+            "btn_search": "市场搜索按钮",
+            "btn_buy": "购买按钮",
+            "buy_ok": "购买成功",
+            "buy_fail": "购买失败",
+            "btn_max": "数量最大按钮",
+            "btn_close": "商品关闭位置",
+            "btn_refresh": "刷新按钮",
+            "btn_back": "返回按钮",
+        }
         for key, data in self.cfg.get("templates", {}).items():
+            disp = DISPLAY_NAME.get(key, key)
             r = TemplateRow(
                 box_tpl,
-                key,
+                disp,
                 data,
                 on_test=test_match,
                 on_capture=capture_into_row,
@@ -573,9 +714,15 @@ class App(tk.Tk):
         box_avg.pack(fill=tk.X, padx=8, pady=8)
 
         avg_cfg = self.cfg.get("avg_price_area", {}) if isinstance(self.cfg.get("avg_price_area"), dict) else {}
-        # Defaults: distance 5px, height 45px
+        # Defaults
         self.var_avg_dist = tk.IntVar(value=int(avg_cfg.get("distance_from_buy_top", 5)))
         self.var_avg_height = tk.IntVar(value=int(avg_cfg.get("height", 45)))
+        self.var_avg_engine = tk.StringVar(value=str(avg_cfg.get("ocr_engine", "tesseract")))
+        try:
+            _sc_def = float(avg_cfg.get("scale", 1.0))
+        except Exception:
+            _sc_def = 1.0
+        self.var_avg_scale = tk.DoubleVar(value=_sc_def)
 
         ttk.Label(box_avg, text="距离(px)").grid(row=0, column=0, padx=4, pady=4, sticky="e")
         try:
@@ -593,11 +740,23 @@ class App(tk.Tk):
 
         ttk.Button(box_avg, text="预览", command=self._avg_price_roi_preview).grid(row=0, column=5, padx=8)
 
+        # Row 1: OCR engine + scale
+        ttk.Label(box_avg, text="识别引擎").grid(row=1, column=0, padx=4, pady=4, sticky="e")
+        self.cmb_avg_engine = ttk.Combobox(box_avg, textvariable=self.var_avg_engine, state="readonly",
+                                           values=["tesseract", "easyocr", "paddle"], width=12)
+        self.cmb_avg_engine.grid(row=1, column=1, sticky="w")
+        ttk.Label(box_avg, text="放大倍率").grid(row=1, column=2, padx=8, pady=4, sticky="e")
+        try:
+            sp_sc = ttk.Spinbox(box_avg, from_=0.6, to=2.5, increment=0.1, textvariable=self.var_avg_scale, width=6)
+        except Exception:
+            sp_sc = tk.Spinbox(box_avg, from_=0.6, to=2.5, increment=0.1, textvariable=self.var_avg_scale, width=6)
+        sp_sc.grid(row=1, column=3, sticky="w")
+
         for i in range(0, 6):
             box_avg.columnconfigure(i, weight=0)
 
         # 自动保存（距离/高度）
-        for v in [self.var_avg_dist, self.var_avg_height]:
+        for v in [self.var_avg_dist, self.var_avg_height, self.var_avg_engine, self.var_avg_scale]:
             try:
                 v.trace_add("write", lambda *_: self._schedule_autosave())
             except Exception:
@@ -607,8 +766,8 @@ class App(tk.Tk):
         box_pos = ttk.LabelFrame(outer, text="坐标与区域配置")
         box_pos.pack(fill=tk.X, padx=8, pady=8)
 
-        # 第一个商品点
-        p_first = self.cfg.get("points", {}).get("第一个商品", {"x": 0, "y": 0})
+        # 第一个商品点（优先 ASCII 键 first_item，兼容旧键）
+        p_first = self.cfg.get("points", {}).get("first_item") or self.cfg.get("points", {}).get("第一个商品", {"x": 0, "y": 0})
         self.var_first_x = tk.IntVar(value=int(p_first.get("x", 0)))
         self.var_first_y = tk.IntVar(value=int(p_first.get("y", 0)))
         ttk.Label(box_pos, text="第一个商品").grid(row=0, column=0, padx=4, pady=4, sticky="e")
@@ -617,7 +776,7 @@ class App(tk.Tk):
         ttk.Button(box_pos, text="捕获", command=lambda: self._capture_point(self.var_first_x, self.var_first_y, label="请将鼠标移动到 第一个商品 上…")).grid(row=0, column=3, padx=4)
 
         # 数量输入框点
-        p_qty = self.cfg.get("points", {}).get("数量输入框", {"x": 0, "y": 0})
+        p_qty = self.cfg.get("points", {}).get("quantity_input") or self.cfg.get("points", {}).get("数量输入框", {"x": 0, "y": 0})
         self.var_qty_x = tk.IntVar(value=int(p_qty.get("x", 0)))
         self.var_qty_y = tk.IntVar(value=int(p_qty.get("y", 0)))
         ttk.Label(box_pos, text="数量输入框").grid(row=1, column=0, padx=4, pady=4, sticky="e")
@@ -695,18 +854,30 @@ class App(tk.Tk):
             self.cfg.setdefault("avg_price_area", {})
             self.cfg["avg_price_area"]["distance_from_buy_top"] = int(self.var_avg_dist.get() or 0)
             self.cfg["avg_price_area"]["height"] = int(self.var_avg_height.get() or 0)
+            eng = str(self.var_avg_engine.get() or "tesseract").lower()
+            if eng not in ("tesseract", "easyocr", "paddle"):
+                eng = "tesseract"
+            self.cfg["avg_price_area"]["ocr_engine"] = eng
+            try:
+                sc = float(self.var_avg_scale.get() or 1.0)
+            except Exception:
+                sc = 1.0
+            if sc < 0.6:
+                sc = 0.6
+            if sc > 2.5:
+                sc = 2.5
+            self.cfg["avg_price_area"]["scale"] = float(sc)
         except Exception:
             pass
 
-        # Flush points
+        # Flush points (write ASCII keys)
         self.cfg.setdefault("points", {})
-        self.cfg["points"]["第一个商品"] = {"x": int(self.var_first_x.get()), "y": int(self.var_first_y.get())}
-        self.cfg["points"]["数量输入框"] = {"x": int(self.var_qty_x.get()), "y": int(self.var_qty_y.get())}
+        self.cfg["points"]["first_item"] = {"x": int(self.var_first_x.get()), "y": int(self.var_first_y.get())}
+        self.cfg["points"]["quantity_input"] = {"x": int(self.var_qty_x.get()), "y": int(self.var_qty_y.get())}
 
         save_config(self.cfg, "config.json")
-        sync_to_key_mapping(self.cfg, mapping_path="key_mapping.json")
         if not silent:
-            messagebox.showinfo("配置", "已保存并同步至 key_mapping.json")
+            messagebox.showinfo("配置", "已保存")
 
     # ---------- Region selection & Modal image preview ----------
 
@@ -917,7 +1088,14 @@ class App(tk.Tk):
         slug = self._tpl_slug_map.get(name)
         if slug:
             return slug
-        # fallback: ascii-only slug from hash
+        # If already ASCII-friendly, use it directly
+        try:
+            import re
+            if re.fullmatch(r"[A-Za-z0-9_]+", str(name)):
+                return str(name)
+        except Exception:
+            pass
+        # fallback: generated slug
         return f"tpl_{abs(hash(name)) % 100000}"
 
     def _preview_image(self, path: str, title: str = "预览") -> None:
@@ -1284,10 +1462,41 @@ class App(tk.Tk):
         except Exception as e:
             messagebox.showerror("预览", f"截图失败: {e}")
             return
+        # Apply scale and binarize
+        try:
+            sc = float(self.var_avg_scale.get() or 1.0)
+        except Exception:
+            sc = 1.0
+        if sc < 0.6:
+            sc = 0.6
+        if sc > 2.5:
+            sc = 2.5
+        if abs(sc - 1.0) > 1e-3:
+            try:
+                from PIL import Image as _Image  # type: ignore
+                w, h = img.size
+                img = img.resize((max(1, int(w * sc)), max(1, int(h * sc))), resample=getattr(_Image, 'LANCZOS', 1))
+            except Exception:
+                pass
+        # Binarize for better contrast (single, minimal preprocessing)
+        try:
+            import cv2 as _cv2  # type: ignore
+            import numpy as _np  # type: ignore
+            arr = _np.array(img)
+            bgr = _cv2.cvtColor(arr, _cv2.COLOR_RGB2BGR)
+            gray = _cv2.cvtColor(bgr, _cv2.COLOR_BGR2GRAY)
+            _thr, th = _cv2.threshold(gray, 0, 255, _cv2.THRESH_BINARY + _cv2.THRESH_OTSU)
+            from PIL import Image as _Image  # type: ignore
+            bin_img = _Image.fromarray(th)
+        except Exception:
+            try:
+                bin_img = img.convert("L").point(lambda p: 255 if p > 128 else 0)
+            except Exception:
+                bin_img = img
         os.makedirs("images", exist_ok=True)
         crop_path = os.path.join("images", "_avg_price_roi.png")
         try:
-            img.save(crop_path)
+            bin_img.save(crop_path)
         except Exception as e:
             messagebox.showerror("预览", f"保存截图失败: {e}")
             return
@@ -1304,29 +1513,50 @@ class App(tk.Tk):
                 _maybe_init_tesseract()
             except Exception:
                 pass
-            allow = str(self.cfg.get("avg_price_area", {}).get("ocr_allowlist", "0123456789KM"))
-            # Ensure both K/M (upper & lower) are included
-            need = "KMkm"
-            allow_ex = allow + "".join(ch for ch in need if ch not in allow)
-            cfg = f"--oem 3 --psm 6 -c tessedit_char_whitelist={allow_ex}"
+            eng = str(self.var_avg_engine.get() or "tesseract").lower()
             t0 = _time.perf_counter()
-            raw_text = pytesseract.image_to_string(img, config=cfg) or ""
+            if eng == "easyocr":
+                try:
+                    import easyocr  # type: ignore
+                    import numpy as _np  # type: ignore
+                    if getattr(self, "_easyocr_reader", None) is None:
+                        self._easyocr_reader = easyocr.Reader(['en'], gpu=False)
+                    arr = _np.array(bin_img or img)
+                    texts = self._easyocr_reader.readtext(arr, detail=0)
+                    raw_text = "\n".join(map(str, texts))
+                except Exception as _e:
+                    raw_text = f"[easyocr失败] {_e}"
+            elif eng in ("paddle", "paddleocr"):
+                try:
+                    ann, o_texts, o_scores, o_ms = self._run_paddle_ocr(crop_path)
+                    raw_text = "\n".join(map(str, o_texts or []))
+                    elapsed_ms = float(o_ms)
+                except Exception as _e:
+                    raw_text = f"[paddle失败] {_e}"
+            if not raw_text or raw_text.startswith("[easyocr失败]") or raw_text.startswith("[paddle失败]"):
+                allow = str(self.cfg.get("avg_price_area", {}).get("ocr_allowlist", "0123456789KM"))
+                need = "KMkm"
+                allow_ex = allow + "".join(ch for ch in need if ch not in allow)
+                cfg = f"--oem 3 --psm 6 -c tessedit_char_whitelist={allow_ex}"
+                raw_text = pytesseract.image_to_string(bin_img or img, config=cfg) or ""
             elapsed_ms = (_time.perf_counter() - t0) * 1000.0
             try:
                 self._append_log(f"[平均单价预览] OCR耗时={int(elapsed_ms)}ms 原始='{(raw_text or '').strip()}'")
             except Exception:
                 pass
-            up = raw_text.upper()
+            up = (raw_text or "").upper()
             cleaned = "".join(ch for ch in up if ch in "0123456789KM")
             t = cleaned.strip().upper()
-            if t.endswith("K"):
-                digits = "".join(ch for ch in t[:-1] if ch.isdigit())
-                if digits:
-                    parsed_val = int(digits) * 1000
-            else:
-                digits = "".join(ch for ch in t if ch.isdigit())
-                if digits:
-                    parsed_val = int(digits)
+            mult = 1
+            if t.endswith("M"):
+                mult = 1_000_000
+                t = t[:-1]
+            elif t.endswith("K"):
+                mult = 1_000
+                t = t[:-1]
+            digits = "".join(ch for ch in t if ch.isdigit())
+            if digits:
+                parsed_val = int(digits) * mult
             try:
                 self._append_log(f"[平均单价预览] 清洗='{cleaned}' 数值={parsed_val if parsed_val is not None else '-'}")
             except Exception:
@@ -1337,17 +1567,20 @@ class App(tk.Tk):
             parsed_val = None
 
         try:
-            self._preview_avg_price_window(crop_path, raw_text, cleaned, parsed_val, elapsed_ms)
+            self._preview_avg_price_window(crop_path, raw_text, cleaned, parsed_val, elapsed_ms,
+                                           engine=str(self.var_avg_engine.get() or "tesseract").lower())
         except Exception as e:
             messagebox.showerror("预览", f"显示失败: {e}")
 
-    def _preview_avg_price_window(self, crop_path: str, raw_text: str, cleaned: str, parsed_val, elapsed_ms: float) -> None:
+    def _preview_avg_price_window(self, crop_path: str, raw_text: str, cleaned: str, parsed_val, elapsed_ms: float, *, engine: str = "tesseract") -> None:
         if not os.path.exists(crop_path):
             messagebox.showwarning("预览", "ROI 截图不存在。")
             return
         top = tk.Toplevel(self)
         try:
-            top.title("预览 - 平均单价区域（截图 + PyTesseract OCR）")
+            eng_map = {"tesseract": "PyTesseract", "easyocr": "EasyOCR", "paddle": "PaddleOCR"}
+            eng_name = eng_map.get(engine.lower(), engine)
+            top.title(f"预览 - 平均单价区域（截图 + {eng_name}）")
         except Exception:
             pass
         top.transient(self)
@@ -1466,24 +1699,33 @@ class App(tk.Tk):
         left = ttk.Frame(main)
         left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        cols = ("enabled", "name", "thr", "target", "max", "purchased")
+        cols = ("enabled", "name", "thr", "restock", "premium", "mode", "maxbtn", "target", "max", "defqty", "purchased")
         self.tree = ttk.Treeview(left, columns=cols, show="headings", height=10)
         self.tree.heading("enabled", text="启用(点切换)")
         self.tree.heading("name", text="商品")
         self.tree.heading("thr", text="阈值")
+        self.tree.heading("restock", text="补货价")
+        self.tree.heading("premium", text="溢价(%)")
+        self.tree.heading("mode", text="价格模式")
+        self.tree.heading("maxbtn", text="Max数量")
         self.tree.heading("target", text="目标")
         self.tree.heading("max", text="每单上限")
+        self.tree.heading("defqty", text="默认数量")
         self.tree.heading("purchased", text="进度")
         self.tree.column("enabled", width=46, anchor="center")
         self.tree.column("name", width=160)
         self.tree.column("thr", width=70, anchor="e")
+        self.tree.column("restock", width=80, anchor="e")
+        self.tree.column("premium", width=80, anchor="e")
+        self.tree.column("mode", width=80, anchor="center")
+        self.tree.column("maxbtn", width=80, anchor="e")
         self.tree.column("target", width=80, anchor="e")
         self.tree.column("max", width=90, anchor="e")
+        self.tree.column("defqty", width=80, anchor="e")
         self.tree.column("purchased", width=100, anchor="e")
         self.tree.pack(fill=tk.BOTH, expand=True)
 
-        # Selection change updates progress bar
-        self.tree.bind("<<TreeviewSelect>>", lambda e: self._update_selected_progress())
+        # Selection change: no per-item progress UI to update
         # Toggle enable on left-click first column
         self.tree.bind("<Button-1>", self._tree_on_click, add=True)
         # Open editor modal on double-click
@@ -1493,25 +1735,23 @@ class App(tk.Tk):
         self._ctx_menu.add_command(label="编辑…", command=lambda: self._open_item_modal(self._get_clicked_index()))
         self._ctx_menu.add_command(label="删除", command=self._delete_item)
         self._ctx_menu.add_separator()
+        self._ctx_menu.add_command(label="历史价格…", command=lambda: self._open_price_history(self._get_clicked_index()))
+        self._ctx_menu.add_command(label="购买记录…", command=lambda: self._open_purchase_history(self._get_clicked_index()))
+        self._ctx_menu.add_separator()
         self._ctx_menu.add_command(label="启用/禁用", command=self._toggle_item_enable)
+        self._ctx_menu.add_command(label="清空进度", command=lambda: self._reset_item_progress(confirm=True))
         self.tree.bind("<Button-3>", self._on_tree_right_click)
 
         # Bottom controls
         ctrl = ttk.Frame(outer)
         ctrl.pack(fill=tk.X, padx=8, pady=(0, 8))
         ttk.Button(ctrl, text="新增…", command=lambda: self._open_item_modal(None)).pack(side=tk.LEFT)
-        ttk.Button(ctrl, text="开始", command=self._start_multi).pack(side=tk.LEFT, padx=6)
-        ttk.Button(ctrl, text="停止", command=self._stop).pack(side=tk.LEFT, padx=6)
+        # Unified Run button (Start/Stop toggled by state)
+        self.btn_run = ttk.Button(ctrl, text="开始", command=self._toggle_run)
+        self.btn_run.pack(side=tk.LEFT, padx=6)
+        ttk.Button(ctrl, text="清空选中进度", command=lambda: self._reset_item_progress(confirm=True)).pack(side=tk.LEFT, padx=6)
 
-        # Progress + Log
-        progf = ttk.Frame(outer)
-        progf.pack(fill=tk.X, padx=8, pady=(0, 8))
-        ttk.Label(progf, text="当前选中 进度").pack(side=tk.LEFT)
-        self.sel_prog = ttk.Progressbar(progf, orient=tk.HORIZONTAL, mode="determinate", length=220)
-        self.sel_prog.pack(side=tk.LEFT, padx=8)
-        self.sel_prog_lab = ttk.Label(progf, text="0/0")
-        self.sel_prog_lab.pack(side=tk.LEFT)
-
+        # Log
         logf = ttk.LabelFrame(outer, text="运行日志")
         logf.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
         self.txt = tk.Text(logf, height=12, wrap="word")
@@ -1523,6 +1763,7 @@ class App(tk.Tk):
 
     # ---------- Tab3: OCR Lab ----------
     def _build_tab3(self) -> None:
+        return
         outer = self.tab3
         frm = ttk.Frame(outer)
         frm.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
@@ -1690,6 +1931,7 @@ class App(tk.Tk):
                 pass
 
     def _lab_pick_image(self) -> None:
+        return
         path = filedialog.askopenfilename(title="选择图片", filetypes=[("Image", ".png .jpg .jpeg .bmp"), ("All", "*.*")])
         if not path:
             return
@@ -1704,6 +1946,7 @@ class App(tk.Tk):
         self._lab_compute_variants()
 
     def _lab_compute_variants(self) -> None:
+        return
         if self._lab_pil is None:
             return
         self._lab_variants = [("raw", self._lab_pil.copy())]
@@ -1792,6 +2035,7 @@ class App(tk.Tk):
             return None
 
     def _lab_detect_chart_and_draw(self, pil_img):
+        return pil_img, 0, 0, []
         try:
             import numpy as _np  # type: ignore
             import cv2 as _cv2  # type: ignore
@@ -1986,6 +2230,7 @@ class App(tk.Tk):
     # (Tab4 UI removed per需求)
 
     def _lab_render(self) -> None:
+        return
         # Update split label & ensure formatting
         try:
             # 统一两位小数显示
@@ -2052,6 +2297,7 @@ class App(tk.Tk):
             pass
 
     def _lab_pick_best_variant(self):
+        return None, None
         best = self._lab_variants[0]
         best_score = (float("inf"), 0)  # (price min asc, qty desc)
         for (n, p) in self._lab_variants:
@@ -2064,6 +2310,7 @@ class App(tk.Tk):
         return best
 
     def _lab_detect_and_draw(self, pil_img, draw=True):
+        return pil_img, 0, 0, []
         # OCR via pytesseract
         try:
             import pytesseract  # type: ignore
@@ -2232,6 +2479,7 @@ class App(tk.Tk):
         return img, int(price or 0), int(qty or 0), "\n".join(diag_lines)
 
     def _lab_show_image(self, pil_img):
+        return
         try:
             from PIL import ImageTk  # type: ignore
         except Exception:
@@ -2253,6 +2501,7 @@ class App(tk.Tk):
         self.lab_prev.image = tkimg
 
     def _lab_save_annotated(self) -> None:
+        return
         if self._lab_cur_img is None:
             return
         base = self.var_lab_img.get().strip() or "annotated"
@@ -2285,26 +2534,7 @@ class App(tk.Tk):
 
     # ---------- Lab: step-by-step rendering & saving ----------
     def _lab_render_steps(self, *, raw_pil, variant_pil):
-        """Render step-by-step images into the scroll area, and update crops.
-
-        Steps include: raw, CLAHE+Otsu, color masks, debar, tokens, split+boxes, final with thin boxes.
-        """
-        try:
-            from PIL import Image, ImageTk, ImageDraw  # type: ignore
-            import numpy as _np  # type: ignore
-            import cv2 as _cv2  # type: ignore
-            import pytesseract as _pt  # type: ignore
-        except Exception:
-            # Minimal fallback: just show raw
-            for w in self.lab_steps_inner.winfo_children():
-                w.destroy()
-            self._lab_step_tkimgs.clear()
-            lbl = ttk.Label(self.lab_steps_inner, text="缺少 OpenCV/Tesseract，无法展示详细步骤。")
-            lbl.grid(row=0, column=0, sticky="w", padx=8, pady=6)
-            imgtk = ImageTk.PhotoImage(raw_pil)
-            self._lab_step_tkimgs.append(imgtk)
-            ttk.Label(self.lab_steps_inner, image=imgtk).grid(row=1, column=0, sticky="w", padx=8, pady=4)
-            return
+        return
 
         # helpers
         def _to_pil_gray(arr):
@@ -2580,11 +2810,7 @@ class App(tk.Tk):
             r += 2
 
     def _lab_save_steps(self) -> None:
-        # Save current steps by re-running pipeline on selected image
-        base = self.var_lab_img.get().strip()
-        if not base or not os.path.exists(base):
-            messagebox.showwarning("保存流程", "请先选择图片。")
-            return
+        return
         try:
             from PIL import Image  # type: ignore
             import cv2 as _cv2  # type: ignore
@@ -2688,7 +2914,7 @@ class App(tk.Tk):
                     crop = pil.crop((rx1, ry1, rx2, ry2))
                     price_val = 0; price_box = None
                     for psm in (7,6,13):
-                        cfg = f"--oem 3 --psm {psm} -c tessedit_char_whitelist=0123456789kK.,"
+                        cfg = f"--oem 3 --psm {psm} -c tessedit_char_whitelist=0123456789k,"
                         try:
                             d = _pt2.image_to_data(crop, config=cfg, output_type=_pt2.Output.DICT)
                         except Exception:
@@ -2847,45 +3073,7 @@ class App(tk.Tk):
         messagebox.showinfo("保存流程", f"已保存 {ok} 步到 {out_dir}")
 
     def _lab_render_steps_chart(self, *, raw_pil):
-        try:
-            from PIL import Image, ImageTk, ImageDraw  # type: ignore
-            import numpy as _np  # type: ignore
-            import cv2 as _cv2  # type: ignore
-            import pytesseract as _pt  # type: ignore
-        except Exception:
-            # Minimal fallback: just show raw
-            for w in self.lab_steps_inner.winfo_children():
-                w.destroy()
-            self._lab_step_tkimgs.clear()
-            lbl = ttk.Label(self.lab_steps_inner, text="缺少 OpenCV/Tesseract，无法展示图表模式步骤。")
-            lbl.grid(row=0, column=0, sticky="w", padx=8, pady=6)
-            imgtk = ImageTk.PhotoImage(raw_pil)
-            self._lab_step_tkimgs.append(imgtk)
-            ttk.Label(self.lab_steps_inner, image=imgtk).grid(row=1, column=0, sticky="w", padx=8, pady=4)
-            return
-
-        # Clear container
-        for w in self.lab_steps_inner.winfo_children():
-            w.destroy()
-        self._lab_step_tkimgs.clear()
-
-        def _to_pil_gray(arr):
-            try:
-                return Image.fromarray(arr)
-            except Exception:
-                return raw_pil
-        def _draw_rects(base, rects, color, w=1):
-            im = base.copy()
-            dr = ImageDraw.Draw(im)
-            for (x1, y1, x2, y2) in rects:
-                try:
-                    dr.rectangle([x1, y1, x2, y2], outline=color, width=w)
-                except Exception:
-                    pass
-            return im
-
-        steps: list[tuple[str, Any]] = []
-        steps.append(("原图", raw_pil.copy()))
+        return
 
         # 颜色投影
         bgr = _cv2.cvtColor(_np.array(raw_pil), _cv2.COLOR_RGB2BGR)
@@ -3069,6 +3257,19 @@ class App(tk.Tk):
             raise
 
     def _append_log(self, s: str) -> None:
+        # 确保在主线程更新 Tk 组件；后台线程调用时通过 after 切回主线程
+        try:
+            import threading as _th  # type: ignore
+            if _th.current_thread() is not _th.main_thread():
+                try:
+                    self.after(0, self._append_log, s)
+                except Exception:
+                    pass
+                return
+        except Exception:
+            # 回退：继续尝试直接写入（不推荐，但避免静默失败）
+            pass
+
         with self._log_lock:
             self.txt.configure(state=tk.NORMAL)
             self.txt.insert(tk.END, time.strftime("[%H:%M:%S] ") + s + "\n")
@@ -3076,7 +3277,7 @@ class App(tk.Tk):
             self.txt.configure(state=tk.DISABLED)
 
     def _start_multi(self) -> None:
-        if hasattr(self, "_multi") and getattr(self._multi, "_thread", None) and self._multi._thread.is_alive():
+        if self._is_running():
             messagebox.showwarning("运行", "任务已在运行中。")
             return
         items = self.cfg.get("purchase_items", [])
@@ -3096,45 +3297,151 @@ class App(tk.Tk):
         )
         self._append_log("启动多商品轮询…")
         self._multi.start()
+        self._update_run_controls()
+        self._schedule_run_state_poll()
 
     def _stop(self) -> None:
         if hasattr(self, "_multi") and self._multi:
             self._multi.stop()
             self._append_log("停止信号已发送。")
+        self._update_run_controls()
+        self._cancel_run_state_poll()
+
+    # ---------- Run state helpers ----------
+    def _is_running(self) -> bool:
+        try:
+            m = getattr(self, "_multi", None)
+            if not m:
+                return False
+            # If stop has been requested, treat as not running for UI purposes
+            try:
+                st = getattr(m, "_stop", None)
+                if st is not None and st.is_set():
+                    return False
+            except Exception:
+                pass
+            t = getattr(m, "_thread", None)
+            return bool(t and t.is_alive())
+        except Exception:
+            return False
+
+    def _toggle_run(self) -> None:
+        if self._is_running():
+            self._stop()
+        else:
+            self._start_multi()
+
+    def _get_run_button_text(self) -> str:
+        try:
+            # Display normalized configured hotkey for clarity
+            hint = self._hotkey_to_display(self._normalize_tk_hotkey(self._get_toggle_hotkey()))
+        except Exception:
+            hint = "Ctrl+Alt+T"
+        return ("停止" if self._is_running() else "开始") + f" ({hint})"
+
+    def _update_run_controls(self) -> None:
+        try:
+            self.btn_run.configure(text=self._get_run_button_text())
+        except Exception:
+            pass
+
+    def _schedule_run_state_poll(self) -> None:
+        try:
+            if self._run_state_after_id is not None:
+                self.after_cancel(self._run_state_after_id)
+        except Exception:
+            pass
+        # Poll while running to reflect natural completion
+        def _tick():
+            self._run_state_after_id = None
+            self._update_run_controls()
+            if self._is_running():
+                try:
+                    self._run_state_after_id = self.after(500, _tick)
+                except Exception:
+                    pass
+        try:
+            self._run_state_after_id = self.after(500, _tick)
+        except Exception:
+            pass
+
+    def _cancel_run_state_poll(self) -> None:
+        try:
+            if self._run_state_after_id is not None:
+                self.after_cancel(self._run_state_after_id)
+                self._run_state_after_id = None
+        except Exception:
+            pass
 
     # ---------- Items list management ----------
     def _load_items_from_cfg(self) -> None:
         self.tree.delete(*self.tree.get_children())
         items = self.cfg.get("purchase_items", [])
         for i, it in enumerate(items):
+            mode_disp = "固定" if str(it.get("price_mode", "fixed")).lower() != "average" else "平均"
             self.tree.insert("", tk.END, iid=str(i), values=(
                 "是" if it.get("enabled", True) else "否",
                 it.get("item_name", ""),
                 int(it.get("price_threshold", 0)),
+                int(it.get("restock_price", 0)),
+                int(it.get("price_premium_pct", 0)),
+                mode_disp,
+                int(it.get("max_button_qty", 120)),
                 int(it.get("target_total", 0)),
                 int(it.get("max_per_order", 120)),
+                int(it.get("default_buy_qty", 1)),
                 f"{int(it.get('purchased', 0))}/{int(it.get('target_total', 0))}",
             ))
         if items:
             self.tree.selection_set("0")
-            self._update_selected_progress()
 
-    def _update_selected_progress(self) -> None:
+    # Per-item selected progress UI removed
+
+    def _reset_item_progress(self, confirm: bool = False) -> None:
         sel = self.tree.selection()
         if not sel:
-            self._set_selected_progress(0, 0)
             return
         idx = int(sel[0])
         items = self.cfg.get("purchase_items", [])
-        if 0 <= idx < len(items):
-            it = items[idx]
-            p = int(it.get("purchased", 0)); t = int(it.get("target_total", 0))
-            self._set_selected_progress(p, t)
+        if not (0 <= idx < len(items)):
+            return
+        name = str(items[idx].get("item_name", ""))
+        if confirm:
+            if not messagebox.askokcancel("清空进度", f"确定将 [{name}] 的已购进度清零吗？"):
+                return
+        items[idx]["purchased"] = 0
+        save_config(self.cfg, "config.json")
+        # Refresh one row and selected progress
+        try:
+            mode_disp = "固定" if str(items[idx].get("price_mode", "fixed")).lower() != "average" else "平均"
+            self.tree.item(str(idx), values=(
+                "是" if items[idx].get("enabled", True) else "否",
+                items[idx].get("item_name", ""),
+                int(items[idx].get("price_threshold", 0)),
+                int(items[idx].get("restock_price", 0)),
+                int(items[idx].get("price_premium_pct", 0)),
+                mode_disp,
+                int(items[idx].get("max_button_qty", 120)),
+                int(items[idx].get("target_total", 0)),
+                int(items[idx].get("max_per_order", 120)),
+                int(items[idx].get("default_buy_qty", 1)),
+                f"0/{int(items[idx].get('target_total', 0))}",
+            ))
+        except Exception:
+            self._load_items_from_cfg()
+        # No selected progress UI to update
+        # If running, also reset runtime copy
+        try:
+            if hasattr(self, "_multi") and self._multi and getattr(self._multi, "_thread", None) and self._multi._thread.is_alive():
+                if 0 <= idx < len(self._multi.items):
+                    self._multi.items[idx]["purchased"] = 0
+                    # notify UI via callback to keep consistent
+                    self._multi.on_item_update(idx, dict(self._multi.items[idx]))
+                    self._append_log(f"已清零进度: [{name}]")
+        except Exception:
+            pass
 
-    def _set_selected_progress(self, purchased: int, target: int) -> None:
-        self.sel_prog["maximum"] = max(1, target)
-        self.sel_prog["value"] = min(target, purchased)
-        self.sel_prog_lab.config(text=f"{purchased}/{target}")
+    # def _set_selected_progress(...) removed with UI
 
     # ---------- Modal editor ----------
     def _open_item_modal(self, idx: int | None) -> None:
@@ -3143,8 +3450,16 @@ class App(tk.Tk):
             "enabled": True,
             "item_name": "",
             "price_threshold": 0,
+            "price_premium_pct": 0,
+            "restock_price": 0,
             "target_total": 0,
             "max_per_order": 120,
+            "max_button_qty": 120,
+            "default_buy_qty": 1,
+            "price_mode": "fixed",
+            "avg_samples": 100,
+            "avg_subtract": 0,
+            "id": "",
         }
         if idx is not None and 0 <= idx < len(items):
             data.update({k: items[idx].get(k, data[k]) for k in data.keys()})
@@ -3157,8 +3472,15 @@ class App(tk.Tk):
         v_enabled = tk.BooleanVar(value=bool(data.get("enabled", True)))
         v_name = tk.StringVar(value=str(data.get("item_name", "")))
         v_thr = tk.IntVar(value=int(data.get("price_threshold", 0)))
+        v_restock = tk.IntVar(value=int(data.get("restock_price", 0)))
         v_target = tk.IntVar(value=int(data.get("target_total", 0)))
         v_max = tk.IntVar(value=int(data.get("max_per_order", 120)))
+        v_maxbtn = tk.IntVar(value=int(data.get("max_button_qty", 120)))
+        v_defqty = tk.IntVar(value=int(data.get("default_buy_qty", 1)))
+        # Price mode fields
+        v_mode = tk.StringVar(value=str(data.get("price_mode", "fixed")))
+        v_avg_samples = tk.IntVar(value=int(data.get("avg_samples", 100)))
+        v_avg_sub = tk.IntVar(value=int(data.get("avg_subtract", 0)))
 
         frm = ttk.Frame(top)
         frm.pack(padx=10, pady=10)
@@ -3167,24 +3489,114 @@ class App(tk.Tk):
         ttk.Entry(frm, textvariable=v_name, width=28).grid(row=1, column=1, padx=4, pady=4)
         ttk.Label(frm, text="目标价格(整数)").grid(row=2, column=0, sticky="e", padx=4, pady=4)
         ttk.Spinbox(frm, from_=0, to=10_000_000, textvariable=v_thr, width=12).grid(row=2, column=1, padx=4, pady=4)
-        ttk.Label(frm, text="目标购买总量").grid(row=3, column=0, sticky="e", padx=4, pady=4)
-        ttk.Spinbox(frm, from_=0, to=999999, textvariable=v_target, width=12).grid(row=3, column=1, padx=4, pady=4)
-        ttk.Label(frm, text="单次购买上限").grid(row=4, column=0, sticky="e", padx=4, pady=4)
-        ttk.Spinbox(frm, from_=1, to=120, textvariable=v_max, width=12).grid(row=4, column=1, padx=4, pady=4)
+        ttk.Label(frm, text="补货价格(整数)").grid(row=3, column=0, sticky="e", padx=4, pady=4)
+        ttk.Spinbox(frm, from_=0, to=10_000_000, textvariable=v_restock, width=12).grid(row=3, column=1, padx=4, pady=4)
+        # 溢价百分比（允许超过阈值的浮动百分比）
+        v_premium = tk.IntVar(value=int(data.get("price_premium_pct", 0)))
+        ttk.Label(frm, text="允许溢价(%)").grid(row=4, column=0, sticky="e", padx=4, pady=4)
+        ttk.Spinbox(frm, from_=0, to=100, textvariable=v_premium, width=12).grid(row=4, column=1, padx=4, pady=4)
+        ttk.Label(frm, text="目标购买总量").grid(row=5, column=0, sticky="e", padx=4, pady=4)
+        ttk.Spinbox(frm, from_=0, to=999999, textvariable=v_target, width=12).grid(row=5, column=1, padx=4, pady=4)
+        ttk.Label(frm, text="单次购买上限").grid(row=6, column=0, sticky="e", padx=4, pady=4)
+        ttk.Spinbox(frm, from_=1, to=999999, textvariable=v_max, width=12).grid(row=6, column=1, padx=4, pady=4)
+        ttk.Label(frm, text="Max数量").grid(row=7, column=0, sticky="e", padx=4, pady=4)
+        ttk.Spinbox(frm, from_=1, to=999999, textvariable=v_maxbtn, width=12).grid(row=7, column=1, padx=4, pady=4)
+        ttk.Label(frm, text="默认数量").grid(row=8, column=0, sticky="e", padx=4, pady=4)
+        ttk.Spinbox(frm, from_=1, to=999999, textvariable=v_defqty, width=12).grid(row=8, column=1, padx=4, pady=4)
+
+        # Price mode group
+        grp_mode = ttk.LabelFrame(frm, text="价格模式")
+        grp_mode.grid(row=9, column=0, columnspan=2, padx=0, pady=(6, 0), sticky="we")
+        ttk.Label(grp_mode, text="价格模式").grid(row=0, column=0, sticky="e", padx=4, pady=4)
+        cmb_mode = ttk.Combobox(grp_mode, state="readonly", width=12, values=["固定值", "平均值"])
+        try:
+            cmb_mode.set("平均值" if str(v_mode.get()).lower() == "average" else "固定值")
+        except Exception:
+            cmb_mode.set("固定值")
+        cmb_mode.grid(row=0, column=1, sticky="w", padx=4, pady=4)
+        ttk.Label(grp_mode, text="平均采样次数").grid(row=1, column=0, sticky="e", padx=4, pady=4)
+        try:
+            sp_samp = ttk.Spinbox(grp_mode, from_=1, to=500, increment=1, textvariable=v_avg_samples, width=12)
+        except Exception:
+            sp_samp = tk.Spinbox(grp_mode, from_=1, to=500, increment=1, textvariable=v_avg_samples, width=12)
+        sp_samp.grid(row=1, column=1, sticky="w", padx=4, pady=4)
+        ttk.Label(grp_mode, text="平均值减去").grid(row=2, column=0, sticky="e", padx=4, pady=4)
+        try:
+            sp_sub = ttk.Spinbox(grp_mode, from_=0, to=10_000_000, increment=1, textvariable=v_avg_sub, width=12)
+        except Exception:
+            sp_sub = tk.Spinbox(grp_mode, from_=0, to=10_000_000, increment=1, textvariable=v_avg_sub, width=12)
+        sp_sub.grid(row=2, column=1, sticky="w", padx=4, pady=4)
+
+        def _update_mode_ui(*_):
+            # sync v_mode with combobox and enable/disable fields
+            try:
+                val = cmb_mode.get()
+                v_mode.set("average" if val == "平均值" else "fixed")
+            except Exception:
+                pass
+            is_avg = str(v_mode.get()).lower() == "average"
+            try:
+                sp_samp.configure(state=("normal" if is_avg else "disabled"))
+                sp_sub.configure(state=("normal" if is_avg else "disabled"))
+            except Exception:
+                pass
+
+        cmb_mode.bind("<<ComboboxSelected>>", _update_mode_ui)
+        _update_mode_ui()
 
         btns = ttk.Frame(frm)
-        btns.grid(row=5, column=0, columnspan=2, pady=(8, 0))
+        btns.grid(row=10, column=0, columnspan=2, pady=(8, 0))
         def on_save():
             name = v_name.get().strip()
             if not name:
                 messagebox.showwarning("校验", "商品名称不能为空。", parent=top)
                 return
+            # Validate numeric fields
+            try:
+                thr_v = int(v_thr.get())
+                restock_v = int(v_restock.get())
+                tgt_v = int(v_target.get())
+                max_v = int(v_max.get())
+                maxbtn_v = int(v_maxbtn.get())
+                defqty_v = int(v_defqty.get())
+            except Exception:
+                messagebox.showwarning("校验", "数值字段格式不正确。", parent=top)
+                return
+            if thr_v < 0 or restock_v < 0 or tgt_v < 0 or max_v < 1 or maxbtn_v < 1 or defqty_v < 1:
+                messagebox.showwarning("校验", "请检查：阈值/补货价/目标≥0，及上限/Max/默认数量≥1。", parent=top)
+                return
+            mode_val = str(v_mode.get()).lower()
+            try:
+                avg_s = int(v_avg_samples.get())
+                avg_sub = int(v_avg_sub.get())
+            except Exception:
+                avg_s, avg_sub = 100, 0
+            if mode_val == "average":
+                if avg_s < 1 or avg_s > 500 or avg_sub < 0:
+                    messagebox.showwarning("校验", "平均采样次数需在1~500；平均值减去需≥0。", parent=top)
+                    return
+            # Ensure ID
+            if idx is None:
+                item_id = str(uuid.uuid4())
+            else:
+                try:
+                    item_id = str(items[idx].get("id") or str(uuid.uuid4()))
+                except Exception:
+                    item_id = str(uuid.uuid4())
             item = {
                 "enabled": bool(v_enabled.get()),
                 "item_name": name,
-                "price_threshold": int(v_thr.get()),
-                "target_total": int(v_target.get()),
-                "max_per_order": int(v_max.get()),
+                "price_threshold": thr_v,
+                "price_premium_pct": int(v_premium.get()),
+                "restock_price": restock_v,
+                "target_total": tgt_v,
+                "max_per_order": max_v,
+                "max_button_qty": maxbtn_v,
+                "default_buy_qty": defqty_v,
+                "price_mode": ("average" if mode_val == "average" else "fixed"),
+                "avg_samples": int(avg_s),
+                "avg_subtract": int(avg_sub),
+                "id": item_id,
                 "purchased": 0 if idx is None else int(items[idx].get("purchased", 0)),
             }
             if idx is None:
@@ -3210,6 +3622,9 @@ class App(tk.Tk):
         idx = int(sel[0])
         items = self.cfg.get("purchase_items", [])
         if 0 <= idx < len(items):
+            name = str(items[idx].get("item_name", ""))
+            if not messagebox.askokcancel("删除", f"确定删除商品 [{name}] 吗？此操作不可撤销。"):
+                return
             del items[idx]
             save_config(self.cfg, "config.json")
             self._load_items_from_cfg()
@@ -3232,22 +3647,23 @@ class App(tk.Tk):
             items[idx].update({"purchased": int(it.get("purchased", 0))})
             # Refresh one row
             try:
+                mode_disp = "固定" if str(items[idx].get("price_mode", "fixed")).lower() != "average" else "平均"
                 self.tree.item(str(idx), values=(
                     "是" if items[idx].get("enabled", True) else "否",
                     items[idx].get("item_name", ""),
                     int(items[idx].get("price_threshold", 0)),
+                    int(items[idx].get("restock_price", 0)),
+                    int(items[idx].get("price_premium_pct", 0)),
+                    mode_disp,
+                    int(items[idx].get("max_button_qty", 120)),
                     int(items[idx].get("target_total", 0)),
                     int(items[idx].get("max_per_order", 120)),
+                    int(items[idx].get("default_buy_qty", 1)),
                     f"{int(items[idx].get('purchased', 0))}/{int(items[idx].get('target_total', 0))}",
                 ))
             except Exception:
                 self._load_items_from_cfg()
-            # Selected progress
-            sel = self.tree.selection()
-            if sel and int(sel[0]) == idx:
-                p = int(items[idx].get("purchased", 0))
-                t = int(items[idx].get("target_total", 0))
-                self._set_selected_progress(p, t)
+            # No per-item selected progress UI to update
 
     # ---------- Tree helpers ----------
     def _on_tree_right_click(self, e) -> None:
@@ -3282,6 +3698,337 @@ class App(tk.Tk):
         self.tree.selection_set(row)
         if col == "#1":  # enabled column
             self._toggle_item_enable()
+
+    # ---------- Item IDs ----------
+    def _ensure_item_ids(self) -> None:
+        items = self.cfg.setdefault("purchase_items", [])
+        changed = False
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            if not it.get("id"):
+                it["id"] = str(uuid.uuid4())
+                changed = True
+        if changed:
+            save_config(self.cfg, "config.json")
+
+    # ---------- History UI ----------
+    def _get_item_by_index(self, idx: int | None) -> Dict[str, Any] | None:
+        items = self.cfg.get("purchase_items", [])
+        if idx is None:
+            return None
+        if not (0 <= idx < len(items)):
+            return None
+        return items[idx]
+
+    def _open_price_history(self, idx: int | None) -> None:
+        it = self._get_item_by_index(idx)
+        if not it:
+            return
+        try:
+            from history_store import query_price  # type: ignore
+        except Exception:
+            messagebox.showwarning("历史价格", "历史模块不可用。")
+            return
+        name = str(it.get("item_name", ""))
+        item_id = str(it.get("id", ""))
+
+        top = tk.Toplevel(self)
+        top.title(f"历史价格 - {name}")
+        top.geometry("720x420")
+        top.transient(self)
+        try:
+            top.grab_set()
+        except Exception:
+            pass
+
+        # Controls
+        ctrl = ttk.Frame(top)
+        ctrl.pack(fill=tk.X, padx=8, pady=6)
+        ttk.Label(ctrl, text="时间范围").pack(side=tk.LEFT)
+        rng_var = tk.StringVar(value="近1天")
+        cmb = ttk.Combobox(ctrl, textvariable=rng_var, state="readonly",
+                           values=["近1小时", "近1天", "近7天", "近1月"], width=10)
+        cmb.pack(side=tk.LEFT, padx=6)
+        lbl_stats = ttk.Label(ctrl, text="")
+        lbl_stats.pack(side=tk.RIGHT)
+
+        # Figure area
+        figf = ttk.Frame(top)
+        figf.pack(fill=tk.BOTH, expand=True, padx=8, pady=6)
+
+        def _sec_for_label(s: str) -> int:
+            return {
+                "近1小时": 3600,
+                "近1天": 86400,
+                "近7天": 7 * 86400,
+                "近1月": 30 * 86400,
+            }.get(s, 86400)
+
+        def _render():
+            # Lazy import matplotlib on demand
+            try:
+                import matplotlib
+                matplotlib.use("TkAgg")
+                import matplotlib.pyplot as plt  # type: ignore
+                from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg  # type: ignore
+                import matplotlib.dates as mdates  # type: ignore
+                import matplotlib.ticker as mtick  # type: ignore
+                from datetime import datetime
+            except Exception as e:
+                messagebox.showerror("历史价格", f"缺少 matplotlib 或后端不可用: {e}")
+                return
+
+            for w in figf.winfo_children():
+                try:
+                    w.destroy()
+                except Exception:
+                    pass
+
+            sec = _sec_for_label(rng_var.get())
+            since = time.time() - sec
+            recs = query_price(item_id, since)
+            x: List[Any] = []
+            y: List[int] = []
+            for r in recs:
+                try:
+                    ts = float(r.get("ts", 0.0))
+                    pr = int(r.get("price", 0))
+                except Exception:
+                    continue
+                x.append(datetime.fromtimestamp(ts))
+                y.append(pr)
+
+            fig = plt.Figure(figsize=(6.4, 3.4), dpi=100)
+            ax = fig.add_subplot(111)
+            if x and y:
+                ax.plot_date(x, y, "-", linewidth=1.5)
+                ax.set_title(name)
+                ax.set_ylabel("价格")
+                ax.grid(True, linestyle=":", alpha=0.4)
+                ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M"))
+                # y 轴使用 K/M 缩写
+                def _fmt_tick(v, _p):
+                    try:
+                        v = float(v)
+                    except Exception:
+                        return str(v)
+                    if abs(v) >= 1_000_000:
+                        return f"{v/1_000_000:.1f}M"
+                    if abs(v) >= 1_000:
+                        return f"{v/1_000:.1f}K"
+                    try:
+                        return f"{int(v):,}"
+                    except Exception:
+                        return str(v)
+                ax.yaxis.set_major_formatter(mtick.FuncFormatter(_fmt_tick))
+                fig.autofmt_xdate()
+                mn, mx = min(y), max(y)
+                # 平均价水平线
+                try:
+                    avg = sum(y) / max(1, len(y))
+                    ax.axhline(avg, color="#FF9800", linestyle="--", linewidth=1.2, label="平均价")
+                    ax.legend(loc="upper right")
+                except Exception:
+                    pass
+                # 文本显示千分位
+                try:
+                    lbl_stats.configure(text=f"最高价: {mx:,}    最低价: {mn:,}")
+                except Exception:
+                    lbl_stats.configure(text=f"最高价: {mx}    最低价: {mn}")
+            else:
+                ax.set_title("暂无数据")
+                lbl_stats.configure(text="")
+            canvas = FigureCanvasTkAgg(fig, master=figf)
+            canvas.draw()
+            canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        cmb.bind("<<ComboboxSelected>>", lambda _e: _render())
+        _render()
+
+        btnf = ttk.Frame(top)
+        btnf.pack(fill=tk.X, padx=8, pady=(0, 8))
+        ttk.Button(btnf, text="关闭", command=top.destroy).pack(side=tk.RIGHT)
+        def _clear_price():
+            try:
+                from history_store import clear_price_history  # type: ignore
+            except Exception:
+                messagebox.showwarning("清空", "历史模块不可用。")
+                return
+            if not messagebox.askokcancel("清空历史", f"确定清空 [{name}] 的历史价格记录吗？该操作不可恢复。"):
+                return
+            removed = 0
+            try:
+                removed = int(clear_price_history(item_id))
+            except Exception:
+                pass
+            messagebox.showinfo("清空历史", f"已清空 {removed} 条记录。")
+            _render()
+        ttk.Button(btnf, text="清空历史", command=_clear_price).pack(side=tk.RIGHT, padx=6)
+
+    def _open_purchase_history(self, idx: int | None) -> None:
+        it = self._get_item_by_index(idx)
+        if not it:
+            return
+        try:
+            from history_store import query_purchase, summarize_purchases  # type: ignore
+        except Exception:
+            messagebox.showwarning("购买记录", "历史模块不可用。")
+            return
+        name = str(it.get("item_name", ""))
+        item_id = str(it.get("id", ""))
+
+        top = tk.Toplevel(self)
+        top.title(f"购买记录 - {name}")
+        top.geometry("780x520")
+        top.transient(self)
+        try:
+            top.grab_set()
+        except Exception:
+            pass
+
+        # Top filters + metrics
+        ctrl = ttk.Frame(top)
+        ctrl.pack(fill=tk.X, padx=8, pady=6)
+        ttk.Label(ctrl, text="时间范围").pack(side=tk.LEFT)
+        rng_var = tk.StringVar(value="近7天")
+        cmb = ttk.Combobox(ctrl, textvariable=rng_var, state="readonly",
+                           values=["近1小时", "近1天", "近7天", "近1月"], width=10)
+        cmb.pack(side=tk.LEFT, padx=6)
+        ttk.Label(ctrl, text="价格筛选").pack(side=tk.LEFT, padx=(12, 0))
+        v_min = tk.StringVar(value="")
+        v_max = tk.StringVar(value="")
+        ttk.Entry(ctrl, textvariable=v_min, width=8).pack(side=tk.LEFT)
+        ttk.Label(ctrl, text="~").pack(side=tk.LEFT)
+        ttk.Entry(ctrl, textvariable=v_max, width=8).pack(side=tk.LEFT)
+        btn_apply = ttk.Button(ctrl, text="应用筛选")
+        btn_apply.pack(side=tk.LEFT, padx=6)
+
+        # Metrics row
+        met = ttk.Frame(top)
+        met.pack(fill=tk.X, padx=8, pady=(0, 6))
+        lab_orders = ttk.Label(met, text="订单数: 0")
+        lab_qty = ttk.Label(met, text="购买量: 0")
+        lab_amount = ttk.Label(met, text="总花费: 0")
+        lab_avg = ttk.Label(met, text="均价: 0")
+        for w in (lab_orders, lab_qty, lab_amount, lab_avg):
+            w.pack(side=tk.LEFT, padx=12)
+
+        # Table
+        cols = ("time", "price", "qty", "amount")
+        tree = ttk.Treeview(top, columns=cols, show="headings")
+        tree.heading("time", text="时间")
+        tree.heading("price", text="单价")
+        tree.heading("qty", text="数量")
+        tree.heading("amount", text="总价")
+        tree.column("time", width=160)
+        tree.column("price", width=80, anchor="e")
+        tree.column("qty", width=80, anchor="e")
+        tree.column("amount", width=100, anchor="e")
+        tree.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+
+        def _sec_for_label(s: str) -> int:
+            return {
+                "近1小时": 3600,
+                "近1天": 86400,
+                "近7天": 7 * 86400,
+                "近1月": 30 * 86400,
+            }.get(s, 7 * 86400)
+
+        def _to_int(s: str) -> Optional[int]:
+            s2 = (s or "").strip()
+            if not s2:
+                return None
+            try:
+                return int(s2)
+            except Exception:
+                return None
+
+        def _reload():
+            sec = _sec_for_label(rng_var.get())
+            since = time.time() - sec
+            pmin = _to_int(v_min.get())
+            pmax = _to_int(v_max.get())
+            recs = query_purchase(item_id, since, price_min=pmin, price_max=pmax)
+            # Fill table
+            for r in tree.get_children():
+                tree.delete(r)
+            for i, r in enumerate(recs):
+                iso = str(r.get("iso", ""))
+                price = int(r.get("price", 0))
+                qty = int(r.get("qty", 0))
+                amount = int(r.get("amount", price * qty))
+                # 显示千分位
+                try:
+                    vs = (iso, f"{price:,}", f"{qty:,}", f"{amount:,}")
+                except Exception:
+                    vs = (iso, str(price), str(qty), str(amount))
+                tree.insert("", tk.END, iid=str(i), values=vs)
+            # Metrics
+            m = summarize_purchases(recs)
+            def fmt(n):
+                try:
+                    return f"{int(n):,}"
+                except Exception:
+                    return str(n)
+            lab_orders.configure(text=f"订单数: {fmt(m.get('orders', 0))}")
+            lab_qty.configure(text=f"购买量: {fmt(m.get('quantity', 0))}")
+            lab_amount.configure(text=f"总花费: {fmt(m.get('amount', 0))}")
+            lab_avg.configure(text=f"均价: {fmt(m.get('avg_price', 0))}")
+
+        btn_apply.configure(command=_reload)
+        cmb.bind("<<ComboboxSelected>>", lambda _e: _reload())
+        _reload()
+
+        btnf = ttk.Frame(top)
+        btnf.pack(fill=tk.X, padx=8, pady=(0, 8))
+        ttk.Button(btnf, text="关闭", command=top.destroy).pack(side=tk.RIGHT)
+        def _export_csv():
+            from tkinter import filedialog as _fd
+            path = _fd.asksaveasfilename(
+                title="导出CSV",
+                defaultextension=".csv",
+                filetypes=[("CSV", ".csv"), ("All", "*.*")],
+                initialfile=f"{name}_purchase_history.csv",
+            )
+            if not path:
+                return
+            try:
+                import csv
+                sec = _sec_for_label(rng_var.get())
+                since = time.time() - sec
+                pmin = _to_int(v_min.get())
+                pmax = _to_int(v_max.get())
+                recs = query_purchase(item_id, since, price_min=pmin, price_max=pmax)
+                with open(path, "w", encoding="utf-8-sig", newline="") as f:
+                    w = csv.writer(f)
+                    w.writerow(["时间", "单价", "数量", "总价"]) 
+                    for r in recs:
+                        iso = str(r.get("iso", ""))
+                        price = int(r.get("price", 0))
+                        qty = int(r.get("qty", 0))
+                        amount = int(r.get("amount", price * qty))
+                        w.writerow([iso, price, qty, amount])
+                messagebox.showinfo("导出CSV", f"已导出到: {path}")
+            except Exception as e:
+                messagebox.showerror("导出CSV", f"导出失败: {e}")
+        def _clear_purchase():
+            try:
+                from history_store import clear_purchase_history  # type: ignore
+            except Exception:
+                messagebox.showwarning("清空", "历史模块不可用。")
+                return
+            if not messagebox.askokcancel("清空记录", f"确定清空 [{name}] 的购买记录吗？该操作不可恢复。"):
+                return
+            removed = 0
+            try:
+                removed = int(clear_purchase_history(item_id))
+            except Exception:
+                pass
+            messagebox.showinfo("清空记录", f"已清空 {removed} 条记录。")
+            _reload()
+        ttk.Button(btnf, text="导出CSV", command=_export_csv).pack(side=tk.RIGHT, padx=6)
+        ttk.Button(btnf, text="清空记录", command=_clear_purchase).pack(side=tk.RIGHT, padx=6)
 
 
 def main() -> None:

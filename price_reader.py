@@ -1,7 +1,6 @@
 import os
 import shutil
-import json
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict, Any
 
 import pyautogui
 
@@ -392,62 +391,64 @@ def read_price_and_stock_from_roi(
     return int(best_price or 0), int(best_qty or 0)
 
 
-def _load_key_mapping(path: str = "key_mapping.json") -> dict:
+def _load_app_config(path: str = "config.json") -> Dict[str, Any]:
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+        from app_config import load_config  # type: ignore
+        return load_config(path)
     except Exception:
-        return {}
+        try:
+            import json as _json  # type: ignore
+            with open(path, "r", encoding="utf-8") as f:
+                return _json.load(f)  # type: ignore
+        except Exception:
+            return {}
 
 
-def read_lowest_price_from_config(
-    mapping_path: str = "key_mapping.json", debug: bool = False
-) -> Optional[int]:
-    """Read ROI from mapping file and return min price.
+def read_lowest_price_from_config(*, config_path: str = "config.json", debug: bool = False) -> Optional[int]:
+    """Read ROI from config.json (rects.price_region) and return min price.
 
-    Expects keys:
-      - 价格区域左上: {x, y}
-      - 价格区域右下: {x, y}
+    Backward compatible: also accepts legacy key '价格区域'.
     """
-    mapping = _load_key_mapping(mapping_path)
-    tl = mapping.get("价格区域左上")
-    br = mapping.get("价格区域右下")
-    if not (isinstance(tl, dict) and isinstance(br, dict)):
-        print("[OCR] key_mapping.json 缺少 '价格区域左上/右下'，请先标定 ROI。")
+    cfg = _load_app_config(config_path)
+    rects = (cfg.get("rects", {}) or {})
+    rect = rects.get("price_region") or rects.get("价格区域")
+    if not isinstance(rect, dict):
+        print("[OCR] 配置缺少 'rects.price_region'，请先标定 ROI。")
         return None
     try:
-        l, t = int(tl["x"]), int(tl["y"])
-        r, b = int(br["x"]), int(br["y"])
+        l, t = int(rect.get("x1", 0)), int(rect.get("y1", 0))
+        r, b = int(rect.get("x2", 0)), int(rect.get("y2", 0))
         if r <= l or b <= t:
             print("[OCR] ROI 无效：右下坐标不应小于左上坐标。")
             return None
         region = (l, t, r - l, b - t)
     except Exception:
-        print("[OCR] 解析 ROI 失败，请检查 key_mapping.json。")
+        print("[OCR] 解析 ROI 失败，请检查 config.json。")
         return None
     save = os.path.join("images", "_debug_price_proc.png") if debug else None
     return read_lowest_price_from_roi(region, debug_save=save)
 
 
-def read_price_and_stock_from_config(
-    mapping_path: str = "key_mapping.json", debug: bool = False
-) -> Tuple[int, int]:
-    """Read ROI from mapping and return (price, quantity). 0 means not found."""
-    mapping = _load_key_mapping(mapping_path)
-    tl = mapping.get("价格区域左上")
-    br = mapping.get("价格区域右下")
-    if not (isinstance(tl, dict) and isinstance(br, dict)):
-        print("[OCR] key_mapping.json 缺少 '价格区域左上/右下'，请先标定 ROI。")
+def read_price_and_stock_from_config(*, config_path: str = "config.json", debug: bool = False) -> Tuple[int, int]:
+    """Read ROI from config.json and return (price, quantity). 0 means not found.
+
+    Backward compatible: 'rects.price_region' preferred; '价格区域' accepted.
+    """
+    cfg = _load_app_config(config_path)
+    rects = (cfg.get("rects", {}) or {})
+    rect = rects.get("price_region") or rects.get("价格区域")
+    if not isinstance(rect, dict):
+        print("[OCR] 配置缺少 'rects.price_region'，请先标定 ROI。")
         return 0, 0
     try:
-        l, t = int(tl["x"]), int(tl["y"])
-        r, b = int(br["x"]), int(br["y"])
+        l, t = int(rect.get("x1", 0)), int(rect.get("y1", 0))
+        r, b = int(rect.get("x2", 0)), int(rect.get("y2", 0))
         if r <= l or b <= t:
             print("[OCR] ROI 无效：右下坐标不应小于左上坐标。")
             return 0, 0
         region = (l, t, r - l, b - t)
     except Exception:
-        print("[OCR] 解析 ROI 失败，请检查 key_mapping.json。")
+        print("[OCR] 解析 ROI 失败，请检查 config.json。")
         return 0, 0
     save = os.path.join("images", "_debug_price_proc.png") if debug else None
     return read_price_and_stock_from_roi(region, debug_save=save)

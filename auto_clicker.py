@@ -1,12 +1,12 @@
-import json
 import os
 import random
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 import threading
 
 import pyautogui
 from ahk import AHK
+from app_config import load_config  # type: ignore
 
 class ImageBasedAutomator:
     """基于模板图片的自动化点击器。保留以便必要时回落使用。"""
@@ -96,44 +96,65 @@ class ImageBasedAutomator:
 
 
 class MappingAutomator:
-    """基于 key_mapping.json 的坐标点击自动化，优先使用坐标，必要时回落图片模板。"""
+    """基于配置文件(config.json)的坐标点击自动化，优先使用坐标，必要时回落图片模板。"""
 
     def __init__(
         self,
-        mapping_path: str = "key_mapping.json",
+        *,
+        config: Optional[Dict[str, Any]] = None,
+        config_path: str = "config.json",
         wait_time: float = 1.0,
         image_automator: Optional[ImageBasedAutomator] = None,
         allow_image_fallback: bool = True,
         stop_event: Optional[threading.Event] = None,
     ) -> None:
         self.wait_time = wait_time
-        self.mapping_path = mapping_path
         self.allow_image_fallback = allow_image_fallback
         self.image_automator = image_automator
         self.ahk = AHK()
         self.key_mapping: Dict[str, Dict[str, int]] = {}
         self._stop_event = stop_event
-        self._load_mapping()
+        # 优先使用传入的配置，否则从文件加载
+        self._cfg: Dict[str, Any] = config if isinstance(config, dict) else load_config(config_path)
+        self._load_points_from_config()
 
-    def _load_mapping(self) -> None:
-        try:
-            with open(self.mapping_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception:
-            data = {}
+    def _load_points_from_config(self) -> None:
+        data = self._cfg.get("points", {}) if isinstance(self._cfg.get("points"), dict) else {}
         pts: Dict[str, Dict[str, int]] = {}
-        if isinstance(data, dict):
-            for k, v in data.items():
-                if isinstance(v, dict) and "x" in v and "y" in v:
-                    try:
-                        pts[k] = {"x": int(v["x"]), "y": int(v["y"])}
-                    except Exception:
-                        pass
+        for k, v in data.items():
+            if isinstance(v, dict) and "x" in v and "y" in v:
+                try:
+                    pts[str(k)] = {"x": int(v["x"]), "y": int(v["y"])}
+                except Exception:
+                    pass
         self.key_mapping = pts
 
     # ---- helpers ----
     def _get_point(self, label_candidates: List[str]) -> Optional[Dict[str, int]]:
-        for key in label_candidates:
+        # Map multilingual aliases to ASCII config keys
+        alias = {
+            # First item
+            "第一个商品": "first_item",
+            "第1个商品": "first_item",
+            "第一个商品位置": "first_item",
+            "first": "first_item",
+            # Quantity input
+            "数量输入框": "quantity_input",
+            "数量输入": "quantity_input",
+            "购买数量": "quantity_input",
+            "qty": "quantity_input",
+            # Optional: other common points if present
+            "首页按钮": "btn_home",
+            "市场按钮": "btn_market",
+            "市场搜索栏": "input_search",
+            "市场搜索按钮": "btn_search",
+            "购买按钮": "btn_buy",
+            "商品关闭位置": "btn_close",
+            "刷新按钮": "btn_refresh",
+            "返回按钮": "btn_back",
+        }
+        for raw in label_candidates:
+            key = alias.get(str(raw), str(raw))
             if key in self.key_mapping:
                 return self.key_mapping[key]
         return None
@@ -286,14 +307,14 @@ class MappingAutomator:
 
 if __name__ == "__main__":
     # 目标物品信息
-    TARGET_ITEM_IMAGE = "item_target_goods.png"  # 若 key_mapping 有“第一个商品”可留空
+    TARGET_ITEM_IMAGE = "item_target_goods.png"  # 若 config.points 已配置“第一个商品”可留空
     TARGET_ITEM_KEYWORD = "BH燃料电池"  # 示例关键字，可按需调整
     PURCHASE_QUANTITY = 1
 
     try:
         image_automator = ImageBasedAutomator(confidence=0.8, wait_time=2)
         automator = MappingAutomator(
-            mapping_path="key_mapping.json",
+            config_path="config.json",
             wait_time=2,
             image_automator=image_automator,
             allow_image_fallback=True,

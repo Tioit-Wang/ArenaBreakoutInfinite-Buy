@@ -1,50 +1,66 @@
 {
+    "hotkeys": {
+        "toggle": "<Control-Alt-t>",
+        "stop": "<Control-Alt-t>"
+    },
     "templates": {
-        "首页按钮": {
+        "btn_home": {
             "path": "images\\btn_home.png",
             "confidence": 0.85
         },
-        "市场按钮": {
+        "btn_market": {
             "path": "images\\btn_market.png",
             "confidence": 0.85
         },
-        "市场搜索栏": {
+        "input_search": {
             "path": "images\\input_search.png",
             "confidence": 0.85
         },
-        "市场搜索按钮": {
+        "btn_search": {
             "path": "images\\btn_search.png",
             "confidence": 0.85
         },
-        "购买按钮": {
+        "btn_buy": {
             "path": "images\\btn_buy.png",
             "confidence": 0.85
         },
-        "购买成功": {
+        "buy_ok": {
             "path": "images\\buy_ok.png",
-            "confidence": 0.85
+            "confidence": 0.9
         },
-        "商品关闭位置": {
+        "buy_fail": {
+            "path": "images\\buy_fail.png",
+            "confidence": 0.9
+        },
+        "btn_close": {
             "path": "images\\btn_close.png",
             "confidence": 0.85
         },
-        "刷新按钮": {
+        "btn_refresh": {
             "path": "images\\btn_refresh.png",
+            "confidence": 0.85
+        },
+        "btn_back": {
+            "path": "images\\btn_back.png",
+            "confidence": 0.85
+        },
+        "btn_max": {
+            "path": "images\\btn_max.png",
             "confidence": 0.85
         }
     },
     "points": {
-        "第一个商品": {
-            "x": 1479,
-            "y": 467
+        "first_item": {
+            "x": 1359,
+            "y": 295
         },
-        "数量输入框": {
-            "x": 2126,
-            "y": 738
+        "quantity_input": {
+            "x": 2109,
+            "y": 627
         }
     },
     "rects": {
-        "价格区域": {
+        "price_region": {
             "x1": 1891,
             "y1": 666,
             "x2": 2213,
@@ -55,16 +71,47 @@
         "item_name": "",
         "price_threshold": 0,
         "target_total": 0,
-        "max_per_order": 120
+        "max_per_order": 120,
+        "default_buy_qty": 1
     },
     "purchase_items": [
         {
+            "enabled": false,
+            "item_name": "PRS",
+            "price_threshold": 75,
+            "target_total": 100,
+            "max_per_order": 10,
+            "purchased": 0,
+            "id": "4ff2c71b-3204-4afe-a7bc-4784560dd535"
+        },
+        {
+            "enabled": false,
+            "item_name": "dvc12",
+            "price_threshold": 3800,
+            "target_total": 10000,
+            "max_per_order": 50,
+            "purchased": 130,
+            "default_buy_qty": 10,
+            "id": "21b25f7b-6e15-414b-b7e5-ecd97e8842d9",
+            "price_premium_pct": 0,
+            "restock_price": 0,
+            "max_button_qty": 120
+        },
+        {
             "enabled": true,
-            "item_name": "维也娜柠檬",
-            "price_threshold": 800,
-            "target_total": 4,
-            "max_per_order": 1,
-            "purchased": 2
+            "item_name": "995",
+            "price_threshold": 5900,
+            "target_total": 3000,
+            "max_per_order": 10,
+            "default_buy_qty": 10,
+            "purchased": 0,
+            "id": "695827ff-6fd5-4cfd-808d-7bd0665ef3ba",
+            "price_premium_pct": 2,
+            "restock_price": 5600,
+            "max_button_qty": 120,
+            "price_mode": "average",
+            "avg_samples": 10,
+            "avg_subtract": 700
         }
     ],
     "price_roi": {
@@ -72,13 +119,15 @@
         "top_threshold": 0.8,
         "bottom_template": "images\\buy_data_btm.png",
         "bottom_threshold": 0.8,
-        "top_offset": 175,
-        "bottom_offset": -15,
+        "top_offset": 0,
+        "bottom_offset": 0,
         "lr_pad": -15
     },
     "avg_price_area": {
         "distance_from_buy_top": 5,
         "height": 45,
-        "ocr_allowlist": "0123456789KM"
+        "ocr_allowlist": "0123456789K",
+        "ocr_engine": "tesseract",
+        "scale": 1.5
     }
 }

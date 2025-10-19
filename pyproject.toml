@@ -15,6 +15,7 @@ dependencies = [
     "paddlepaddle==3.2.0",
     "python-bidi==0.4.2",
     "easyocr>=1.7.2",
+    "matplotlib>=3.9.0",
 ]
 
 [project.scripts]

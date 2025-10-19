@@ -1,39 +1,50 @@
 import json
 import os
-from typing import Any, Dict
+from typing import Any, Dict, Tuple
 
 
 DEFAULT_CONFIG: Dict[str, Any] = {
+    "hotkeys": {
+        # Tk-style key sequences; prefer 'toggle'. Examples: "<Control-Alt-t>", "<F5>"
+        "toggle": "<Control-Alt-t>",
+        # Backward compatibility; if set, GUI will fall back to this when 'toggle' missing
+        "stop": "<Control-Alt-t>",
+    },
     "templates": {
-        # image-name -> path/confidence
-        "首页按钮": {"path": os.path.join("images", "btn_home.png"), "confidence": 0.85},
-        "市场按钮": {"path": os.path.join("images", "btn_market.png"), "confidence": 0.85},
-        "市场搜索栏": {"path": os.path.join("images", "input_search.png"), "confidence": 0.85},
-        "市场搜索按钮": {"path": os.path.join("images", "btn_search.png"), "confidence": 0.85},
-        "购买按钮": {"path": os.path.join("images", "btn_buy.png"), "confidence": 0.88},
-        "购买成功": {"path": os.path.join("images", "buy_ok.png"), "confidence": 0.90},
-        "商品关闭位置": {"path": os.path.join("images", "btn_close.png"), "confidence": 0.85},
-        "刷新按钮": {"path": os.path.join("images", "btn_refresh.png"), "confidence": 0.85},
+        # template-key -> { path, confidence }
+        "btn_home": {"path": os.path.join("images", "btn_home.png"), "confidence": 0.85},
+        "btn_market": {"path": os.path.join("images", "btn_market.png"), "confidence": 0.85},
+        "input_search": {"path": os.path.join("images", "input_search.png"), "confidence": 0.85},
+        "btn_search": {"path": os.path.join("images", "btn_search.png"), "confidence": 0.85},
+        "btn_buy": {"path": os.path.join("images", "btn_buy.png"), "confidence": 0.88},
+        "buy_ok": {"path": os.path.join("images", "buy_ok.png"), "confidence": 0.90},
+        "buy_fail": {"path": os.path.join("images", "buy_fail.png"), "confidence": 0.90},
+        "btn_close": {"path": os.path.join("images", "btn_close.png"), "confidence": 0.85},
+        "btn_refresh": {"path": os.path.join("images", "btn_refresh.png"), "confidence": 0.85},
+        "btn_back": {"path": os.path.join("images", "btn_back.png"), "confidence": 0.85},
+        "btn_max": {"path": os.path.join("images", "btn_max.png"), "confidence": 0.85},
     },
     "points": {
-        # 单点坐标
-        "第一个商品": {"x": 0, "y": 0},
-        "数量输入框": {"x": 0, "y": 0},
+        # 单点坐标 (ASCII keys)
+        "first_item": {"x": 0, "y": 0},
+        "quantity_input": {"x": 0, "y": 0},
     },
     "rects": {
-        # 区域坐标
-        "价格区域": {"x1": 0, "y1": 0, "x2": 0, "y2": 0},
-        # 可扩展: "数量区域": {...}
+        # 区域坐标 (ASCII keys)
+        "price_region": {"x1": 0, "y1": 0, "x2": 0, "y2": 0},
+        # 可扩展: "stock_region": {...}
     },
     "purchase": {
         "item_name": "",
         "price_threshold": 0,
         "target_total": 0,
         "max_per_order": 120,
+        # 默认每次购买的系统数量（用于简化流程下的计数），可超量累计
+        "default_buy_qty": 1,
     },
     "purchase_items": [
         # Example item definition; users edit in GUI
-        # {"enabled": False, "item_name": "", "price_threshold": 0, "target_total": 0, "max_per_order": 120}
+        # {"enabled": False, "item_name": "", "price_threshold": 0, "target_total": 0, "max_per_order": 120, "default_buy_qty": 1}
     ],
     "price_roi": {
         "top_template": os.path.join(".", "buy_data_top.png"),
@@ -49,7 +60,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "distance_from_buy_top": 5,
         "height": 45,
         # Allowlist for PyTesseract preview (kept configurable for future tuning)
-        "ocr_allowlist": "0123456789KM",
+        "ocr_allowlist": "0123456789K",
+        # OCR engine: 'tesseract' or 'easyocr' or 'paddle'
+        "ocr_engine": "tesseract",
+        # Scale factor applied before binarization/OCR
+        "scale": 1.0,
     },
 }
 
@@ -67,7 +82,88 @@ def _deep_merge(dst: Dict[str, Any], src: Dict[str, Any]) -> Dict[str, Any]:
     return dst
 
 
-def load_config(path: str = "config.json") -> Dict[str, Any]:
+def _migrate_from_key_mapping(cfg: Dict[str, Any], mapping_path: str = "key_mapping.json") -> Tuple[Dict[str, Any], bool]:
+    """Migrate legacy key_mapping.json into cfg (points + price ROI).
+
+    - Points: copy any {"x","y"} entries to cfg["points"].
+    - ROI: if both '价格区域左上' and '价格区域右下' exist, write to cfg['rects']['价格区域'].
+    Returns (cfg, changed).
+    """
+    changed = False
+    if not os.path.exists(mapping_path):
+        return cfg, False
+    try:
+        with open(mapping_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return cfg, False
+    if not isinstance(data, dict):
+        return cfg, False
+
+    # Points (map known Chinese keys to ASCII)
+    pts = cfg.setdefault("points", {}) if isinstance(cfg.get("points"), dict) else {}
+    key_map = {
+        "第一个商品": "first_item",
+        "第1个商品": "first_item",
+        "第一个商品位置": "first_item",
+        "数量输入框": "quantity_input",
+        "数量输入": "quantity_input",
+        "购买数量": "quantity_input",
+        # Allow template-like names to map to same ASCII keys if provided as points
+        "首页按钮": "btn_home",
+        "市场按钮": "btn_market",
+        "市场搜索栏": "input_search",
+        "市场搜索按钮": "btn_search",
+        "购买按钮": "btn_buy",
+        "商品关闭位置": "btn_close",
+        "刷新按钮": "btn_refresh",
+    }
+    for k, v in list(data.items()):
+        if isinstance(v, dict) and "x" in v and "y" in v:
+            if str(k) in ("价格区域左上", "价格区域右下"):
+                continue
+            try:
+                x, y = int(v.get("x", 0)), int(v.get("y", 0))
+            except Exception:
+                continue
+            dst = key_map.get(str(k)) or (str(k) if str(k).isascii() else None)
+            if not dst:
+                continue
+            if not isinstance(pts, dict):
+                pts = {}
+                cfg["points"] = pts
+            if pts.get(dst) != {"x": x, "y": y}:
+                pts[dst] = {"x": x, "y": y}
+                changed = True
+
+    # ROI from corners -> rects.price_region
+    tl = data.get("价格区域左上")
+    br = data.get("价格区域右下")
+    if isinstance(tl, dict) and isinstance(br, dict):
+        try:
+            l, t = int(tl.get("x", 0)), int(tl.get("y", 0))
+            r, b = int(br.get("x", 0)), int(br.get("y", 0))
+        except Exception:
+            l = t = r = b = 0
+        if r > l and b > t:
+            rects = cfg.setdefault("rects", {}) if isinstance(cfg.get("rects"), dict) else {}
+            if not isinstance(rects, dict):
+                rects = {}
+                cfg["rects"] = rects
+            newr = {"x1": l, "y1": t, "x2": r, "y2": b}
+            if rects.get("price_region") != newr:
+                rects["price_region"] = newr
+                changed = True
+
+    return cfg, changed
+
+
+def load_config(
+    path: str = "config.json",
+    *,
+    migrate_legacy: bool = False,
+    normalize_keys: bool = True,
+) -> Dict[str, Any]:
     data: Dict[str, Any] = {}
     if os.path.exists(path):
         try:
@@ -78,6 +174,91 @@ def load_config(path: str = "config.json") -> Dict[str, Any]:
     cfg = json.loads(json.dumps(DEFAULT_CONFIG))
     if isinstance(data, dict):
         _deep_merge(cfg, data)
+    changed = False
+    # Optional: one-time migration from legacy key_mapping.json
+    if migrate_legacy:
+        cfg, ch_m = _migrate_from_key_mapping(cfg, mapping_path="key_mapping.json")
+        changed = changed or ch_m
+    # Normalize keys (Chinese -> ASCII) for templates/points/rects
+    def _normalize_ascii_keys(conf: Dict[str, Any]) -> bool:
+        changed_local = False
+        # templates
+        tmap = {
+            "首页按钮": "btn_home",
+            "市场按钮": "btn_market",
+            "市场搜索栏": "input_search",
+            "市场搜索按钮": "btn_search",
+            "购买按钮": "btn_buy",
+            "购买成功": "buy_ok",
+            "数量最大按钮": "btn_max",
+            "商品关闭位置": "btn_close",
+            "刷新按钮": "btn_refresh",
+        }
+        tpl = conf.get("templates")
+        if isinstance(tpl, dict):
+            new_tpl: Dict[str, Any] = {}
+            for k, v in tpl.items():
+                nk = tmap.get(str(k)) or (str(k) if str(k).isascii() else None)
+                if nk is None:
+                    # Unknown non-ascii key: skip or create slug
+                    nk = f"tpl_{abs(hash(str(k))) % 100000}"
+                if nk in new_tpl and isinstance(new_tpl[nk], dict) and isinstance(v, dict):
+                    # merge: prefer explicit values in v
+                    new_tpl[nk].update(v)
+                else:
+                    new_tpl[nk] = v
+                if nk != k:
+                    changed_local = True
+            conf["templates"] = new_tpl
+        # points
+        pmap = {
+            "第一个商品": "first_item",
+            "第1个商品": "first_item",
+            "第一个商品位置": "first_item",
+            "数量输入框": "quantity_input",
+            "数量输入": "quantity_input",
+            "购买数量": "quantity_input",
+            "首页按钮": "btn_home",
+            "市场按钮": "btn_market",
+            "市场搜索栏": "input_search",
+            "市场搜索按钮": "btn_search",
+            "购买按钮": "btn_buy",
+            "商品关闭位置": "btn_close",
+            "刷新按钮": "btn_refresh",
+        }
+        pts = conf.get("points")
+        if isinstance(pts, dict):
+            new_pts: Dict[str, Any] = {}
+            for k, v in pts.items():
+                nk = pmap.get(str(k)) or (str(k) if str(k).isascii() else None)
+                if nk is None:
+                    continue
+                new_pts[nk] = v
+                if nk != k:
+                    changed_local = True
+            conf["points"] = new_pts
+        # rects
+        rmap = {"价格区域": "price_region"}
+        rects = conf.get("rects")
+        if isinstance(rects, dict):
+            new_rects: Dict[str, Any] = {}
+            for k, v in rects.items():
+                nk = rmap.get(str(k)) or (str(k) if str(k).isascii() else None)
+                if nk is None:
+                    continue
+                new_rects[nk] = v
+                if nk != k:
+                    changed_local = True
+            conf["rects"] = new_rects
+        return changed_local
+
+    if normalize_keys and _normalize_ascii_keys(cfg):
+        changed = True
+    if changed:
+        try:
+            save_config(cfg, path)
+        except Exception:
+            pass
     return cfg
 
 
@@ -97,31 +278,4 @@ def ensure_default_config(path: str = "config.json") -> Dict[str, Any]:
     return load_config(path)
 
 
-def sync_to_key_mapping(cfg: Dict[str, Any], mapping_path: str = "key_mapping.json") -> None:
-    """Bridge minimal data to legacy key_mapping.json used by existing modules.
-
-    Writes:
-      - 单点坐标: ‘第一个商品’, ‘数量输入框’, 以及模板名中部分常用键（若存在 point 则优先）
-      - ROI: 价格区域左上/右下
-    """
-    out: Dict[str, Any] = {}
-
-    # Points (preferred keys used by MappingAutomator)
-    for key in ["第一个商品", "数量输入框", "首页按钮", "市场按钮", "市场搜索栏", "市场搜索按钮", "购买按钮", "商品关闭位置", "刷新按钮"]:
-        pt = cfg.get("points", {}).get(key)
-        if isinstance(pt, dict) and "x" in pt and "y" in pt:
-            out[key] = {"x": int(pt["x"]), "y": int(pt["y"])}
-
-    # ROI for price
-    rect = cfg.get("rects", {}).get("价格区域")
-    if isinstance(rect, dict):
-        x1 = int(rect.get("x1", 0)); y1 = int(rect.get("y1", 0))
-        x2 = int(rect.get("x2", 0)); y2 = int(rect.get("y2", 0))
-        out["价格区域左上"] = {"x": x1, "y": y1}
-        out["价格区域右下"] = {"x": x2, "y": y2}
-
-    try:
-        with open(mapping_path, "w", encoding="utf-8") as f:
-            json.dump(out, f, ensure_ascii=False, indent=4)
-    except Exception:
-        pass
+# key_mapping.json 已移除；所有坐标与 ROI 已统一放置在 config.json 中。

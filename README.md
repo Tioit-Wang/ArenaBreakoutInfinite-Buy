@@ -20,10 +20,9 @@ uv run python gui_app.py
 ## 功能概览
 
 - Tabs 布局：
-  - 初始化配置：
+ - 初始化配置：
     - 模板管理表格：模板名 | 路径(只读) | 置信度 | 测试识别 | 截图 | 预览
     - 坐标与区域配置：设置“第一个商品”“数量输入框”坐标及“价格区域”左上/右下
-    - 支持一键保存与同步到 `key_mapping.json`
   - 自动购买：
     - 多商品任务：新增/编辑（模态）、右键删除、首列单击启用/禁用
     - 轮询执行多任务，显示每项进度与日志
@@ -47,13 +46,12 @@ uv run python gui_app.py
 ```
 wg1/
 ├─ images/                  # 模板与调试截图
-├─ app_config.py            # 配置加载/保存/同步
+├─ app_config.py            # 配置加载/保存
 ├─ autobuyer.py             # 单/多商品自动购买逻辑
 ├─ auto_clicker.py          # 坐标/模板点击封装（AHK+pyautogui）
 ├─ price_reader.py          # ROI 价格 OCR
 ├─ gui_app.py               # 主 GUI 程序
 ├─ config.json              # GUI 配置（模板/坐标/任务）
-├─ key_mapping.json         # 兼容旧模块的映射
 ├─ pyproject.toml           # 依赖定义，包含脚本入口 wg1-gui
 └─ uv.lock                  # uv 锁定文件
 ```
@@ -63,3 +61,4 @@ wg1/
 - Windows 上建议以管理员权限运行，避免输入被阻止。
 - DPI 缩放影响坐标与模板匹配，建议设置为 100% 或在模板中统一截取。
 - 若 OCR 识别价格不稳定，可在“价格区域”调整 ROI 并多次保存快照验证。
+ - 可选迁移：如需从旧版 `key_mapping.json` 导入坐标与 ROI，可在代码层启用迁移（app_config.load_config 的 migrate_legacy=True）；默认不迁移，建议在界面手动设置。
