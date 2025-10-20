@@ -1996,9 +1996,10 @@ class App(tk.Tk):
         left = ttk.Frame(main)
         left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        cols = ("enabled", "name", "thr", "restock", "premium", "mode", "maxbtn", "target", "max", "defqty", "purchased")
-        self.tree = ttk.Treeview(left, columns=cols, show="headings", height=10)
-        self.tree.heading("enabled", text="启用(点切换)")
+        # 商品列表首列改为复选框风格（☑/☐），不再通过点击整列文本切换
+        cols = ("name", "thr", "restock", "premium", "mode", "maxbtn", "target", "max", "defqty", "purchased")
+        self.tree = ttk.Treeview(left, columns=cols, show="tree headings", height=10)
+        self.tree.heading("#0", text="启用")
         self.tree.heading("name", text="商品")
         self.tree.heading("thr", text="阈值")
         self.tree.heading("restock", text="补货价")
@@ -2009,7 +2010,7 @@ class App(tk.Tk):
         self.tree.heading("max", text="每单上限")
         self.tree.heading("defqty", text="默认数量")
         self.tree.heading("purchased", text="进度")
-        self.tree.column("enabled", width=46, anchor="center")
+        self.tree.column("#0", width=46, anchor="center")
         self.tree.column("name", width=160)
         self.tree.column("thr", width=70, anchor="e")
         self.tree.column("restock", width=80, anchor="e")
@@ -2023,7 +2024,7 @@ class App(tk.Tk):
         self.tree.pack(fill=tk.BOTH, expand=True)
 
         # Selection change: no per-item progress UI to update
-        # Toggle enable on left-click first column
+        # 仅在勾选框列（#0）点击时切换启用状态
         self.tree.bind("<Button-1>", self._tree_on_click, add=True)
         # Open editor modal on double-click
         self.tree.bind("<Double-1>", self._tree_on_double_click)
@@ -3676,19 +3677,24 @@ class App(tk.Tk):
         items = self.cfg.get("purchase_items", [])
         for i, it in enumerate(items):
             mode_disp = "固定" if str(it.get("price_mode", "fixed")).lower() != "average" else "平均"
-            self.tree.insert("", tk.END, iid=str(i), values=(
-                "是" if it.get("enabled", True) else "否",
-                it.get("item_name", ""),
-                int(it.get("price_threshold", 0)),
-                int(it.get("restock_price", 0)),
-                int(it.get("price_premium_pct", 0)),
-                mode_disp,
-                int(it.get("max_button_qty", 120)),
-                int(it.get("target_total", 0)),
-                int(it.get("max_per_order", 120)),
-                int(it.get("default_buy_qty", 1)),
-                f"{int(it.get('purchased', 0))}/{int(it.get('target_total', 0))}",
-            ))
+            self.tree.insert(
+                "",
+                tk.END,
+                iid=str(i),
+                text=("☑" if it.get("enabled", True) else "☐"),
+                values=(
+                    it.get("item_name", ""),
+                    int(it.get("price_threshold", 0)),
+                    int(it.get("restock_price", 0)),
+                    int(it.get("price_premium_pct", 0)),
+                    mode_disp,
+                    int(it.get("max_button_qty", 120)),
+                    int(it.get("target_total", 0)),
+                    int(it.get("max_per_order", 120)),
+                    int(it.get("default_buy_qty", 1)),
+                    f"{int(it.get('purchased', 0))}/{int(it.get('target_total', 0))}",
+                ),
+            )
         if items:
             self.tree.selection_set("0")
 
@@ -3711,19 +3717,22 @@ class App(tk.Tk):
         # Refresh one row and selected progress
         try:
             mode_disp = "固定" if str(items[idx].get("price_mode", "fixed")).lower() != "average" else "平均"
-            self.tree.item(str(idx), values=(
-                "是" if items[idx].get("enabled", True) else "否",
-                items[idx].get("item_name", ""),
-                int(items[idx].get("price_threshold", 0)),
-                int(items[idx].get("restock_price", 0)),
-                int(items[idx].get("price_premium_pct", 0)),
-                mode_disp,
-                int(items[idx].get("max_button_qty", 120)),
-                int(items[idx].get("target_total", 0)),
-                int(items[idx].get("max_per_order", 120)),
-                int(items[idx].get("default_buy_qty", 1)),
-                f"0/{int(items[idx].get('target_total', 0))}",
-            ))
+            self.tree.item(
+                str(idx),
+                text=("☑" if items[idx].get("enabled", True) else "☐"),
+                values=(
+                    items[idx].get("item_name", ""),
+                    int(items[idx].get("price_threshold", 0)),
+                    int(items[idx].get("restock_price", 0)),
+                    int(items[idx].get("price_premium_pct", 0)),
+                    mode_disp,
+                    int(items[idx].get("max_button_qty", 120)),
+                    int(items[idx].get("target_total", 0)),
+                    int(items[idx].get("max_per_order", 120)),
+                    int(items[idx].get("default_buy_qty", 1)),
+                    f"0/{int(items[idx].get('target_total', 0))}",
+                ),
+            )
         except Exception:
             self._load_items_from_cfg()
         # No selected progress UI to update
@@ -3982,19 +3991,22 @@ class App(tk.Tk):
             # Refresh one row
             try:
                 mode_disp = "固定" if str(items[idx].get("price_mode", "fixed")).lower() != "average" else "平均"
-                self.tree.item(str(idx), values=(
-                    "是" if items[idx].get("enabled", True) else "否",
-                    items[idx].get("item_name", ""),
-                    int(items[idx].get("price_threshold", 0)),
-                    int(items[idx].get("restock_price", 0)),
-                    int(items[idx].get("price_premium_pct", 0)),
-                    mode_disp,
-                    int(items[idx].get("max_button_qty", 120)),
-                    int(items[idx].get("target_total", 0)),
-                    int(items[idx].get("max_per_order", 120)),
-                    int(items[idx].get("default_buy_qty", 1)),
-                    f"{int(items[idx].get('purchased', 0))}/{int(items[idx].get('target_total', 0))}",
-                ))
+                self.tree.item(
+                    str(idx),
+                    text=("☑" if items[idx].get("enabled", True) else "☐"),
+                    values=(
+                        items[idx].get("item_name", ""),
+                        int(items[idx].get("price_threshold", 0)),
+                        int(items[idx].get("restock_price", 0)),
+                        int(items[idx].get("price_premium_pct", 0)),
+                        mode_disp,
+                        int(items[idx].get("max_button_qty", 120)),
+                        int(items[idx].get("target_total", 0)),
+                        int(items[idx].get("max_per_order", 120)),
+                        int(items[idx].get("default_buy_qty", 1)),
+                        f"{int(items[idx].get('purchased', 0))}/{int(items[idx].get('target_total', 0))}",
+                    ),
+                )
             except Exception:
                 self._load_items_from_cfg()
             # No per-item selected progress UI to update
@@ -4020,17 +4032,16 @@ class App(tk.Tk):
         self._open_item_modal(int(row))
 
     def _tree_on_click(self, e) -> None:
-        # Allow column-1 click to toggle enabled
+        # 仅当点击树列(#0)区域时，切换启用状态
         region = self.tree.identify("region", e.x, e.y)
-        if region != "cell":
-            return
         row = self.tree.identify_row(e.y)
         col = self.tree.identify_column(e.x)
         if not row:
             return
-        # Ensure select row
+        # 选中该行
         self.tree.selection_set(row)
-        if col == "#1":  # enabled column
+        # 在显示为 tree 的首列点击时切换（region 可能为 'tree' 或 'cell'，列应为 '#0'）
+        if col == "#0" and region in ("tree", "cell"):
             self._toggle_item_enable()
 
     # ---------- Item IDs ----------
