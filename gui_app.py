@@ -7,7 +7,7 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 from app_config import ensure_default_config, load_config, save_config
-from autobuyer import AutoBuyer, MultiBuyer
+from autobuyer import MultiBuyer
 
 
 class _RegionSelector:
@@ -309,15 +309,18 @@ class App(tk.Tk):
         # OCR 调参面板已移除
 
         # State
-        self._buyer: AutoBuyer | None = None
+        # 单商品模式已移除
         self._log_lock = threading.Lock()
         # PaddleOCR instance (lazy init when previewing ROI)
         self._paddle_ocr = None  # type: ignore
         self._ocr_lock = threading.Lock()
         self._ocr_warm_started = False
         self._ocr_warm_ready = False
+        # Test launch running flag
+        self._test_launch_running = False
         self._tpl_slug_map = {
             # Chinese labels
+            "启动按钮": "btn_launch",
             "首页按钮": "btn_home",
             "市场按钮": "btn_market",
             "市场搜索栏": "input_search",
@@ -330,6 +333,7 @@ class App(tk.Tk):
             "刷新按钮": "btn_refresh",
             "返回按钮": "btn_back",
             # ASCII keys map to themselves
+            "btn_launch": "btn_launch",
             "btn_home": "btn_home",
             "btn_market": "btn_market",
             "input_search": "input_search",
@@ -476,11 +480,72 @@ class App(tk.Tk):
     def _build_tab1(self) -> None:
         outer = self.tab1
 
+        # Game launcher
+        game_cfg = self.cfg.get("game", {}) if isinstance(self.cfg.get("game"), dict) else {}
+        self.var_game_path = tk.StringVar(value=str(game_cfg.get("exe_path", "")))
+        self.var_game_args = tk.StringVar(value=str(game_cfg.get("launch_args", "")))
+        try:
+            self.var_game_timeout = tk.IntVar(value=int(game_cfg.get("startup_timeout_sec", 120)))
+        except Exception:
+            self.var_game_timeout = tk.IntVar(value=120)
+        box_game = ttk.LabelFrame(outer, text="游戏启动")
+        box_game.pack(fill=tk.X, padx=8, pady=(8, 0))
+        ttk.Label(box_game, text="启动路径").grid(row=0, column=0, sticky="e", padx=4, pady=6)
+        ent_game = ttk.Entry(box_game, textvariable=self.var_game_path, width=64)
+        ent_game.grid(row=0, column=1, sticky="w", padx=4)
+        def _pick_game():
+            path = filedialog.askopenfilename(title="选择游戏可执行文件", filetypes=[("Executable", ".exe .bat .cmd"), ("All", "*.*")])
+            if path:
+                self.var_game_path.set(path)
+        ttk.Button(box_game, text="选择…", command=_pick_game).grid(row=0, column=2, padx=6)
+        self.lab_game_status = ttk.Label(box_game, text="")
+        self.lab_game_status.grid(row=0, column=3, sticky="w", padx=6)
+        def _upd_game_status(*_):
+            p = (self.var_game_path.get() or "").strip()
+            if not p:
+                self.lab_game_status.configure(text="未设置")
+            elif os.path.exists(p):
+                self.lab_game_status.configure(text="已设置")
+            else:
+                self.lab_game_status.configure(text="缺失")
+            self._schedule_autosave()
+        try:
+            self.var_game_path.trace_add("write", _upd_game_status)
+        except Exception:
+            pass
+        _upd_game_status()
+        # Launch args
+        ttk.Label(box_game, text="启动参数").grid(row=1, column=0, sticky="e", padx=4, pady=(0,6))
+        ent_args = ttk.Entry(box_game, textvariable=self.var_game_args, width=64)
+        ent_args.grid(row=1, column=1, sticky="we", padx=4, pady=(0,6))
+        try:
+            self.var_game_args.trace_add("write", lambda *_: self._schedule_autosave())
+        except Exception:
+            pass
+        ttk.Label(box_game, text="启动检测超时(秒)").grid(row=2, column=0, sticky="e", padx=4, pady=(0,6))
+        try:
+            sp_to = ttk.Spinbox(box_game, from_=10, to=600, increment=10, textvariable=self.var_game_timeout, width=10)
+        except Exception:
+            sp_to = tk.Spinbox(box_game, from_=10, to=600, increment=10, textvariable=self.var_game_timeout, width=10)
+        sp_to.grid(row=2, column=1, sticky="w", padx=4, pady=(0,6))
+        # Test launch button
+        self.btn_test_launch = ttk.Button(box_game, text="预览启动", command=self._test_game_launch)
+        self.btn_test_launch.grid(row=2, column=2, padx=6, pady=(0,6))
+        # Layout: make entry column flexible
+        try:
+            box_game.columnconfigure(1, weight=1)
+        except Exception:
+            pass
+
         # Template manager
         box_tpl = ttk.LabelFrame(outer, text="模板管理")
         box_tpl.pack(fill=tk.X, padx=8, pady=8)
 
         self.template_rows: Dict[str, TemplateRow] = {}
+
+        # — 在游戏启动分组内渲染 启动按钮 模板行（从通用模板管理中移出） —
+        # 相关回调用于模板测试/截图/预览，定义在下方；此处先记住容器
+        _game_box_container = box_game
 
         def test_match(name: str, path: str, conf: float):
             if not os.path.exists(path):
@@ -526,9 +591,27 @@ class App(tk.Tk):
 
             self._select_region(_after)
 
+        # 在“游戏启动”分组放置【启动按钮】模板配置行
+        try:
+            launch_data = (self.cfg.get("templates", {}) or {}).get("btn_launch", {})
+            r_launch = TemplateRow(
+                _game_box_container,
+                "启动按钮",
+                launch_data if isinstance(launch_data, dict) else {},
+                on_test=test_match,
+                on_capture=capture_into_row,
+                on_preview=self._preview_image,
+                on_change=self._schedule_autosave,
+            )
+            r_launch.grid(row=3, column=0, columnspan=4, sticky="we", padx=6, pady=(4, 6))
+            self.template_rows["btn_launch"] = r_launch
+        except Exception:
+            pass
+
         # render rows (display Chinese name for known ASCII keys)
         rowc = 0
         DISPLAY_NAME = {
+            "btn_launch": "启动按钮",
             "btn_home": "首页按钮",
             "btn_market": "市场按钮",
             "input_search": "市场搜索栏",
@@ -542,6 +625,9 @@ class App(tk.Tk):
             "btn_back": "返回按钮",
         }
         for key, data in self.cfg.get("templates", {}).items():
+            if str(key) == "btn_launch":
+                # 已在“游戏启动”分组渲染
+                continue
             disp = DISPLAY_NAME.get(key, key)
             r = TemplateRow(
                 box_tpl,
@@ -839,6 +925,15 @@ class App(tk.Tk):
             self.cfg["templates"][key]["path"] = row.get_path()
             self.cfg["templates"][key]["confidence"] = float(row.get_confidence())
 
+        # Flush game launcher
+        self.cfg.setdefault("game", {})
+        self.cfg["game"]["exe_path"] = (self.var_game_path.get() or "").strip()
+        self.cfg["game"]["launch_args"] = (self.var_game_args.get() or "").strip()
+        try:
+            self.cfg["game"]["startup_timeout_sec"] = int(self.var_game_timeout.get() or 120)
+        except Exception:
+            self.cfg["game"]["startup_timeout_sec"] = 120
+
         # Flush ROI config
         self.cfg.setdefault("price_roi", {})
         self.cfg["price_roi"]["top_template"] = self.var_roi_top_tpl.get().strip()
@@ -994,6 +1089,208 @@ class App(tk.Tk):
             self._preview_roi_simple(crop_path)
         except Exception as e:
             messagebox.showerror("预览", f"显示失败: {e}")
+
+    # ---------- Game launch test ----------
+    def _test_game_launch(self) -> None:
+        # Avoid concurrent test
+        if getattr(self, "_test_launch_running", False):
+            messagebox.showinfo("预览启动", "已有测试在进行中，请稍候…")
+            return
+        self._test_launch_running = True
+        try:
+            self.btn_test_launch.configure(state=tk.DISABLED)
+        except Exception:
+            pass
+        # Save current config first
+        try:
+            self._save_and_sync(silent=True)
+        except Exception:
+            pass
+
+        def _tpl_path_conf(key: str) -> tuple[str, float]:
+            try:
+                tpls = self.cfg.get("templates", {}) if isinstance(self.cfg.get("templates"), dict) else {}
+                d = tpls.get(key, {}) if isinstance(tpls, dict) else {}
+                p = str((d or {}).get("path", ""))
+                if not p:
+                    p = os.path.join("images", f"{key}.png")
+                try:
+                    conf = float((d or {}).get("confidence", 0.85))
+                except Exception:
+                    conf = 0.85
+                return p, conf
+            except Exception:
+                return os.path.join("images", f"{key}.png"), 0.85
+
+        def _run():
+            ok = False
+            try:
+                self._append_log("[预览启动] 依靠启动路径启动 → 180s内识别‘启动按钮’并点击 → 再等180s识别‘市场按钮’…")
+            except Exception:
+                pass
+            # 1) 通过启动路径启动
+            try:
+                import subprocess, shlex  # type: ignore
+            except Exception:
+                subprocess = None  # type: ignore
+            game = self.cfg.get("game", {}) if isinstance(self.cfg.get("game"), dict) else {}
+            exe_path = str((game.get("exe_path", "") or "").strip())
+            args = str((game.get("launch_args", "") or "").strip())
+            if not exe_path or not os.path.exists(exe_path):
+                def _finish_noexe():
+                    try:
+                        messagebox.showwarning("预览启动", "未配置有效的启动路径，无法执行预览启动。")
+                    finally:
+                        try:
+                            self.btn_test_launch.configure(state=tk.NORMAL)
+                        except Exception:
+                            pass
+                        self._test_launch_running = False
+                try:
+                    self.after(0, _finish_noexe)
+                except Exception:
+                    _finish_noexe()
+                return
+            try:
+                cmd: list[str]
+                if args:
+                    try:
+                        cmd = [exe_path] + shlex.split(args, posix=False)
+                    except Exception:
+                        cmd = [exe_path] + args.split()
+                else:
+                    cmd = [exe_path]
+                cwd = os.path.dirname(exe_path) or None
+                creationflags = 0
+                if os.name == "nt":
+                    try:
+                        import subprocess as _sp  # type: ignore
+                        creationflags = getattr(_sp, "DETACHED_PROCESS", 0) | getattr(_sp, "CREATE_NEW_PROCESS_GROUP", 0)
+                    except Exception:
+                        creationflags = 0
+                if subprocess is not None:
+                    subprocess.Popen(cmd, cwd=cwd, creationflags=creationflags)  # noqa: S603,S607
+                try:
+                    self._append_log(f"[预览启动] 已执行: {exe_path} {' '+args if args else ''}")
+                except Exception:
+                    pass
+            except Exception as e:
+                try:
+                    self._append_log(f"[预览启动] 启动失败: {e}")
+                except Exception:
+                    pass
+                err_msg = str(e)
+                def _finish_fail(msg=err_msg):
+                    try:
+                        messagebox.showerror("预览启动", f"启动失败: {msg}")
+                    finally:
+                        try:
+                            self.btn_test_launch.configure(state=tk.NORMAL)
+                        except Exception:
+                            pass
+                        self._test_launch_running = False
+                try:
+                    self.after(0, _finish_fail)
+                except Exception:
+                    _finish_fail(err_msg)
+                return
+
+            # 2) 180s内识别‘启动按钮’并点击一次（若出现）
+            clicked_launch = False
+            try:
+                import pyautogui  # type: ignore
+            except Exception:
+                pyautogui = None  # type: ignore
+            l_path, l_conf = _tpl_path_conf("btn_launch")
+            end1 = time.time() + 180
+            while time.time() < end1 and not clicked_launch:
+                if pyautogui is None or not os.path.exists(l_path):
+                    break
+                center = None
+                try:
+                    center = pyautogui.locateCenterOnScreen(l_path, confidence=float(l_conf))
+                except Exception:
+                    center = None
+                if center is None:
+                    try:
+                        box = pyautogui.locateOnScreen(l_path, confidence=float(l_conf))
+                    except Exception:
+                        box = None
+                    if box:
+                        try:
+                            x = int(getattr(box, 'left', 0) + getattr(box, 'width', 0) // 2)
+                            y = int(getattr(box, 'top', 0) + getattr(box, 'height', 0) // 2)
+                            pyautogui.click(x, y)
+                            clicked_launch = True
+                            try:
+                                self._append_log("[预览启动] 已点击启动按钮。")
+                            except Exception:
+                                pass
+                            break
+                        except Exception:
+                            pass
+                else:
+                    try:
+                        pyautogui.click(int(getattr(center, 'x', 0)), int(getattr(center, 'y', 0)))
+                        clicked_launch = True
+                        try:
+                            self._append_log("[预览启动] 已点击启动按钮。")
+                        except Exception:
+                            pass
+                        break
+                    except Exception:
+                        pass
+                time.sleep(1.0)
+
+            # 3) 再等待180s，识别‘市场按钮’
+            m_path, m_conf = _tpl_path_conf("btn_market")
+            found_market = False
+            end2 = time.time() + 180
+            while time.time() < end2:
+                if pyautogui is None or not os.path.exists(m_path):
+                    break
+                try:
+                    if pyautogui.locateOnScreen(m_path, confidence=float(m_conf)):
+                        found_market = True
+                        break
+                except Exception:
+                    pass
+                time.sleep(1.0)
+
+            ok = bool(found_market)
+            def _finish_done():
+                try:
+                    if ok:
+                        messagebox.showinfo("预览启动", "已检测到市场按钮，启动流程验证成功。")
+                    else:
+                        # 明确指明可能需要配置启动按钮模板或市场按钮模板
+                        tips = []
+                        if not os.path.exists(m_path):
+                            tips.append("请在模板管理中设置‘市场按钮’模板")
+                        if not clicked_launch and not os.path.exists(l_path):
+                            tips.append("请在‘游戏启动’中设置‘启动按钮’模板")
+                        tip_text = ("；".join(tips)) if tips else "请检查模板/路径/超时设置"
+                        messagebox.showwarning("预览启动", f"未检测到市场按钮，启动流程未完成。{tip_text}")
+                finally:
+                    try:
+                        self.btn_test_launch.configure(state=tk.NORMAL)
+                    except Exception:
+                        pass
+                    self._test_launch_running = False
+            try:
+                self.after(0, _finish_done)
+            except Exception:
+                _finish_done()
+
+        try:
+            t = threading.Thread(target=_run, name="test-launch", daemon=True)
+            t.start()
+        except Exception:
+            self._test_launch_running = False
+            try:
+                self.btn_test_launch.configure(state=tk.NORMAL)
+            except Exception:
+                pass
 
     @staticmethod
     def _roi_match_template(gray, tmpl_gray, search_roi=None, method=0):
@@ -3459,6 +3756,9 @@ class App(tk.Tk):
             "price_mode": "fixed",
             "avg_samples": 100,
             "avg_subtract": 0,
+            # 执行时间段（可选）：HH:MM 到 HH:MM，支持跨天
+            "time_start": "",
+            "time_end": "",
             "id": "",
         }
         if idx is not None and 0 <= idx < len(items):
@@ -3477,6 +3777,9 @@ class App(tk.Tk):
         v_max = tk.IntVar(value=int(data.get("max_per_order", 120)))
         v_maxbtn = tk.IntVar(value=int(data.get("max_button_qty", 120)))
         v_defqty = tk.IntVar(value=int(data.get("default_buy_qty", 1)))
+        # Time window
+        v_tstart = tk.StringVar(value=str(data.get("time_start", "")))
+        v_tend = tk.StringVar(value=str(data.get("time_end", "")))
         # Price mode fields
         v_mode = tk.StringVar(value=str(data.get("price_mode", "fixed")))
         v_avg_samples = tk.IntVar(value=int(data.get("avg_samples", 100)))
@@ -3504,9 +3807,20 @@ class App(tk.Tk):
         ttk.Label(frm, text="默认数量").grid(row=8, column=0, sticky="e", padx=4, pady=4)
         ttk.Spinbox(frm, from_=1, to=999999, textvariable=v_defqty, width=12).grid(row=8, column=1, padx=4, pady=4)
 
+        # Time window row
+        ttk.Label(frm, text="执行时间段").grid(row=9, column=0, sticky="e", padx=4, pady=4)
+        tw = ttk.Frame(frm)
+        tw.grid(row=9, column=1, sticky="w")
+        ent_ts = ttk.Entry(tw, textvariable=v_tstart, width=8)
+        ent_ts.pack(side=tk.LEFT)
+        ttk.Label(tw, text="~").pack(side=tk.LEFT, padx=4)
+        ent_te = ttk.Entry(tw, textvariable=v_tend, width=8)
+        ent_te.pack(side=tk.LEFT)
+        ttk.Label(tw, text="(HH:MM，可留空)").pack(side=tk.LEFT, padx=(6,0))
+
         # Price mode group
         grp_mode = ttk.LabelFrame(frm, text="价格模式")
-        grp_mode.grid(row=9, column=0, columnspan=2, padx=0, pady=(6, 0), sticky="we")
+        grp_mode.grid(row=10, column=0, columnspan=2, padx=0, pady=(6, 0), sticky="we")
         ttk.Label(grp_mode, text="价格模式").grid(row=0, column=0, sticky="e", padx=4, pady=4)
         cmb_mode = ttk.Combobox(grp_mode, state="readonly", width=12, values=["固定值", "平均值"])
         try:
@@ -3545,7 +3859,7 @@ class App(tk.Tk):
         _update_mode_ui()
 
         btns = ttk.Frame(frm)
-        btns.grid(row=10, column=0, columnspan=2, pady=(8, 0))
+        btns.grid(row=11, column=0, columnspan=2, pady=(8, 0))
         def on_save():
             name = v_name.get().strip()
             if not name:
@@ -3575,6 +3889,24 @@ class App(tk.Tk):
                 if avg_s < 1 or avg_s > 500 or avg_sub < 0:
                     messagebox.showwarning("校验", "平均采样次数需在1~500；平均值减去需≥0。", parent=top)
                     return
+            # Validate time window (optional)
+            def _valid_time(s: str) -> bool:
+                s2 = (s or "").strip()
+                if not s2:
+                    return True
+                try:
+                    parts = s2.split(":")
+                    if len(parts) != 2:
+                        return False
+                    hh = int(parts[0]); mm = int(parts[1])
+                    return 0 <= hh <= 23 and 0 <= mm <= 59
+                except Exception:
+                    return False
+            ts_val = (v_tstart.get() or "").strip()
+            te_val = (v_tend.get() or "").strip()
+            if not _valid_time(ts_val) or not _valid_time(te_val):
+                messagebox.showwarning("校验", "执行时间段格式需为 HH:MM（可留空）", parent=top)
+                return
             # Ensure ID
             if idx is None:
                 item_id = str(uuid.uuid4())
@@ -3596,6 +3928,8 @@ class App(tk.Tk):
                 "price_mode": ("average" if mode_val == "average" else "fixed"),
                 "avg_samples": int(avg_s),
                 "avg_subtract": int(avg_sub),
+                "time_start": ts_val,
+                "time_end": te_val,
                 "id": item_id,
                 "purchased": 0 if idx is None else int(items[idx].get("purchased", 0)),
             }

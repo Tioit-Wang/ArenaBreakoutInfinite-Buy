@@ -1,13 +1,19 @@
 import threading
 import time
 from typing import Callable, Optional, List, Dict, Any, Tuple
+import os
+import subprocess
+import shlex
 import uuid
 
 from auto_clicker import MappingAutomator, ImageBasedAutomator
 from app_config import load_config  # type: ignore
 
+# NOTE: Single-item AutoBuyer has been removed from public API. The legacy
+# implementation is kept under a private name for reference but is unused.
+AutoBuyer = None  # type: ignore
 
-class AutoBuyer:
+class _RemovedAutoBuyer:
     """Background worker that navigates, monitors price and buys when below threshold.
 
     Minimal MVP wiring to existing MappingAutomator and price_reader.
@@ -1202,6 +1208,167 @@ class MultiBuyer:
             self._btn_max_tpl = self._tpl_path_conf("btn_max")[0]
         except Exception:
             self._btn_max_tpl = "images/btn_max.png"
+        # Rate-limit for launch warnings
+        self._last_launch_log_t: float = 0.0
+
+    # ---------- Scheduling helpers ----------
+    @staticmethod
+    def _now_minutes() -> int:
+        try:
+            lt = time.localtime()
+            return int(lt.tm_hour) * 60 + int(lt.tm_min)
+        except Exception:
+            return int(time.time() // 60 % (24 * 60))
+
+    @staticmethod
+    def _parse_hhmm(s: str) -> Optional[int]:
+        s2 = (s or "").strip()
+        if not s2:
+            return None
+        try:
+            hh, mm = s2.split(":")
+            h = int(hh); m = int(mm)
+            if 0 <= h <= 23 and 0 <= m <= 59:
+                return h * 60 + m
+        except Exception:
+            return None
+        return None
+
+    def _in_time_window(self, it: Dict[str, Any]) -> bool:
+        ts = self._parse_hhmm(str(it.get("time_start", "")))
+        te = self._parse_hhmm(str(it.get("time_end", "")))
+        # If either missing -> always allowed
+        if ts is None or te is None:
+            return True
+        now = self._now_minutes()
+        if ts == te:
+            # Zero-length -> treat as always allowed
+            return True
+        if ts < te:
+            return ts <= now <= te
+        # Cross-day window
+        return now >= ts or now <= te
+
+    def _market_present(self) -> bool:
+        try:
+            import pyautogui  # type: ignore
+        except Exception:
+            return False
+        path, conf = self._tpl_path_conf("btn_market")
+        try:
+            if pyautogui.locateOnScreen(path, confidence=float(conf)):
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _click_launch_button_if_present(self) -> bool:
+        """If the launcher '启动按钮' template is visible, click it once.
+
+        Returns True if a click was attempted, False otherwise.
+        """
+        try:
+            import pyautogui  # type: ignore
+        except Exception:
+            return False
+        path, conf = self._tpl_path_conf("btn_launch")
+        try:
+            center = pyautogui.locateCenterOnScreen(path, confidence=float(conf))
+        except Exception:
+            center = None
+        if center is None:
+            try:
+                box = pyautogui.locateOnScreen(path, confidence=float(conf))
+            except Exception:
+                box = None
+            if not box:
+                return False
+            try:
+                x = int(getattr(box, 'left', 0) + getattr(box, 'width', 0) // 2)
+                y = int(getattr(box, 'top', 0) + getattr(box, 'height', 0) // 2)
+            except Exception:
+                return False
+        else:
+            try:
+                x = int(getattr(center, 'x', 0))
+                y = int(getattr(center, 'y', 0))
+            except Exception:
+                return False
+        try:
+            self.log("检测到启动按钮，正在点击…")
+        except Exception:
+            pass
+        try:
+            self.automator.click_point(x, y, clicks=1)
+            return True
+        except Exception:
+            return False
+
+    def _ensure_game_launched(self) -> bool:
+        # If market button detected, assume game ready
+        if self._market_present():
+            return True
+        # If launcher is already on screen, click launch button before/without starting exe
+        try:
+            if self._click_launch_button_if_present():
+                # Give it a brief moment to react
+                time.sleep(1.0)
+                if self._market_present():
+                    return True
+        except Exception:
+            pass
+        game = self.cfg.get("game", {}) if isinstance(self.cfg.get("game"), dict) else {}
+        exe_path = str(game.get("exe_path", "") or "").strip()
+        if not exe_path or not os.path.exists(exe_path):
+            # No path configured; still return False so caller can retry later
+            t = time.time()
+            if t - self._last_launch_log_t > 30.0:
+                self._last_launch_log_t = t
+                self.log("未配置游戏启动路径或路径不存在，无法自动启动游戏。")
+            return False
+        # Launch process best-effort
+        try:
+            args = str(game.get("launch_args", "") or "").strip()
+            cmd: List[str]
+            if args:
+                # Try to split in Windows-friendly manner
+                try:
+                    cmd = [exe_path] + shlex.split(args, posix=False)
+                except Exception:
+                    cmd = [exe_path] + args.split()
+            else:
+                cmd = [exe_path]
+            cwd = os.path.dirname(exe_path) or None
+            # Start detached where possible; ignore failures
+            creationflags = 0
+            if os.name == "nt":
+                creationflags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            subprocess.Popen(cmd, cwd=cwd, creationflags=creationflags)  # noqa: S603,S607
+            self.log(f"已启动游戏进程: {exe_path}")
+        except Exception as e:
+            t = time.time()
+            if t - self._last_launch_log_t > 30.0:
+                self._last_launch_log_t = t
+                self.log(f"启动游戏失败: {e}")
+            return False
+        # Wait for market template up to timeout
+        try:
+            timeout = int(game.get("startup_timeout_sec", 120) or 120)
+        except Exception:
+            timeout = 120
+        end_t = time.time() + max(5, timeout)
+        while time.time() < end_t and not self._stop.is_set():
+            if self._market_present():
+                self.log("检测到市场按钮，开始执行任务…")
+                return True
+            # If launcher appears during wait, try clicking the launch button
+            try:
+                self._click_launch_button_if_present()
+            except Exception:
+                pass
+            time.sleep(1.0)
+        self.log("等待市场按钮超时，稍后将重试检测。")
+        return False
 
     def log(self, s: str) -> None:
         self.on_log(s)
@@ -1504,7 +1671,8 @@ class MultiBuyer:
 
     def _run(self) -> None:
         while not self._stop.is_set():
-            all_done = True
+            any_remaining = False   # 仍有未完成的任务（未来某时可执行）
+            any_runnable = False    # 当前时间段内可执行
             for idx, it in enumerate(self.items):
                 if self._stop.is_set():
                     break
@@ -1512,15 +1680,33 @@ class MultiBuyer:
                     continue
                 if int(it.get("purchased", 0)) >= int(it.get("target_total", 0)):
                     continue
-                all_done = False
+                any_remaining = True
+                # 时间段检查：不在时间段内则跳过（保持静默）
+                if not self._in_time_window(it):
+                    continue
+                any_runnable = True
+                # 进入时间段：确保游戏已启动并就绪
+                if not self._ensure_game_launched():
+                    # 下一轮继续尝试
+                    continue
                 if not self._nav_to_search(str(it.get("item_name", ""))):
                     continue
                 self._attempt_one(idx, it)
-                # 全流程等待不超过50ms
+                # 执行路径下维持短周期
                 time.sleep(0.01)
-            if all_done:
+            if self._stop.is_set():
+                break
+            if not any_remaining:
                 self.log("所有任务均已完成")
                 break
+            if not any_runnable:
+                # 静默等待：每分钟检查一次是否进入可执行时间
+                for _ in range(60):
+                    if self._stop.wait(1.0):
+                        break
+                continue
+            # 有可执行任务时保持快速循环
+            time.sleep(0.01)
         self.log("多任务已停止")
 
     # ---------- Helpers: ROI / OCR / Buy for MultiBuyer ----------

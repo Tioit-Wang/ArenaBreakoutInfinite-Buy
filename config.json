@@ -1,9 +1,18 @@
 {
+    "game": {
+        "exe_path": "D:/WeGameApps/rail_apps/暗区突围无限(2001688)/WeGameLauncher/launcher.exe",
+        "launch_args": "",
+        "startup_timeout_sec": 120
+    },
     "hotkeys": {
         "toggle": "<Control-Alt-t>",
         "stop": "<Control-Alt-t>"
     },
     "templates": {
+        "btn_launch": {
+            "path": "images\\btn_launch.png",
+            "confidence": 0.85
+        },
         "btn_home": {
             "path": "images\\btn_home.png",
             "confidence": 0.85
@@ -51,12 +60,12 @@
     },
     "points": {
         "first_item": {
-            "x": 1359,
+            "x": 482,
             "y": 295
         },
         "quantity_input": {
-            "x": 2109,
-            "y": 627
+            "x": 1237,
+            "y": 625
         }
     },
     "rects": {
@@ -100,18 +109,20 @@
         {
             "enabled": true,
             "item_name": "995",
-            "price_threshold": 5900,
+            "price_threshold": 5800,
             "target_total": 3000,
             "max_per_order": 10,
             "default_buy_qty": 10,
             "purchased": 0,
             "id": "695827ff-6fd5-4cfd-808d-7bd0665ef3ba",
-            "price_premium_pct": 2,
+            "price_premium_pct": 1,
             "restock_price": 5600,
             "max_button_qty": 120,
-            "price_mode": "average",
+            "price_mode": "fixed",
             "avg_samples": 10,
-            "avg_subtract": 700
+            "avg_subtract": 700,
+            "time_start": "",
+            "time_end": ""
         }
     ],
     "price_roi": {

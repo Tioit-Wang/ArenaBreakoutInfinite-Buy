@@ -4,6 +4,14 @@ from typing import Any, Dict, Tuple
 
 
 DEFAULT_CONFIG: Dict[str, Any] = {
+    "game": {
+        # 可执行文件路径，用于定时到点后自动启动游戏
+        "exe_path": "",
+        # 启动参数（可选），留空则不传
+        "launch_args": "",
+        # 启动后等待“市场按钮”模板出现的超时（秒）
+        "startup_timeout_sec": 120,
+    },
     "hotkeys": {
         # Tk-style key sequences; prefer 'toggle'. Examples: "<Control-Alt-t>", "<F5>"
         "toggle": "<Control-Alt-t>",
@@ -12,6 +20,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     },
     "templates": {
         # template-key -> { path, confidence }
+        "btn_launch": {"path": os.path.join("images", "btn_launch.png"), "confidence": 0.85},
         "btn_home": {"path": os.path.join("images", "btn_home.png"), "confidence": 0.85},
         "btn_market": {"path": os.path.join("images", "btn_market.png"), "confidence": 0.85},
         "input_search": {"path": os.path.join("images", "input_search.png"), "confidence": 0.85},
@@ -184,6 +193,7 @@ def load_config(
         changed_local = False
         # templates
         tmap = {
+            "启动按钮": "btn_launch",
             "首页按钮": "btn_home",
             "市场按钮": "btn_market",
             "市场搜索栏": "input_search",
