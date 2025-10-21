@@ -65,7 +65,7 @@ class _RemovedAutoBuyer:
 
         # Runtime config for templates and ROI settings already loaded above
         self._easyocr_reader = None  # lazy init when using EasyOCR
-        self._paddleocr_reader = None  # lazy init when using PaddleOCR
+        # PaddleOCR removed
 
     def log(self, msg: str) -> None:
         self.on_log(msg)
@@ -335,15 +335,24 @@ class _RemovedAutoBuyer:
             self._easyocr_reader = None
         return self._easyocr_reader
 
-    def _ensure_paddleocr(self):
-        if getattr(self, "_paddleocr_reader", None) is not None:
-            return self._paddleocr_reader
+    # PaddleOCR / OcrLite helpers removed
+        out = (proc.stdout or "") + "\n" + (proc.stderr or "")
+        texts: List[str] = []
         try:
-            from paddleocr import PaddleOCR  # type: ignore
-            self._paddleocr_reader = PaddleOCR(use_angle_cls=True, lang='en', show_log=False)
+            m = _re.findall(r"text\s*[:：]\s*([^\r\n]+)", out, flags=_re.I)
+            for s in m:
+                s2 = str(s).strip()
+                if s2:
+                    texts.append(s2)
         except Exception:
-            self._paddleocr_reader = None
-        return self._paddleocr_reader
+            pass
+        if not texts:
+            for line in out.splitlines():
+                s = "".join(ch for ch in line.strip() if ch.isdigit() or ch in "KMkm., ")
+                s = s.strip()
+                if s and any(c.isdigit() for c in s):
+                    texts.append(s)
+        return texts
 
     def _ocr_unit_price_from_region(self, region: Tuple[int, int, int, int]) -> Optional[int]:
         """Screenshot the region and OCR a single unit price (supports K/M)."""
@@ -416,34 +425,37 @@ class _RemovedAutoBuyer:
                     raw_text = ""
             else:
                 engine = "tesseract"
-        elif engine in ("paddle", "paddleocr"):
-            reader = self._ensure_paddleocr()
-            if reader is not None:
+        
+        elif engine in ("umi", "umi-ocr", "umiocr"):
+            try:
+                import base64, io, requests  # type: ignore
+                cfg = dict(self.cfg.get("umi_ocr", {}) or {})
+                base_url = str(cfg.get("base_url", "http://127.0.0.1:1224")).rstrip("/")
+                timeout = float(cfg.get("timeout_sec", 2.5) or 2.5)
+                opts = dict(cfg.get("options", {}) or {})
+                bio = io.BytesIO()
                 try:
-                    import numpy as _np  # type: ignore
-                    arr = _np.array(bin_img or img)
-                    res = reader.ocr(arr, cls=True)
-                    texts: list[str] = []
-                    try:
-                        if isinstance(res, list) and len(res) > 0 and isinstance(res[0], list) and len(res[0]) > 0 and isinstance(res[0][0], list):
-                            for e in res[0]:
-                                if isinstance(e, list) and len(e) >= 2 and isinstance(e[1], (list, tuple)):
-                                    t = e[1][0]
-                                    if t:
-                                        texts.append(str(t))
-                        else:
-                            for e in (res or []):
-                                if isinstance(e, list) and len(e) >= 2 and isinstance(e[1], (list, tuple)):
-                                    t = e[1][0]
-                                    if t:
-                                        texts.append(str(t))
-                    except Exception:
-                        pass
-                    raw_text = "\n".join(texts)
+                    (bin_img or img).save(bio, format="PNG")
                 except Exception:
-                    raw_text = ""
-            else:
-                engine = "tesseract"
+                    img.save(bio, format="PNG")
+                data_b64 = base64.b64encode(bio.getvalue()).decode("ascii")
+                payload = {"base64": data_b64}
+                if opts:
+                    payload["options"] = opts
+                url = base_url + "/api/ocr"
+                r = requests.post(url, json=payload, timeout=timeout)
+                r.raise_for_status()
+                j = r.json()
+                if int(j.get("code", 0) or 0) == 100:
+                    d = j.get("data")
+                    if isinstance(d, list):
+                        raw_text = "\n".join(str(e.get("text", "")) for e in d if isinstance(e, dict) and e.get("text"))
+                    elif isinstance(d, str):
+                        raw_text = d
+                else:
+                    raw_text = str(j.get("data", ""))
+            except Exception:
+                raw_text = ""
         if not raw_text:
             allow = str(avg_cfg.get("ocr_allowlist", "0123456789KM"))
             need = "KMkm"
@@ -1202,7 +1214,7 @@ class MultiBuyer:
         except Exception:
             self.cfg = {}
         self._easyocr_reader = None  # type: ignore
-        self._paddleocr_reader = None  # type: ignore
+        # PaddleOCR removed
         # Cache template paths
         try:
             self._btn_max_tpl = self._tpl_path_conf("btn_max")[0]
@@ -1924,15 +1936,7 @@ class MultiBuyer:
             self._easyocr_reader = None
         return self._easyocr_reader
 
-    def _ensure_paddleocr(self):
-        if getattr(self, "_paddleocr_reader", None) is not None:
-            return self._paddleocr_reader
-        try:
-            from paddleocr import PaddleOCR  # type: ignore
-            self._paddleocr_reader = PaddleOCR(use_angle_cls=True, lang='en', show_log=False)
-        except Exception:
-            self._paddleocr_reader = None
-        return self._paddleocr_reader
+    # PaddleOCR removed
 
     def _ocr_unit_price_from_region(self, region: Tuple[int, int, int, int]) -> Optional[int]:
         try:
@@ -1994,34 +1998,7 @@ class MultiBuyer:
                     raw_text = ""
             else:
                 engine = "tesseract"
-        elif engine in ("paddle", "paddleocr"):
-            reader = self._ensure_paddleocr()
-            if reader is not None:
-                try:
-                    import numpy as _np  # type: ignore
-                    arr = _np.array(bin_img or img)
-                    res = reader.ocr(arr, cls=True)
-                    texts: list[str] = []
-                    try:
-                        if isinstance(res, list) and len(res) > 0 and isinstance(res[0], list) and len(res[0]) > 0 and isinstance(res[0][0], list):
-                            for e in res[0]:
-                                if isinstance(e, list) and len(e) >= 2 and isinstance(e[1], (list, tuple)):
-                                    t = e[1][0]
-                                    if t:
-                                        texts.append(str(t))
-                        else:
-                            for e in (res or []):
-                                if isinstance(e, list) and len(e) >= 2 and isinstance(e[1], (list, tuple)):
-                                    t = e[1][0]
-                                    if t:
-                                        texts.append(str(t))
-                    except Exception:
-                        pass
-                    raw_text = "\n".join(texts)
-                except Exception:
-                    raw_text = ""
-            else:
-                engine = "tesseract"
+        
         if not raw_text:
             allow = str(avg_cfg.get("ocr_allowlist", "0123456789KM"))
             need = "KMkm"
@@ -2503,34 +2480,7 @@ class MultiBuyer:
                     raw_text = ""
             else:
                 engine = "tesseract"
-        elif engine in ("paddle", "paddleocr"):
-            reader = self._ensure_paddleocr()
-            if reader is not None:
-                try:
-                    import numpy as _np  # type: ignore
-                    arr = _np.array(bin_img or img)
-                    res = reader.ocr(arr, cls=True)
-                    texts: list[str] = []
-                    try:
-                        if isinstance(res, list) and len(res) > 0 and isinstance(res[0], list) and len(res[0]) > 0 and isinstance(res[0][0], list):
-                            for e in res[0]:
-                                if isinstance(e, list) and len(e) >= 2 and isinstance(e[1], (list, tuple)):
-                                    t = e[1][0]
-                                    if t:
-                                        texts.append(str(t))
-                        else:
-                            for e in (res or []):
-                                if isinstance(e, list) and len(e) >= 2 and isinstance(e[1], (list, tuple)):
-                                    t = e[1][0]
-                                    if t:
-                                        texts.append(str(t))
-                    except Exception:
-                        pass
-                    raw_text = "\n".join(texts)
-                except Exception:
-                    raw_text = ""
-            else:
-                engine = "tesseract"
+        
         if not raw_text:
             allow = str(avg_cfg.get("ocr_allowlist", "0123456789KM"))
             need = "KMkm"

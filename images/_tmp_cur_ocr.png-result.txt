@@ -1,0 +1,17 @@
+=====Input Params=====
+numThread(8),padding(50),maxSideLen(1024),boxScoreThresh(0.600000),boxThresh(0.300000),unClipRatio(2.000000),doAngle(1),mostAngle(1)
+=====Init Models=====
+--- Init DbNet ---
+--- Init AngleNet ---
+--- Init CrnnNet ---
+Init Models Success!
+=====Start detect=====
+ScaleParam(sw:163,sh:122,dw:160,dh:96,0.981595,0.786885)
+---------- step: dbNet getTextBoxes ----------
+dbNetTime(7.650000ms)
+---------- step: drawTextBoxes ----------
+---------- step: angleNet getAngles ----------
+---------- step: crnnNet getTextLine ----------
+=====End detect=====
+FullDetectTime(7.670500ms)
+

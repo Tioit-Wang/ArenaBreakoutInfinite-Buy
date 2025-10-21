@@ -311,11 +311,6 @@ class App(tk.Tk):
         # State
         # 单商品模式已移除
         self._log_lock = threading.Lock()
-        # PaddleOCR instance (lazy init when previewing ROI)
-        self._paddle_ocr = None  # type: ignore
-        self._ocr_lock = threading.Lock()
-        self._ocr_warm_started = False
-        self._ocr_warm_ready = False
         # Test launch running flag
         self._test_launch_running = False
         self._tpl_slug_map = {
@@ -347,11 +342,7 @@ class App(tk.Tk):
             "btn_back": "btn_back",
         }
 
-        # Background warm-up OCR to reduce first-click latency
-        try:
-            self.after(200, self._start_ocr_warmup)
-        except Exception:
-            pass
+        # OCR warm-up removed (PaddleOCR path removed)
 
         # Global hotkey (Tk sequence). Bind configured + safe fallback
         self._bound_toggle_hotkeys: list[str] = []
@@ -829,7 +820,7 @@ class App(tk.Tk):
         # Row 1: OCR engine + scale
         ttk.Label(box_avg, text="识别引擎").grid(row=1, column=0, padx=4, pady=4, sticky="e")
         self.cmb_avg_engine = ttk.Combobox(box_avg, textvariable=self.var_avg_engine, state="readonly",
-                                           values=["tesseract", "easyocr", "paddle"], width=12)
+                                           values=["tesseract", "easyocr", "umi"], width=12)
         self.cmb_avg_engine.grid(row=1, column=1, sticky="w")
         ttk.Label(box_avg, text="放大倍率").grid(row=1, column=2, padx=8, pady=4, sticky="e")
         try:
@@ -847,6 +838,80 @@ class App(tk.Tk):
                 v.trace_add("write", lambda *_: self._schedule_autosave())
             except Exception:
                 pass
+
+        # 货币模板 → 右侧 N 像素作为价格区域（高度与模板相同）
+        box_cur = ttk.LabelFrame(outer, text="货币价格区域（模板→右侧N像素）")
+        box_cur.pack(fill=tk.X, padx=8, pady=8)
+
+        cur_cfg = self.cfg.get("currency_area", {}) if isinstance(self.cfg.get("currency_area"), dict) else {}
+        self.var_cur_tpl = tk.StringVar(value=str(cur_cfg.get("template", os.path.join("images", "currency.png"))))
+        self.var_cur_thr = tk.DoubleVar(value=float(cur_cfg.get("threshold", 0.80)))
+        try:
+            _w_def = int(cur_cfg.get("price_width", 220))
+        except Exception:
+            _w_def = 220
+        self.var_cur_width = tk.IntVar(value=_w_def)
+        # OCR engine (optional override) and scale
+        self.var_cur_engine = tk.StringVar(value=str(cur_cfg.get("ocr_engine", "")))
+        try:
+            _sc_def_cur = float(cur_cfg.get("scale", 1.0))
+        except Exception:
+            _sc_def_cur = 1.0
+        self.var_cur_scale = tk.DoubleVar(value=_sc_def_cur)
+
+        # 行0：模板与置信度 + 操作
+        ttk.Label(box_cur, text="货币模板", width=12).grid(row=0, column=0, sticky="w", padx=4, pady=2)
+        self.lab_cur_status = ttk.Label(box_cur, text="", width=8)
+        self.lab_cur_status.grid(row=0, column=1, sticky="w", padx=4)
+        ttk.Label(box_cur, text="置信度").grid(row=0, column=3, padx=4)
+        try:
+            sp_cur_thr = ttk.Spinbox(box_cur, from_=0.0, to=1.0, increment=0.01, textvariable=self.var_cur_thr, width=6, format="%.2f")
+        except Exception:
+            sp_cur_thr = tk.Spinbox(box_cur, from_=0.0, to=1.0, increment=0.01, textvariable=self.var_cur_thr, width=6)
+        sp_cur_thr.grid(row=0, column=4, sticky="w", padx=4)
+        ttk.Button(box_cur, text="测试识别", command=lambda: test_match("货币模板", self.var_cur_tpl.get().strip(), float(self.var_cur_thr.get() or 0.8))).grid(row=0, column=5, padx=4)
+        ttk.Button(box_cur, text="截图", command=lambda: _capture_roi_into(self.var_cur_tpl, slug="currency", title="货币模板")).grid(row=0, column=6, padx=4)
+        ttk.Button(box_cur, text="预览", command=self._currency_roi_preview).grid(row=0, column=7, padx=4)
+
+        # 行1：宽度
+        ttk.Label(box_cur, text="价格区域宽(px)").grid(row=1, column=0, padx=4, pady=4, sticky="e")
+        try:
+            sp_cur_w = ttk.Spinbox(box_cur, from_=20, to=2000, increment=5, textvariable=self.var_cur_width, width=8)
+        except Exception:
+            sp_cur_w = tk.Spinbox(box_cur, from_=20, to=2000, increment=5, textvariable=self.var_cur_width, width=8)
+        sp_cur_w.grid(row=1, column=1, sticky="w")
+
+        # 行1（续）：引擎 + 放大
+        ttk.Label(box_cur, text="识别引擎").grid(row=1, column=2, padx=8, pady=4, sticky="e")
+        self.cmb_cur_engine = ttk.Combobox(box_cur, textvariable=self.var_cur_engine, state="readonly",
+                                           values=["", "tesseract", "easyocr", "umi"], width=12)
+        self.cmb_cur_engine.grid(row=1, column=3, sticky="w")
+        ttk.Label(box_cur, text="放大倍率").grid(row=1, column=4, padx=8, pady=4, sticky="e")
+        try:
+            sp_cur_sc = ttk.Spinbox(box_cur, from_=0.6, to=2.5, increment=0.1, textvariable=self.var_cur_scale, width=6)
+        except Exception:
+            sp_cur_sc = tk.Spinbox(box_cur, from_=0.6, to=2.5, increment=0.1, textvariable=self.var_cur_scale, width=6)
+        sp_cur_sc.grid(row=1, column=5, sticky="w")
+
+        # 状态文本更新与自动保存
+        def _upd_cur_status(*_):
+            p = self.var_cur_tpl.get().strip()
+            if not p:
+                self.lab_cur_status.configure(text="未设置")
+            elif os.path.exists(p):
+                self.lab_cur_status.configure(text="已设置")
+            else:
+                self.lab_cur_status.configure(text="缺失")
+            self._schedule_autosave()
+        try:
+            self.var_cur_tpl.trace_add("write", _upd_cur_status)
+            self.var_cur_thr.trace_add("write", lambda *_: self._schedule_autosave())
+            self.var_cur_width.trace_add("write", lambda *_: self._schedule_autosave())
+            self.var_cur_engine.trace_add("write", lambda *_: self._schedule_autosave())
+            self.var_cur_scale.trace_add("write", lambda *_: self._schedule_autosave())
+        except Exception:
+            pass
+        _upd_cur_status()
 
         # Points（移除价格区域坐标配置，仅保留单点捕获）
         box_pos = ttk.LabelFrame(outer, text="坐标与区域配置")
@@ -950,7 +1015,7 @@ class App(tk.Tk):
             self.cfg["avg_price_area"]["distance_from_buy_top"] = int(self.var_avg_dist.get() or 0)
             self.cfg["avg_price_area"]["height"] = int(self.var_avg_height.get() or 0)
             eng = str(self.var_avg_engine.get() or "tesseract").lower()
-            if eng not in ("tesseract", "easyocr", "paddle"):
+            if eng not in ("tesseract", "easyocr", "umi"):
                 eng = "tesseract"
             self.cfg["avg_price_area"]["ocr_engine"] = eng
             try:
@@ -969,6 +1034,28 @@ class App(tk.Tk):
         self.cfg.setdefault("points", {})
         self.cfg["points"]["first_item"] = {"x": int(self.var_first_x.get()), "y": int(self.var_first_y.get())}
         self.cfg["points"]["quantity_input"] = {"x": int(self.var_qty_x.get()), "y": int(self.var_qty_y.get())}
+
+        # Currency area
+        try:
+            self.cfg.setdefault("currency_area", {})
+            self.cfg["currency_area"]["template"] = str(self.var_cur_tpl.get() or "").strip()
+            self.cfg["currency_area"]["threshold"] = float(self.var_cur_thr.get() or 0.8)
+            self.cfg["currency_area"]["price_width"] = int(self.var_cur_width.get() or 220)
+            eng = str(self.var_cur_engine.get() or "").strip().lower()
+            if eng not in ("", "tesseract", "easyocr", "umi"):
+                eng = ""
+            self.cfg["currency_area"]["ocr_engine"] = eng
+            try:
+                sc = float(self.var_cur_scale.get() or 1.0)
+            except Exception:
+                sc = 1.0
+            if sc < 0.6:
+                sc = 0.6
+            if sc > 2.5:
+                sc = 2.5
+            self.cfg["currency_area"]["scale"] = float(sc)
+        except Exception:
+            pass
 
         save_config(self.cfg, "config.json")
         if not silent:
@@ -1089,6 +1176,243 @@ class App(tk.Tk):
             self._preview_roi_simple(crop_path)
         except Exception as e:
             messagebox.showerror("预览", f"显示失败: {e}")
+
+    def _currency_roi_preview(self) -> None:
+        # 单货币模板：在屏幕查找两个位置（上=平均单价，下=合计价格），
+        # 并在每个模板的右侧 N 像素区域内进行 OCR 预览。
+        p = self.var_cur_tpl.get().strip()
+        if not p or not os.path.exists(p):
+            messagebox.showwarning("预览", "货币模板未选择或文件不存在。")
+            return
+        try:
+            import pyautogui  # type: ignore
+            import numpy as _np  # type: ignore
+            import cv2 as _cv2  # type: ignore
+        except Exception as e:
+            messagebox.showerror("预览", f"缺少依赖或导入失败: {e}")
+            return
+        try:
+            img_pil = pyautogui.screenshot()
+        except Exception as e:
+            messagebox.showerror("预览", f"截屏失败: {e}")
+            return
+        try:
+            scr = _np.array(img_pil)[:, :, ::-1].copy()  # BGR
+        except Exception as e:
+            messagebox.showerror("预览", f"图像转换失败: {e}")
+            return
+        tmpl = _cv2.imread(p, _cv2.IMREAD_COLOR)
+        if tmpl is None:
+            messagebox.showwarning("预览", "无法读取货币模板图片。")
+            return
+        try:
+            thr = float(self.var_cur_thr.get() or 0.8)
+        except Exception:
+            thr = 0.8
+        th, tw = tmpl.shape[0], tmpl.shape[1]
+        gray = _cv2.cvtColor(scr, _cv2.COLOR_BGR2GRAY)
+        tgray = _cv2.cvtColor(tmpl, _cv2.COLOR_BGR2GRAY) if tmpl.ndim == 3 else tmpl
+        res = _cv2.matchTemplate(gray, tgray, _cv2.TM_CCOEFF_NORMED)
+        ys, xs = _np.where(res >= thr)
+        cand = [(int(y), int(x), float(res[y, x])) for y, x in zip(ys, xs)]
+        cand.sort(key=lambda a: a[2], reverse=True)
+        picks: list[tuple[int, int, float]] = []
+        for y, x, s in cand:
+            ok = True
+            for py, px, _ in picks:
+                if abs(py - y) < th // 2 and abs(px - x) < tw // 2:
+                    ok = False
+                    break
+            if ok:
+                picks.append((y, x, s))
+            if len(picks) >= 2:
+                break
+        if not picks:
+            messagebox.showwarning("预览", "未找到匹配位置，请降低阈值或重截模板。")
+            return
+        picks.sort(key=lambda a: a[0])  # top->bottom
+        try:
+            pw = int(self.var_cur_width.get() or 220)
+        except Exception:
+            pw = 220
+        h, w = gray.shape[:2]
+        os.makedirs("images", exist_ok=True)
+        crops: list[tuple[str, _np.ndarray]] = []
+        for idx, (y, x, s) in enumerate(picks[:2]):
+            x1 = max(0, x + tw)
+            y1 = max(0, y)
+            x2 = min(w, x1 + max(1, pw))
+            y2 = min(h, y1 + th)
+            crop = scr[y1:y2, x1:x2]
+            tag = "avg" if idx == 0 else "total"
+            path = os.path.join("images", f"_currency_{tag}_roi.png")
+            try:
+                _cv2.imwrite(path, crop)
+            except Exception:
+                pass
+            crops.append((tag, crop))
+
+        # OCR both and show quick combined preview
+        try:
+            res_list = []
+            # Read scale for currency
+            try:
+                sc = float(self.var_cur_scale.get() or 1.0)
+            except Exception:
+                sc = 1.0
+            if sc < 0.6:
+                sc = 0.6
+            if sc > 2.5:
+                sc = 2.5
+            for tag, crop in crops:
+                try:
+                    # Apply scale before threshold
+                    if abs(sc - 1.0) > 1e-3:
+                        h0, w0 = crop.shape[:2]
+                        crop_s = _cv2.resize(crop, (max(1, int(w0 * sc)), max(1, int(h0 * sc))), interpolation=_cv2.INTER_CUBIC)
+                    else:
+                        crop_s = crop
+                    grayc = _cv2.cvtColor(crop_s, _cv2.COLOR_BGR2GRAY)
+                    _thr, thb = _cv2.threshold(grayc, 0, 255, _cv2.THRESH_BINARY + _cv2.THRESH_OTSU)
+                except Exception:
+                    thb = None
+                raw_text, cleaned, parsed, elapsed = self._ocr_text_parse_km(thb, fallback_img=crop_s)
+                res_list.append((tag, raw_text, cleaned, parsed, elapsed))
+            self._preview_currency_window(crops, res_list)
+        except Exception as e:
+            messagebox.showerror("预览", f"识别失败: {e}")
+
+    def _ocr_text_parse_km(self, bin_img, *, fallback_img=None):
+        # 使用 avg_price_area.ocr_engine 以与平均单价预览保持一致
+        try:
+            cur = str(self.var_cur_engine.get() or "").strip().lower()
+        except Exception:
+            cur = ""
+        try:
+            eng = cur if cur else str(self.var_avg_engine.get() or "tesseract").lower()
+        except Exception:
+            eng = "tesseract"
+        raw_text = ""
+        elapsed_ms = -1.0
+        cleaned = ""
+        parsed_val = None
+        try:
+            import time as _time
+            import numpy as _np  # type: ignore
+            from PIL import Image as _Image  # type: ignore
+            import pytesseract  # type: ignore
+            from price_reader import _maybe_init_tesseract  # type: ignore
+            _maybe_init_tesseract()
+            t0 = _time.perf_counter()
+            img = None
+            if bin_img is not None:
+                try:
+                    img = _Image.fromarray(bin_img)
+                except Exception:
+                    img = None
+            if img is None and fallback_img is not None:
+                try:
+                    # fallback_img is BGR ndarray
+                    arr = _np.array(fallback_img)
+                    from PIL import Image as _Image2  # type: ignore
+                    img = _Image2.fromarray(arr[:, :, ::-1])
+                except Exception:
+                    img = None
+            if eng == "easyocr":
+                try:
+                    import easyocr  # type: ignore
+                    if getattr(self, "_easyocr_reader", None) is None:
+                        self._easyocr_reader = easyocr.Reader(['en'], gpu=False)
+                    arr = _np.array(img) if img is not None else fallback_img
+                    texts = self._easyocr_reader.readtext(arr, detail=0)
+                    raw_text = "\n".join(map(str, texts))
+                except Exception as _e:
+                    raw_text = f"[easyocr失败] {_e}"
+            
+            elif eng in ("umi", "umi-ocr", "umiocr"):
+                try:
+                    texts, o_ms = self._run_umi_ocr(pil_image=img)
+                    raw_text = "\n".join(map(str, texts or []))
+                    elapsed_ms = float(o_ms)
+                except Exception as _e:
+                    raw_text = f"[umi失败] {_e}"
+            if (not raw_text or raw_text.startswith("[easyocr失败]")):
+                allow = str(self.cfg.get("avg_price_area", {}).get("ocr_allowlist", "0123456789KM"))
+                need = "KMkm"
+                allow_ex = allow + "".join(ch for ch in need if ch not in allow)
+                cfg = f"--oem 3 --psm 6 -c tessedit_char_whitelist={allow_ex}"
+                raw_text = pytesseract.image_to_string(img, config=cfg) if img is not None else ""
+            elapsed_ms = (_time.perf_counter() - t0) * 1000.0
+            up = (raw_text or "").upper()
+            cleaned = "".join(ch for ch in up if ch in "0123456789KM")
+            t = cleaned.strip().upper()
+            mult = 1
+            if t.endswith("M"):
+                mult = 1_000_000
+                t = t[:-1]
+            elif t.endswith("K"):
+                mult = 1_000
+                t = t[:-1]
+            digits = "".join(ch for ch in t if ch.isdigit())
+            if digits:
+                parsed_val = int(digits) * mult
+        except Exception:
+            pass
+        return raw_text, cleaned, parsed_val, float(elapsed_ms)
+
+    def _preview_currency_window(self, crops, results) -> None:
+        # crops: list[(tag, bgr_img)], results: list[(tag, raw, cleaned, parsed, ms)]
+        try:
+            from PIL import Image, ImageTk  # type: ignore
+            import numpy as _np  # type: ignore
+        except Exception as e:
+            messagebox.showerror("预览", f"缺少依赖: {e}")
+            return
+        top = tk.Toplevel(self)
+        try:
+            cur = (self.var_cur_engine.get() or "").strip().lower()
+            eng = cur if cur else (self.var_avg_engine.get() or "tesseract").lower()
+            eng_map = {"tesseract": "PyTesseract", "easyocr": "EasyOCR", "umi": "Umi-OCR"}
+            top.title(f"预览 - 货币价格区域（{eng_map.get(eng, eng)}）")
+        except Exception:
+            pass
+        top.transient(self)
+        try:
+            top.resizable(False, False)
+        except Exception:
+            pass
+        frm = ttk.Frame(top)
+        frm.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        def _render_row(parent, title, bgr_img, raw, cleaned, parsed, ms):
+            row = ttk.LabelFrame(parent, text=title)
+            row.pack(fill=tk.X, pady=6)
+            cv = tk.Canvas(row, width=460, height=160, highlightthickness=1, highlightbackground="#888")
+            cv.pack(side=tk.LEFT, padx=6, pady=6)
+            rgt = ttk.Frame(row)
+            rgt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=6, pady=6)
+            info = f"原始: {(raw or '').strip()}\n清洗: {cleaned or ''}\n数值: {('-' if parsed is None else parsed)}\n耗时: {int(ms)} ms"
+            ttk.Label(rgt, text=info, justify=tk.LEFT).pack(anchor="w")
+            try:
+                rgb = bgr_img[:, :, ::-1]
+                img = Image.fromarray(rgb)
+                w0, h0 = img.size
+                sc = min(460 / max(1.0, w0), 160 / max(1.0, h0))
+                nw, nh = max(1, int(w0 * sc)), max(1, int(h0 * sc))
+                tkimg = ImageTk.PhotoImage(img.resize((nw, nh), Image.LANCZOS))
+                x = (460 - tkimg.width()) // 2
+                y = (160 - tkimg.height()) // 2
+                cv.create_image(x, y, image=tkimg, anchor=tk.NW)
+                cv.image = tkimg
+            except Exception:
+                pass
+        res_map = {tag: (raw, cleaned, parsed, ms) for tag, raw, cleaned, parsed, ms in results}
+        crop_map = {tag: img for tag, img in crops}
+        if "avg" in crop_map:
+            raw, cleaned, parsed, ms = res_map.get("avg", ("", "", None, -1.0))
+            _render_row(frm, "平均单价", crop_map.get("avg"), raw, cleaned, parsed, ms)
+        if "total" in crop_map:
+            raw, cleaned, parsed, ms = res_map.get("total", ("", "", None, -1.0))
+            _render_row(frm, "合计价格", crop_map.get("total"), raw, cleaned, parsed, ms)
 
     # ---------- Game launch test ----------
     def _test_game_launch(self) -> None:
@@ -1433,9 +1757,22 @@ class App(tk.Tk):
         if not os.path.exists(crop_path):
             messagebox.showwarning("预览", "截取图不存在。")
             return
-        # Run OCR first to get timing/text
+        # Run OCR first to get timing/text (use Tesseract for quick preview)
         try:
-            _ann, ocr_texts, ocr_scores, ocr_ms = self._run_paddle_ocr(crop_path)
+            import time as _time
+            from PIL import Image as _Image  # type: ignore
+            import pytesseract  # type: ignore
+            try:
+                from price_reader import _maybe_init_tesseract  # type: ignore
+                _maybe_init_tesseract()
+            except Exception:
+                pass
+            imgp = _Image.open(crop_path)
+            t0 = _time.perf_counter()
+            raw = pytesseract.image_to_string(imgp) or ""
+            ocr_ms = (_time.perf_counter() - t0) * 1000.0
+            ocr_texts = [ln.strip() for ln in str(raw).splitlines() if ln.strip()]
+            ocr_scores = []
         except Exception as e:
             ocr_texts, ocr_scores, ocr_ms = [], [], -1.0
 
@@ -1537,100 +1874,70 @@ class App(tk.Tk):
         footer = ttk.Frame(frm)
         footer.pack(fill=tk.X, padx=margin, pady=(8, margin))
         ttk.Button(footer, text="关闭", command=top.destroy).pack(side=tk.RIGHT)
-    def _run_paddle_ocr(self, img_path: str):
-        """Run PaddleOCR and return (annotated_img_path, texts, scores, elapsed_ms)."""
-        ocr = self._ensure_paddle_ocr()
-        os.makedirs("output", exist_ok=True)
-        t0 = time.perf_counter()
-        result = ocr.predict(input=img_path)
-        elapsed_ms = (time.perf_counter() - t0) * 1000.0
-        texts: list[str] = []
-        scores: list[float] = []
-        ann_path = ""
-        from pathlib import Path
-        stem = Path(img_path).stem
-        json_path = os.path.join("output", f"{stem}_res.json")
-        ann_path = os.path.join("output", f"{stem}_ocr_res_img.png")
-        for r in result:
-            try:
-                r.save_to_img("output")
-            except Exception:
-                pass
-            try:
-                r.save_to_json("output")
-            except Exception:
-                pass
-        try:
-            if os.path.exists(json_path):
-                import json
-                with open(json_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                texts = list(map(str, data.get("rec_texts", []) or []))
-                scores = [float(x) for x in (data.get("rec_scores", []) or [])]
-        except Exception:
-            pass
-        return ann_path, texts, scores, float(elapsed_ms)
+    # PaddleOCR path removed
 
-    def _ensure_paddle_ocr(self):
-        """Ensure a single PaddleOCR instance is initialized and returned."""
+    # PaddleOCR ensure removed
+
+    # OcrLite path removed
+
+    def _run_umi_ocr(self, img_path: str | None = None, pil_image=None):
+        """Call Umi-OCR HTTP API (/api/ocr) with a PIL image or a file path.
+
+        Returns (texts: list[str], elapsed_ms: float). Uses cfg['umi_ocr'].
+        """
+        import base64 as _b64
+        import io as _io
+        import time as _time
         try:
-            from paddleocr import PaddleOCR  # type: ignore
+            import requests  # type: ignore
         except Exception as e:
-            raise RuntimeError(f"PaddleOCR 导入失败: {e}")
-
-        if getattr(self, "_paddle_ocr", None) is None:
+            raise RuntimeError(f"Umi-OCR 依赖缺失: requests ({e})")
+        cfg = (self.cfg.get("umi_ocr", {}) or {})
+        base_url = str(cfg.get("base_url", "http://127.0.0.1:1224")).rstrip("/")
+        timeout = float(cfg.get("timeout_sec", 2.5) or 2.5)
+        opts = dict(cfg.get("options", {}) or {})
+        url = base_url + "/api/ocr"
+        # Build base64
+        if pil_image is not None:
+            bio = _io.BytesIO()
             try:
-                self._ocr_lock.acquire()
-                if self._paddle_ocr is None:
-                    # Force CPU-only initialization, using default models.
-                    try:
-                        self._paddle_ocr = PaddleOCR(
-                            device="cpu",
-                            use_doc_orientation_classify=False,
-                            use_doc_unwarping=False,
-                            use_textline_orientation=False,
-                        )
-                    except TypeError:
-                        self._paddle_ocr = PaddleOCR(
-                            use_gpu=False,
-                            use_doc_orientation_classify=False,
-                            use_doc_unwarping=False,
-                            use_textline_orientation=False,
-                        )
-            finally:
+                pil_image.save(bio, format="PNG")
+            except Exception:
+                pil_image.convert("RGB").save(bio, format="PNG")
+            data_b64 = _b64.b64encode(bio.getvalue()).decode("ascii")
+        elif img_path is not None:
+            with open(img_path, "rb") as f:
+                data_b64 = _b64.b64encode(f.read()).decode("ascii")
+        else:
+            raise ValueError("_run_umi_ocr: missing image input")
+        payload = {"base64": data_b64}
+        if opts:
+            payload["options"] = opts
+        t0 = _time.perf_counter()
+        resp = requests.post(url, json=payload, timeout=timeout)
+        elapsed_ms = (_time.perf_counter() - t0) * 1000.0
+        resp.raise_for_status()
+        j = resp.json()
+        code = int(j.get("code", 0) or 0)
+        data = j.get("data")
+        texts: list[str] = []
+        if code == 100:
+            if isinstance(data, list):
+                # dict list
                 try:
-                    self._ocr_lock.release()
+                    for e in data:
+                        t = e.get("text") if isinstance(e, dict) else None
+                        if t:
+                            texts.append(str(t))
                 except Exception:
                     pass
-        return self._paddle_ocr
+            elif isinstance(data, str):
+                texts = [data]
+        elif isinstance(data, str):
+            texts = [data]
+        return texts, float(elapsed_ms)
 
-    def _start_ocr_warmup(self) -> None:
-        if getattr(self, "_ocr_warm_started", False):
-            return
-        self._ocr_warm_started = True
-        try:
-            t = threading.Thread(target=self._warmup_paddle_ocr, name="ocr-warmup", daemon=True)
-            t.start()
-        except Exception:
-            self._ocr_warm_started = False
-
-    def _warmup_paddle_ocr(self) -> None:
-        try:
-            ocr = self._ensure_paddle_ocr()
-            # Tiny inference to init graph; ignore outputs
-            try:
-                from PIL import Image  # type: ignore
-                os.makedirs("output", exist_ok=True)
-                warm_img = os.path.join("output", "_warmup_ocr.png")
-                if not os.path.exists(warm_img):
-                    img = Image.new("RGB", (64, 24), color=(255, 255, 255))
-                    img.save(warm_img)
-                _ = ocr.predict(input=warm_img)
-            except Exception:
-                pass
-            self._ocr_warm_ready = True
-        except Exception:
-            self._ocr_warm_ready = False
+    # Warm-up removed
 
     def _avg_price_roi_preview(self) -> None:
         try:
@@ -1823,14 +2130,15 @@ class App(tk.Tk):
                     raw_text = "\n".join(map(str, texts))
                 except Exception as _e:
                     raw_text = f"[easyocr失败] {_e}"
-            elif eng in ("paddle", "paddleocr"):
+            
+            elif eng in ("umi", "umi-ocr", "umiocr"):
                 try:
-                    ann, o_texts, o_scores, o_ms = self._run_paddle_ocr(crop_path)
+                    o_texts, o_ms = self._run_umi_ocr(pil_image=bin_img or img)
                     raw_text = "\n".join(map(str, o_texts or []))
                     elapsed_ms = float(o_ms)
                 except Exception as _e:
-                    raw_text = f"[paddle失败] {_e}"
-            if not raw_text or raw_text.startswith("[easyocr失败]") or raw_text.startswith("[paddle失败]"):
+                    raw_text = f"[umi失败] {_e}"
+            if (not raw_text or raw_text.startswith("[easyocr失败]")):
                 allow = str(self.cfg.get("avg_price_area", {}).get("ocr_allowlist", "0123456789KM"))
                 need = "KMkm"
                 allow_ex = allow + "".join(ch for ch in need if ch not in allow)
@@ -1875,7 +2183,7 @@ class App(tk.Tk):
             return
         top = tk.Toplevel(self)
         try:
-            eng_map = {"tesseract": "PyTesseract", "easyocr": "EasyOCR", "paddle": "PaddleOCR"}
+            eng_map = {"tesseract": "PyTesseract", "easyocr": "EasyOCR", "umi": "Umi-OCR"}
             eng_name = eng_map.get(engine.lower(), engine)
             top.title(f"预览 - 平均单价区域（截图 + {eng_name}）")
         except Exception:

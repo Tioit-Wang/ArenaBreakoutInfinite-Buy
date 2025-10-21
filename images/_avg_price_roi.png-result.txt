@@ -1,0 +1,29 @@
+=====Input Params=====
+numThread(8),padding(50),maxSideLen(1024),boxScoreThresh(0.600000),boxThresh(0.300000),unClipRatio(2.000000),doAngle(1),mostAngle(1)
+=====Init Models=====
+--- Init DbNet ---
+--- Init AngleNet ---
+--- Init CrnnNet ---
+Init Models Success!
+=====Start detect=====
+ScaleParam(sw:284,sh:145,dw:256,dh:128,0.901408,0.882759)
+---------- step: dbNet getTextBoxes ----------
+dbNetTime(14.879600ms)
+TextBox[0](+padding)[score(0.663941),[x: 164, y: 46], [x: 227, y: 46], [x: 227, y: 67], [x: 164, y: 67]]
+TextBox[1](+padding)[score(0.733771),[x: 160, y: 70], [x: 226, y: 66], [x: 227, y: 88], [x: 161, y: 91]]
+---------- step: drawTextBoxes ----------
+---------- step: angleNet getAngles ----------
+angle[0][index(1), score(0.526341), time(1.498600ms)]
+angle[1][index(1), score(0.996600), time(1.147900ms)]
+---------- step: crnnNet getTextLine ----------
+textLine[0]( B86)
+textScores[0]{0.590449 ,0.507523 ,0.572917 ,0.798681}
+crnnTime[0](5.499900ms)
+textLine[1](95 9360)
+textScores[1]{0.483366 ,0.238655 ,0.820568 ,0.717711 ,0.652341 ,0.987085 ,0.972085}
+crnnTime[1](11.054400ms)
+=====End detect=====
+FullDetectTime(34.328900ms)
+ B86
+95 9360
+

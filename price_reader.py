@@ -270,20 +270,111 @@ def _ocr_digit_boxes(bin_img) -> List[Tuple[int, float]]:
     return out
 
 
+# OcrLite support removed
+
+
+def _run_umi_ocr_on_pil(pil_img, cfg: Optional[Dict[str, Any]] = None) -> List[str]:
+    """Call Umi-OCR (/api/ocr) with a PIL image and return list of texts.
+
+    cfg: expects keys similar to DEFAULT_CONFIG['umi_ocr'].
+    """
+    import base64
+    import io
+    try:
+        import requests  # type: ignore
+    except Exception as e:
+        raise RuntimeError(f"缺少 requests 依赖: {e}")
+    ocfg = dict(cfg or {})
+    base_url = str(ocfg.get("base_url", "http://127.0.0.1:1224")).rstrip("/")
+    timeout = float(ocfg.get("timeout_sec", 2.5) or 2.5)
+    options = dict(ocfg.get("options", {}) or {})
+    buf = io.BytesIO()
+    try:
+        pil_img.save(buf, format="PNG")
+    except Exception:
+        pil_img.convert("RGB").save(buf, format="PNG")
+    data_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+    url = base_url + "/api/ocr"
+    payload = {"base64": data_b64}
+    if options:
+        payload["options"] = options
+    resp = requests.post(url, json=payload, timeout=timeout)
+    resp.raise_for_status()
+    j = resp.json()
+    code = int(j.get("code", 0) or 0)
+    data = j.get("data")
+    texts: List[str] = []
+    if code == 100:
+        if isinstance(data, list):
+            for e in data:
+                if isinstance(e, dict) and e.get("text"):
+                    texts.append(str(e["text"]))
+        elif isinstance(data, str):
+            texts = [data]
+    elif isinstance(data, str):
+        texts = [data]
+    return texts
+
+
+def _parse_price_from_texts(texts: List[str]) -> Optional[int]:
+    """Parse integer price supporting K/M suffix from a list of strings."""
+    best: Optional[int] = None
+    for raw in texts or []:
+        try:
+            t = (raw or "").strip().upper()
+            # tokenize by spaces/commas
+            for token in t.replace(",", " ").split():
+                mult = 1
+                if token.endswith("M"):
+                    mult = 1_000_000
+                    token = token[:-1]
+                elif token.endswith("K"):
+                    mult = 1_000
+                    token = token[:-1]
+                digits = "".join(ch for ch in token if ch.isdigit())
+                if digits:
+                    v = int(digits) * mult
+                    best = v if best is None or v < best else best
+        except Exception:
+            continue
+    return best
+
+
 def read_lowest_price_from_roi(
     region: Tuple[int, int, int, int],
     price_min: int = 10,
     price_max: int = 10_000_000,
     debug_save: Optional[str] = None,
+    *,
+    engine: Optional[str] = None,
 ) -> Optional[int]:
     """Capture `region=(left, top, width, height)` and return min price.
 
     Tries multiple preprocessing variants to handle low-contrast text.
     """
+    pil = pyautogui.screenshot(region=region)
+    eng = (engine or "").lower().strip() if engine else ""
+    # OcrLite path removed
+    elif eng in ("umi", "umi-ocr", "umiocr"):
+        try:
+            umi_cfg = ( _load_app_config(config_path).get("umi_ocr", {}) or {} )
+        except Exception:
+            umi_cfg = {}
+        try:
+            texts = _run_umi_ocr_on_pil(pil, umi_cfg)
+            val = _parse_price_from_texts(texts)
+            if debug_save:
+                try:
+                    os.makedirs(os.path.dirname(debug_save), exist_ok=True)
+                    pil.save(debug_save)
+                except Exception:
+                    pass
+            return int(val) if val is not None and price_min <= val <= price_max else None
+        except Exception:
+            pass
     if cv2 is None or np is None or pytesseract is None:
         print("[OCR] 缺少依赖: 请安装 opencv-python、pytesseract，并在系统安装 Tesseract。")
         return None
-    pil = pyautogui.screenshot(region=region)
     variants = _preprocess_variants_for_digits(pil)
     if not variants:
         return None
@@ -426,7 +517,9 @@ def read_lowest_price_from_config(*, config_path: str = "config.json", debug: bo
         print("[OCR] 解析 ROI 失败，请检查 config.json。")
         return None
     save = os.path.join("images", "_debug_price_proc.png") if debug else None
-    return read_lowest_price_from_roi(region, debug_save=save)
+    avg = (cfg.get("avg_price_area", {}) or {})
+    eng = str(avg.get("ocr_engine", "tesseract") or "tesseract").lower()
+    return read_lowest_price_from_roi(region, debug_save=save, engine=eng)
 
 
 def read_price_and_stock_from_config(*, config_path: str = "config.json", debug: bool = False) -> Tuple[int, int]:
@@ -452,3 +545,147 @@ def read_price_and_stock_from_config(*, config_path: str = "config.json", debug:
         return 0, 0
     save = os.path.join("images", "_debug_price_proc.png") if debug else None
     return read_price_and_stock_from_roi(region, debug_save=save)
+
+
+def read_currency_prices_from_config(
+    *,
+    config_path: str = "config.json",
+    debug: bool = False,
+) -> Tuple[Optional[int], Optional[int]]:
+    """Locate a single currency icon template and read two prices to its right.
+
+    - Matches the template across the screen and picks up to two matches.
+    - Orders matches by Y (top=平均单价, bottom=合计价格).
+    - Crops ROIs immediately to the right of each match, with width from config
+      and height equal to the template height.
+    - OCR engine follows avg_price_area.ocr_engine.
+
+    Returns (avg_price, total_price) where each is Optional[int].
+    """
+    cfg = _load_app_config(config_path)
+    cur = (cfg.get("currency_area", {}) or {})
+    tmpl_path = str(cur.get("template", "") or "").strip()
+    try:
+        thr = float(cur.get("threshold", 0.8))
+    except Exception:
+        thr = 0.8
+    try:
+        pw = int(cur.get("price_width", 220))
+    except Exception:
+        pw = 220
+    if not tmpl_path or not os.path.exists(tmpl_path):
+        print("[OCR] 配置缺少 'currency_area.template' 或文件不存在。")
+        return None, None
+    # Engine: currency_area.ocr_engine overrides; else fall back to avg_price_area.ocr_engine
+    cur_eng = str((cur.get("ocr_engine", "") or "")).strip().lower()
+    if cur_eng:
+        eng = cur_eng
+    else:
+        eng = str(((cfg.get("avg_price_area", {}) or {}).get("ocr_engine", "tesseract") or "tesseract")).lower()
+    try:
+        sc = float(cur.get("scale", 1.0))
+    except Exception:
+        sc = 1.0
+    # OcrLite config removed
+    try:
+        import pyautogui  # type: ignore
+    except Exception:
+        print("[OCR] 缺少 pyautogui 依赖。")
+        return None, None
+    if cv2 is None or np is None:
+        print("[OCR] 缺少 opencv-python/numpy 依赖。")
+        return None, None
+    try:
+        pil = pyautogui.screenshot()
+    except Exception as e:
+        print(f"[OCR] 截图失败: {e}")
+        return None, None
+    bgr = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
+    tmpl = cv2.imread(tmpl_path, cv2.IMREAD_COLOR)
+    if tmpl is None:
+        print("[OCR] 读取货币模板失败。")
+        return None, None
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    tgray = cv2.cvtColor(tmpl, cv2.COLOR_BGR2GRAY) if tmpl.ndim == 3 else tmpl
+    res = cv2.matchTemplate(gray, tgray, cv2.TM_CCOEFF_NORMED)
+    ys, xs = np.where(res >= thr)
+    th, tw = int(tgray.shape[0]), int(tgray.shape[1])
+    cand = [(int(y), int(x), float(res[y, x])) for y, x in zip(ys, xs)]
+    cand.sort(key=lambda a: a[2], reverse=True)
+    picks: list[tuple[int, int, float]] = []
+    for y, x, s in cand:
+        ok = True
+        for py, px, _ in picks:
+            if abs(py - y) < th // 2 and abs(px - x) < tw // 2:
+                ok = False
+                break
+        if ok:
+            picks.append((y, x, s))
+        if len(picks) >= 2:
+            break
+    if not picks:
+        return None, None
+    picks.sort(key=lambda a: a[0])
+    H, W = gray.shape[:2]
+    rois: list[Tuple[str, Tuple[int, int, int, int]]] = []
+    for idx, (y, x, s) in enumerate(picks[:2]):
+        x1 = max(0, x + tw)
+        y1 = max(0, y)
+        x2 = min(W, x1 + max(1, pw))
+        y2 = min(H, y1 + th)
+        rois.append(("avg" if idx == 0 else "total", (x1, y1, max(1, x2 - x1), max(1, y2 - y1))))
+
+    def _ocr_one(region: Tuple[int, int, int, int]) -> Optional[int]:
+        # OcrLite path
+        # OcrLite path removed
+        elif eng in ("umi", "umi-ocr", "umiocr"):
+            try:
+                img = pyautogui.screenshot(region=region)
+            except Exception:
+                return None
+            try:
+                texts = _run_umi_ocr_on_pil(img, (cfg.get("umi_ocr", {}) or {}))
+            except Exception:
+                return None
+            val = _parse_price_from_texts(texts)
+            return int(val) if val is not None else None
+        # Tesseract path
+        if pytesseract is None:
+            return None
+        _maybe_init_tesseract()
+        try:
+            img = pyautogui.screenshot(region=region)
+            if abs(sc - 1.0) > 1e-3:
+                try:
+                    w, h = img.size
+                    from PIL import Image as _Image  # type: ignore
+                    img = img.resize((max(1, int(w * sc)), max(1, int(h * sc))), resample=getattr(_Image, 'LANCZOS', 1))
+                except Exception:
+                    pass
+        except Exception:
+            return None
+        try:
+            txt = pytesseract.image_to_string(
+                img, config="--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789KM"
+            )
+        except Exception:
+            return None
+        return _parse_price_from_texts([txt or ""]) or None
+
+    avg_val: Optional[int] = None
+    tot_val: Optional[int] = None
+    for tag, reg in rois:
+        v = _ocr_one(reg)
+        if tag == "avg":
+            avg_val = v
+        else:
+            tot_val = v
+        if debug:
+            try:
+                os.makedirs("images", exist_ok=True)
+                dbg = os.path.join("images", f"_cur_{tag}_dbg.png")
+                pil2 = pyautogui.screenshot(region=reg)
+                pil2.save(dbg)
+            except Exception:
+                pass
+    return avg_val, tot_val

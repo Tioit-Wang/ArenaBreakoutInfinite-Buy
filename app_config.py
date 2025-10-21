@@ -12,6 +12,15 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # 启动后等待“市场按钮”模板出现的超时（秒）
         "startup_timeout_sec": 120,
     },
+    # Umi-OCR HTTP 服务 (可选)
+    "umi_ocr": {
+        "base_url": "http://127.0.0.1:1224",
+        "timeout_sec": 2.5,
+        # 传给 /api/ocr 的 options（可留空）。常用：{"data.format": "text"}
+        "options": {
+            "data.format": "text"
+        },
+    },
     "hotkeys": {
         # Tk-style key sequences; prefer 'toggle'. Examples: "<Control-Alt-t>", "<F5>"
         "toggle": "<Control-Alt-t>",
@@ -64,13 +73,24 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "bottom_offset": 0,
         "lr_pad": 0,
     },
+    "currency_area": {
+        # 单个货币图标模板；右侧 N 像素为价格区域；模板高度即为区域高度
+        "template": os.path.join("images", "currency.png"),
+        "threshold": 0.80,
+        # 价格区域宽度（像素）
+        "price_width": 220,
+        # 识别引擎（与平均单价相同的选项）；留空则沿用 avg_price_area.ocr_engine
+        "ocr_engine": "",
+        # 放大倍率（0.6-2.5），用于 ROI 识别前的缩放
+        "scale": 1.0,
+    },
     "avg_price_area": {
         # ROI width follows the Buy button width; these control vertical position/size
         "distance_from_buy_top": 5,
         "height": 45,
         # Allowlist for PyTesseract preview (kept configurable for future tuning)
         "ocr_allowlist": "0123456789K",
-        # OCR engine: 'tesseract' or 'easyocr' or 'paddle'
+        # OCR engine: 'tesseract' | 'easyocr' | 'umi'
         "ocr_engine": "tesseract",
         # Scale factor applied before binarization/OCR
         "scale": 1.0,

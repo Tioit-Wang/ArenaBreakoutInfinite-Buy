@@ -62,3 +62,10 @@ wg1/
 - DPI 缩放影响坐标与模板匹配，建议设置为 100% 或在模板中统一截取。
 - 若 OCR 识别价格不稳定，可在“价格区域”调整 ROI 并多次保存快照验证。
  - 可选迁移：如需从旧版 `key_mapping.json` 导入坐标与 ROI，可在代码层启用迁移（app_config.load_config 的 migrate_legacy=True）；默认不迁移，建议在界面手动设置。
+
+## OCR 引擎
+
+- 预览下拉可选择：`tesseract`、`easyocr`、`umi`。
+- `umi` 使用本地 Umi-OCR HTTP 接口（默认 `http://127.0.0.1:1224/api/ocr`）。
+  - 可在 `config.json` 的 `umi_ocr` 节调整 `base_url`、`timeout_sec` 与 `options`。
+  - 运行逻辑（自动购买）与预览共用配置键 `avg_price_area.ocr_engine`，可按配置切换至 `umi`。
