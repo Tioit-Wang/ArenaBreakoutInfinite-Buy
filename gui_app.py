@@ -101,6 +101,101 @@ class _RegionSelector:
         self.on_done(bounds)
 
 
+class _FixedSizeSelector:
+    """Overlay to position a fixed-size capture box that follows the mouse.
+
+    - Size fixed to (w, h) pixels.
+    - Moves with mouse motion; left click confirms; right click/Esc cancels.
+    Calls on_done((x1, y1, x2, y2)) on confirm, or on_done(None) on cancel.
+    """
+
+    def __init__(self, root: tk.Tk, w: int, h: int, on_done):
+        self.root = root
+        self.w = int(max(1, w))
+        self.h = int(max(1, h))
+        self.on_done = on_done
+        self.top: tk.Toplevel | None = None
+        self.canvas: tk.Canvas | None = None
+        self.rect = None
+        self._x = 0
+        self._y = 0
+
+    def show(self) -> None:
+        top = tk.Toplevel(self.root)
+        self.top = top
+        W = self.root.winfo_screenwidth()
+        H = self.root.winfo_screenheight()
+        top.geometry(f"{W}x{H}+0+0")
+        try:
+            top.attributes("-alpha", 0.25)
+        except Exception:
+            pass
+        try:
+            top.attributes("-topmost", True)
+        except Exception:
+            pass
+        top.configure(bg="black")
+        top.overrideredirect(True)
+        cv = tk.Canvas(top, bg="black", highlightthickness=0)
+        cv.pack(fill=tk.BOTH, expand=True)
+        self.canvas = cv
+        try:
+            cv.create_text(W // 2, 30, text=f"移动鼠标定位，左键确认（{self.w}x{self.h}），右键/ESC取消", fill="white", font=("Segoe UI", 12))
+        except Exception:
+            pass
+        self.rect = cv.create_rectangle(0, 0, 1, 1, outline="red", width=2)
+        cv.bind("<Motion>", self._on_motion)
+        cv.bind("<Button-1>", self._on_confirm)
+        cv.bind("<Button-3>", self._on_cancel)
+        cv.bind("<Escape>", self._on_cancel)
+        try:
+            cv.focus_force()
+            top.grab_set()
+        except Exception:
+            pass
+
+    def _on_motion(self, e):
+        self._x, self._y = int(e.x_root), int(e.y_root)
+        self._redraw()
+
+    def _redraw(self):
+        if not (self.canvas and self.rect):
+            return
+        x1 = self._x - self.w // 2
+        y1 = self._y - self.h // 2
+        x2 = x1 + self.w
+        y2 = y1 + self.h
+        self.canvas.coords(self.rect, x1, y1, x2, y2)
+
+    def _on_confirm(self, _e):
+        if self.top is None:
+            return
+        x1 = self._x - self.w // 2
+        y1 = self._y - self.h // 2
+        x2 = x1 + self.w
+        y2 = y1 + self.h
+        try:
+            self.top.grab_release()
+        except Exception:
+            pass
+        try:
+            self.top.destroy()
+        except Exception:
+            pass
+        self.on_done((x1, y1, x2, y2))
+
+    def _on_cancel(self, _e):
+        if self.top is not None:
+            try:
+                self.top.grab_release()
+            except Exception:
+                pass
+            try:
+                self.top.destroy()
+            except Exception:
+                pass
+        self.on_done(None)
+
 class _RegionSelector:
     """Simple overlay to select a screen region by dragging.
 
@@ -284,6 +379,9 @@ class App(tk.Tk):
         # Config
         ensure_default_config("config.json")
         self.cfg: Dict[str, Any] = load_config("config.json")
+        # Independent tasks store (not reusing auto-buy purchase_items)
+        self.tasks_path = "buy_tasks.json"
+        self.tasks_data: Dict[str, Any] = self._load_tasks_data(self.tasks_path)
         # Ensure each item has a stable id for history mapping
         try:
             self._ensure_item_ids()
@@ -298,9 +396,13 @@ class App(tk.Tk):
         self.tab2 = ttk.Frame(nb)
         nb.add(self.tab1, text="初始化配置")
         nb.add(self.tab2, text="自动购买")
+        # New: 购买任务配置（仅配置，不含启动）
+        self.tab_tasks = ttk.Frame(nb)
+        nb.add(self.tab_tasks, text="购买任务配置")
 
         self._build_tab1()
         self._build_tab2()
+        self._build_tab_tasks()
         try:
             nb2 = self.tab1.nametowidget(self.tab1.winfo_parent())
             self.tab_goods = ttk.Frame(nb2)
@@ -361,6 +463,31 @@ class App(tk.Tk):
         # Timer for reflecting run state in UI
         self._run_state_after_id: str | None = None
 
+    # ---------- Tasks data I/O ----------
+    def _load_tasks_data(self, path: str) -> Dict[str, Any]:
+        try:
+            import json
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    if not isinstance(data.get("tasks"), list):
+                        data["tasks"] = []
+                    if not isinstance(data.get("step_delays"), dict):
+                        data["step_delays"] = {"default": 0.01}
+                    return data
+        except Exception:
+            pass
+        return {"tasks": [], "step_delays": {"default": 0.01}}
+
+    def _save_tasks_data(self) -> None:
+        try:
+            import json
+            with open(self.tasks_path, "w", encoding="utf-8") as f:
+                json.dump(self.tasks_data, f, ensure_ascii=False, indent=4)
+        except Exception:
+            pass
+
     def _get_toggle_hotkey(self) -> str:
         try:
             hot = self.cfg.get("hotkeys", {})
@@ -370,6 +497,446 @@ class App(tk.Tk):
             return hk
         except Exception:
             return "<Control-Alt-t>"
+
+    # ---------- Tab: 购买任务配置 ----------
+    def _build_tab_tasks(self) -> None:
+        outer = self.tab_tasks
+        frm = ttk.Frame(outer)
+        frm.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+
+        # Top controls
+        top = ttk.Frame(frm)
+        top.pack(fill=tk.X)
+        self.btn_add_task = ttk.Button(top, text="新增任务（仅允许1个未完成）", command=self._add_task_card)
+        self.btn_add_task.pack(side=tk.LEFT)
+        ttk.Label(top, text="附加：步骤延时配置见下方模块").pack(side=tk.RIGHT)
+
+        # Scroll container for cards
+        wrapper = ttk.Frame(frm)
+        wrapper.pack(fill=tk.BOTH, expand=True, pady=(6, 0))
+        # Keep root for placing panels under the list
+        self._tasks_root_frame = frm
+        self.cards_canvas = tk.Canvas(wrapper, highlightthickness=0)
+        vsb = ttk.Scrollbar(wrapper, orient=tk.VERTICAL, command=self.cards_canvas.yview)
+        self.cards_canvas.configure(yscrollcommand=vsb.set)
+        self.cards_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.cards_inner = ttk.Frame(self.cards_canvas)
+        self.cards_window = self.cards_canvas.create_window(0, 0, anchor=tk.NW, window=self.cards_inner)
+
+        def _on_inner(_e=None):
+            try:
+                self.cards_canvas.configure(scrollregion=self.cards_canvas.bbox("all"))
+            except Exception:
+                pass
+        def _on_canvas(_e=None):
+            try:
+                w = self.cards_canvas.winfo_width()
+                self.cards_canvas.itemconfigure(self.cards_window, width=w)
+            except Exception:
+                pass
+        self.cards_inner.bind("<Configure>", _on_inner)
+        self.cards_canvas.bind("<Configure>", _on_canvas)
+
+        # State: whether a draft card exists
+        self._task_draft_alive = False
+        self._render_task_cards()
+
+    def _render_task_cards(self) -> None:
+        for w in self.cards_inner.winfo_children():
+            w.destroy()
+        items = list((self.tasks_data.get("tasks", []) or []))
+        # Show existing items as read-only cards with编辑
+        for i, it in enumerate(items):
+            self._build_task_card(self.cards_inner, i, it, editable=False, draft=False)
+        # Update add button availability
+        self._task_draft_alive = any(getattr(w, "_is_draft", False) for w in self.cards_inner.winfo_children())
+        try:
+            self.btn_add_task.configure(state=(tk.DISABLED if self._task_draft_alive else tk.NORMAL))
+        except Exception:
+            pass
+        # Step delay config panel
+        try:
+            self._build_step_delay_panel(self._tasks_root_frame)
+        except Exception:
+            pass
+
+    def _add_task_card(self) -> None:
+        if self._task_draft_alive:
+            return
+        # Create an empty draft card
+        draft = {
+            "enabled": True,
+            "item_name": "",
+            "price_threshold": 0,
+            "price_premium_pct": 0,
+            "restock_price": 0,
+            "target_total": 0,
+            "time_start": "",
+            "time_end": "",
+        }
+        self._build_task_card(self.cards_inner, None, draft, editable=True, draft=True)
+        self._task_draft_alive = True
+        try:
+            self.btn_add_task.configure(state=tk.DISABLED)
+        except Exception:
+            pass
+
+    # ---------- Goods picker ----------
+    def _load_goods_for_picker(self) -> list[dict]:
+        goods: list[dict] = []
+        try:
+            import json
+            if os.path.exists("goods.json"):
+                with open("goods.json", "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, list):
+                    goods = [d for d in data if isinstance(d, dict)]
+        except Exception:
+            goods = []
+        return goods
+
+    def _open_goods_picker(self, on_pick) -> None:
+        goods = self._load_goods_for_picker()
+        top = tk.Toplevel(self)
+        top.title("选择物品")
+        top.geometry("720x480")
+        top.transient(self)
+        try:
+            top.grab_set()
+        except Exception:
+            pass
+
+        # Filters
+        ctrl = ttk.Frame(top)
+        ctrl.pack(fill=tk.X, padx=8, pady=6)
+        ttk.Label(ctrl, text="搜索").pack(side=tk.LEFT)
+        var_q = tk.StringVar(value="")
+        ent = ttk.Entry(ctrl, textvariable=var_q, width=24)
+        ent.pack(side=tk.LEFT, padx=6)
+        var_big = tk.StringVar(value="全部")
+        var_sub = tk.StringVar(value="全部")
+        # derive categories from data
+        bigs = ["全部"] + sorted({str(g.get("big_category", "")) for g in goods if g.get("big_category")})
+        cmb_big = ttk.Combobox(ctrl, values=bigs, state="readonly", width=12, textvariable=var_big)
+        cmb_big.pack(side=tk.LEFT, padx=6)
+        cmb_sub = ttk.Combobox(ctrl, values=["全部"], state="readonly", width=16, textvariable=var_sub)
+        cmb_sub.pack(side=tk.LEFT, padx=6)
+        def _refresh_sub():
+            sel_big = var_big.get()
+            subs = sorted({str(g.get("sub_category", "")) for g in goods if (sel_big in ("全部", str(g.get("big_category", ""))))})
+            vals = ["全部"] + [s for s in subs if s]
+            try:
+                cmb_sub.configure(values=vals)
+            except Exception:
+                pass
+            if var_sub.get() not in vals:
+                var_sub.set("全部")
+        cmb_big.bind("<<ComboboxSelected>>", lambda _e=None: _refresh_sub())
+        _refresh_sub()
+
+        # List area
+        body = ttk.Frame(top)
+        body.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0,8))
+        cols = ("name", "big", "sub")
+        tree = ttk.Treeview(body, columns=cols, show="headings")
+        tree.heading("name", text="名称")
+        tree.heading("big", text="大类")
+        tree.heading("sub", text="子类")
+        tree.column("name", width=280)
+        tree.column("big", width=120)
+        tree.column("sub", width=180)
+        tree.pack(fill=tk.BOTH, expand=True)
+
+        def _apply_filter(_e=None):
+            q = (var_q.get() or "").strip().lower()
+            b = var_big.get(); s = var_sub.get()
+            for iid in tree.get_children():
+                tree.delete(iid)
+            for g in goods:
+                name = str(g.get("name", ""))
+                big = str(g.get("big_category", ""))
+                sub = str(g.get("sub_category", ""))
+                if b not in ("全部", big):
+                    continue
+                if s not in ("全部", sub):
+                    continue
+                if q and (q not in name.lower() and q not in str(g.get("search_name", "")).lower()):
+                    continue
+                tree.insert("", tk.END, iid=str(g.get("id", name)), values=(name, big, sub))
+        ent.bind("<KeyRelease>", _apply_filter)
+        cmb_big.bind("<<ComboboxSelected>>", _apply_filter)
+        cmb_sub.bind("<<ComboboxSelected>>", _apply_filter)
+        _apply_filter()
+
+        def _ok():
+            sel = tree.selection()
+            if not sel:
+                top.destroy(); return
+            iid = sel[0]
+            item = next((g for g in goods if str(g.get("id", "")) == iid or str(g.get("name", "")) == iid), None)
+            if item is None:
+                top.destroy(); return
+            try:
+                on_pick(item)
+            finally:
+                top.destroy()
+        btns = ttk.Frame(top)
+        btns.pack(fill=tk.X, padx=8, pady=6)
+        ttk.Button(btns, text="确定", command=_ok).pack(side=tk.RIGHT)
+        ttk.Button(btns, text="取消", command=top.destroy).pack(side=tk.RIGHT, padx=(0,6))
+        # Double-click select
+        def _on_dbl(_e=None):
+            _ok()
+        tree.bind("<Double-1>", _on_dbl)
+
+    # ---------- Step delay config module ----------
+    def _build_step_delay_panel(self, parent) -> None:
+        # Remove previous panel if any
+        old = getattr(self, "_step_panel", None)
+        if old is not None:
+            try:
+                old.destroy()
+            except Exception:
+                pass
+        panel = ttk.LabelFrame(parent, text="步骤延时配置（秒）")
+        panel.pack(fill=tk.X, padx=8, pady=8)
+        self._step_panel = panel
+        inner = ttk.Frame(panel)
+        inner.pack(fill=tk.X, padx=8, pady=6)
+        self._step_rows: list[tuple[tk.StringVar, tk.DoubleVar]] = []
+
+        def _render():
+            for w in inner.winfo_children():
+                w.destroy()
+            self._step_rows.clear()
+            delays = dict(self.tasks_data.get("step_delays", {}) or {})
+            if not delays:
+                delays = {"default": 0.01}
+            ttk.Label(inner, text="步骤标识", width=24).grid(row=0, column=0, sticky="w")
+            ttk.Label(inner, text="延时(秒)", width=12).grid(row=0, column=1, sticky="w")
+            r = 1
+            for k, v in delays.items():
+                vk = tk.StringVar(value=str(k))
+                vv = tk.DoubleVar(value=float(v))
+                ttk.Entry(inner, textvariable=vk, width=24).grid(row=r, column=0, sticky="w", padx=(0,8), pady=2)
+                ttk.Entry(inner, textvariable=vv, width=12).grid(row=r, column=1, sticky="w", pady=2)
+                self._step_rows.append((vk, vv))
+                r += 1
+        _render()
+
+        btns = ttk.Frame(panel)
+        btns.pack(fill=tk.X, padx=8, pady=(0,6))
+        def _add_row():
+            self._step_rows.append((tk.StringVar(value=""), tk.DoubleVar(value=0.01)))
+            _render()
+        def _save_rows():
+            m: Dict[str, float] = {}
+            for vk, vv in self._step_rows:
+                k = (vk.get() or "").strip()
+                try:
+                    val = float(vv.get() or 0.01)
+                except Exception:
+                    val = 0.01
+                if not k:
+                    continue
+                m[k] = val
+            if not m:
+                m = {"default": 0.01}
+            self.tasks_data["step_delays"] = m
+            self._save_tasks_data()
+        ttk.Button(btns, text="新增一行", command=_add_row).pack(side=tk.LEFT)
+        ttk.Button(btns, text="保存延时", command=_save_rows).pack(side=tk.RIGHT)
+
+    # Small tooltip helper
+    def _attach_tooltip(self, widget, text: str) -> None:
+        tip = None
+        def _enter(_e=None):
+            nonlocal tip
+            if tip is not None:
+                return
+            tip = tk.Toplevel(widget)
+            tip.overrideredirect(True)
+            try:
+                tip.attributes("-topmost", True)
+            except Exception:
+                pass
+            x = widget.winfo_rootx() + 10
+            y = widget.winfo_rooty() + widget.winfo_height() + 6
+            tip.geometry(f"+{x}+{y}")
+            lbl = ttk.Label(tip, text=text, relief=tk.SOLID, borderwidth=1, background="#ffffe0")
+            lbl.pack(ipadx=6, ipady=3)
+        def _leave(_e=None):
+            nonlocal tip
+            if tip is not None:
+                try:
+                    tip.destroy()
+                except Exception:
+                    pass
+            tip = None
+        widget.bind("<Enter>", _enter)
+        widget.bind("<Leave>", _leave)
+
+    def _build_task_card(self, parent, idx: int | None, it: Dict[str, Any], *, editable: bool, draft: bool) -> None:
+        card = ttk.Frame(parent, relief=tk.SOLID, borderwidth=1)
+        card.pack(fill=tk.X, padx=6, pady=6)
+        card._is_draft = bool(draft)  # type: ignore
+
+        # Variables
+        var_enabled = tk.BooleanVar(value=bool(it.get("enabled", True)))
+        var_item_name = tk.StringVar(value=str(it.get("item_name", "")))
+        var_item_id = tk.StringVar(value=str(it.get("id", "")))
+        var_thr = tk.IntVar(value=int(it.get("price_threshold", 0) or 0))
+        var_prem = tk.DoubleVar(value=float(it.get("price_premium_pct", 0) or 0))
+        var_restock = tk.IntVar(value=int(it.get("restock_price", 0) or 0))
+        var_target = tk.IntVar(value=int(it.get("target_total", 0) or 0))
+        # time_start/time_end as HH:MM only
+        def _split_hhss(s: str) -> tuple[int, int]:
+            s = str(s or "").strip()
+            try:
+                hh, ss = s.split(":")
+                return max(0, min(23, int(hh))), max(0, min(59, int(ss)))
+            except Exception:
+                return 0, 0
+        h1, s1 = _split_hhss(str(it.get("time_start", "")))
+        h2, s2 = _split_hhss(str(it.get("time_end", "")))
+        var_h1 = tk.IntVar(value=h1); var_s1 = tk.IntVar(value=s1)
+        var_h2 = tk.IntVar(value=h2); var_s2 = tk.IntVar(value=s2)
+
+        # Row 1: semantic sentence with inline inputs
+        row = ttk.Frame(card)
+        row.pack(fill=tk.X, padx=8, pady=(6, 2))
+        chk = ttk.Checkbutton(row, text="启用", variable=var_enabled)
+        chk.pack(side=tk.LEFT)
+        ttk.Label(row, text="：购买物品：").pack(side=tk.LEFT)
+        lbl_name = ttk.Label(row, textvariable=var_item_name, width=24)
+        lbl_name.pack(side=tk.LEFT)
+        btn_pick = ttk.Button(row, text="选择…", width=8, command=lambda: self._open_goods_picker(lambda g: (var_item_name.set(str(g.get('name',''))), var_item_id.set(str(g.get('id',''))))))
+        btn_pick.pack(side=tk.LEFT, padx=(4,0))
+        # Threshold
+        ttk.Label(row, text="，小于").pack(side=tk.LEFT)
+        ent_thr = ttk.Entry(row, textvariable=var_thr, width=8)
+        ent_thr.pack(side=tk.LEFT)
+        lbl_fast = ttk.Label(row, text="的时候进行快速购买")
+        lbl_fast.pack(side=tk.LEFT)
+        self._attach_tooltip(lbl_fast, "价格<=阈值时直接购买（默认数量，不调数量）")
+        ttk.Label(row, text="，允许价格浮动").pack(side=tk.LEFT)
+        ent_prem = ttk.Entry(row, textvariable=var_prem, width=5)
+        ent_prem.pack(side=tk.LEFT)
+        ttk.Label(row, text="% ，小于").pack(side=tk.LEFT)
+        ent_rest = ttk.Entry(row, textvariable=var_restock, width=8)
+        ent_rest.pack(side=tk.LEFT)
+        ttk.Label(row, text="的时候启用补货模式（自动点击Max买满），一共购买").pack(side=tk.LEFT)
+        ent_target = ttk.Entry(row, textvariable=var_target, width=8)
+        ent_target.pack(side=tk.LEFT)
+        ttk.Label(row, text="个，在").pack(side=tk.LEFT)
+
+        # Time start/end HH:MM
+        def _mk_time_fields(hvar, svar):
+            sp_h = ttk.Spinbox(row, from_=0, to=23, width=3, textvariable=hvar)
+            sp_h.pack(side=tk.LEFT)
+            ttk.Label(row, text=":").pack(side=tk.LEFT)
+            sp_s = ttk.Spinbox(row, from_=0, to=59, width=3, textvariable=svar)
+            sp_s.pack(side=tk.LEFT)
+        _mk_time_fields(var_h1, var_s1)
+        ttk.Label(row, text="到").pack(side=tk.LEFT)
+        _mk_time_fields(var_h2, var_s2)
+        ttk.Label(row, text="启动（时间）").pack(side=tk.LEFT)
+
+        # Tips line
+        tips = ttk.Frame(card)
+        tips.pack(fill=tk.X, padx=8, pady=(2, 6))
+        ttk.Label(tips, text="说明：步骤延时请到下方‘步骤延时配置’设置").pack(side=tk.LEFT)
+
+        # Buttons
+        btns = ttk.Frame(card)
+        btns.pack(fill=tk.X, padx=8, pady=(0, 8))
+
+        def _save():
+            # Validate minimal fields
+            name = (var_item_name.get() or "").strip()
+            if not name:
+                messagebox.showwarning("保存", "请先选择‘购买物品’。")
+                return
+            # Compose record
+            rec: Dict[str, Any] = {
+                "enabled": bool(var_enabled.get()),
+                "item_name": name,
+                "price_threshold": int(var_thr.get() or 0),
+                "price_premium_pct": float(var_prem.get() or 0),
+                "restock_price": int(var_restock.get() or 0),
+                "target_total": int(var_target.get() or 0),
+                "time_start": f"{int(var_h1.get()):02d}:{int(var_s1.get()):02d}",
+                "time_end": f"{int(var_h2.get()):02d}:{int(var_s2.get()):02d}",
+            }
+            # If editing existing
+            items = self.tasks_data.setdefault("tasks", [])
+            if idx is not None and 0 <= idx < len(items):
+                # keep existing id/purchased if present
+                rec["id"] = items[idx].get("id") or str(uuid.uuid4())
+                rec["purchased"] = int(items[idx].get("purchased", 0))
+                items[idx] = rec
+            else:
+                rec["id"] = str(uuid.uuid4())
+                items.append(rec)
+            self._save_tasks_data()
+            self._task_draft_alive = False
+            try:
+                self.btn_add_task.configure(state=tk.NORMAL)
+            except Exception:
+                pass
+            self._render_task_cards()
+
+        def _edit():
+            ent_state = tk.NORMAL
+            for w in (ent_thr, ent_prem, ent_rest, ent_target, btn_pick):
+                try:
+                    w.configure(state=ent_state)
+                except Exception:
+                    pass
+
+        def _cancel():
+            if draft and (idx is None):
+                # Remove the draft card
+                try:
+                    card.destroy()
+                except Exception:
+                    pass
+                self._task_draft_alive = False
+                try:
+                    self.btn_add_task.configure(state=tk.NORMAL)
+                except Exception:
+                    pass
+            else:
+                self._render_task_cards()
+
+        def _delete():
+            if idx is None:
+                _cancel(); return
+            items = self.tasks_data.get("tasks", [])
+            if not (0 <= idx < len(items)):
+                return
+            if not messagebox.askokcancel("删除", f"确定删除任务 [{items[idx].get('item_name','')}]？"):
+                return
+            del items[idx]
+            self._save_tasks_data()
+            self._render_task_cards()
+
+        # Buttons depending on mode
+        if editable:
+            ttk.Button(btns, text="保存", command=_save).pack(side=tk.RIGHT)
+            ttk.Button(btns, text="取消", command=_cancel).pack(side=tk.RIGHT, padx=(0,6))
+        else:
+            ttk.Button(btns, text="编辑", command=_edit).pack(side=tk.RIGHT)
+            ttk.Button(btns, text="删除", command=_delete).pack(side=tk.RIGHT, padx=(0,6))
+
+        # Disable editing if not editable
+        if not editable:
+            for w in (ent_thr, ent_prem, ent_rest, ent_target, btn_pick):
+                try:
+                    w.configure(state=tk.DISABLED)
+                except Exception:
+                    pass
 
     def _hotkey_to_display(self, seq: str) -> str:
         s = str(seq or "").strip()
@@ -4692,11 +5259,13 @@ class App(tk.Tk):
 
 
 class GoodsMarketUI(ttk.Frame):
-    """物品市场管理（CRUD + 截图存图）
+    """物品市场子系统
 
-    - 独立数据文件：`goods.json`
-    - 图片保存：`images/goods/<category_en>/<uuid>.png`
-    - 分类中文显示；目录英文（大类英文目录）
+    - 管理视图（表格 + 表单 + 截图存图）
+    - 浏览视图（左侧类目树 + 右侧卡片网格），布局样式参考提供的截图，仅采用布局不限定配色
+
+    数据：`goods.json`
+    图片：`images/goods/<category_en>/<uuid>.png`
     """
 
     def __init__(self, master) -> None:
@@ -4706,6 +5275,7 @@ class GoodsMarketUI(ttk.Frame):
         self.goods_path = "goods.json"
         self.goods: list[dict[str, object]] = []
 
+        # 显示与存储的分类映射
         self.cat_map_en: dict[str, str] = {
             "装备": "equipment",
             "武器配件": "weapon_parts",
@@ -4790,9 +5360,14 @@ class GoodsMarketUI(ttk.Frame):
             "饮食": ["饮料", "食品"],
         }
 
+        # 浏览视图相关状态
+        self._thumb_cache: dict[str, tk.PhotoImage] = {}
+        self._current_big_cat: str | None = None
+        self._current_sub_cat: str | None = None
+        self._card_width = 220  # 单卡近似宽度（含边距）
+
         self._load_goods()
-        self._build_ui()
-        self._refresh_list()
+        self._build_views()
 
     # ---------- Storage ----------
     def _load_goods(self) -> None:
@@ -4888,9 +5463,459 @@ class GoodsMarketUI(ttk.Frame):
         root.wait_window(sel.top) if getattr(sel, "top", None) else None
         return result_path
 
-    # ---------- UI ----------
-    def _build_ui(self) -> None:
-        outer = self
+    # ---------- UI: views ----------
+    def _build_views(self) -> None:
+        # 采用单视图：浏览 + 卡片管理（编辑/删除在模态框中完成）
+        self._build_browse_tab(self)
+
+    # ---------- UI: 浏览（侧栏 + 卡片网格） ----------
+    def _build_browse_tab(self, parent) -> None:
+        outer = parent
+        # 左侧：搜索 + 类目树
+        left = ttk.Frame(outer)
+        left.pack(side=tk.LEFT, fill=tk.Y, padx=(8, 4), pady=8)
+
+        srow = ttk.Frame(left)
+        srow.pack(side=tk.TOP, fill=tk.X)
+        ttk.Label(srow, text="搜索").pack(side=tk.LEFT)
+        self.var_browse_q = tk.StringVar(value="")
+        ent = ttk.Entry(srow, textvariable=self.var_browse_q, width=22)
+        ent.pack(side=tk.LEFT, padx=6)
+        ent.bind("<Return>", lambda _e: self._refresh_gallery())
+        ttk.Button(srow, text="查询", command=self._refresh_gallery).pack(side=tk.LEFT)
+
+        # 类目树
+        self.cat_tree = ttk.Treeview(left, show="tree", height=24)
+        self.cat_tree.pack(side=tk.TOP, fill=tk.Y, expand=True, pady=(8, 0))
+        # 根节点：全部
+        self.cat_tree.insert("", tk.END, iid="all", text="全部")
+        # 填充大类/子类
+        for big, subs in self.sub_map.items():
+            self.cat_tree.insert("", tk.END, iid=f"b:{big}", text=big)
+            for s in subs:
+                self.cat_tree.insert(f"b:{big}", tk.END, iid=f"s:{big}:{s}", text=s)
+        self.cat_tree.bind("<<TreeviewSelect>>", lambda _e: self._on_cat_select())
+        try:
+            self.cat_tree.selection_set("all")
+        except Exception:
+            pass
+
+        # 右侧：顶部工具条 + 滚动卡片区
+        right = ttk.Frame(outer)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(4, 8), pady=8)
+
+        topbar = ttk.Frame(right)
+        topbar.pack(side=tk.TOP, fill=tk.X)
+        self.lbl_cat_title = ttk.Label(topbar, text="全部")
+        self.lbl_cat_title.pack(side=tk.LEFT)
+        ttk.Button(topbar, text="新增物品", command=lambda: self._open_item_modal(None)).pack(side=tk.LEFT, padx=(10, 0))
+        ttk.Label(topbar, text="排序").pack(side=tk.RIGHT)
+        self.var_sort = tk.StringVar(value="默认")
+        self.cmb_sort = ttk.Combobox(topbar, width=12, state="readonly",
+                                     values=["默认", "按名称"] ,
+                                     textvariable=self.var_sort)
+        self.cmb_sort.pack(side=tk.RIGHT, padx=(0, 6))
+        self.cmb_sort.bind("<<ComboboxSelected>>", lambda _e: self._refresh_gallery())
+
+        # Canvas + Scrollbar 包裹网格卡片
+        wrapper = ttk.Frame(right)
+        wrapper.pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=(6, 0))
+        self.gallery_canvas = tk.Canvas(wrapper, highlightthickness=0)
+        vsb = ttk.Scrollbar(wrapper, orient=tk.VERTICAL, command=self.gallery_canvas.yview)
+        self.gallery_canvas.configure(yscrollcommand=vsb.set)
+        self.gallery_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.gallery_inner = ttk.Frame(self.gallery_canvas)
+        self.gallery_window = self.gallery_canvas.create_window(0, 0, anchor=tk.NW, window=self.gallery_inner)
+
+        def _on_inner_config(_e=None):
+            # 更新滚动区域
+            try:
+                self.gallery_canvas.configure(scrollregion=self.gallery_canvas.bbox("all"))
+            except Exception:
+                pass
+
+        def _on_canvas_config(_e=None):
+            # 撑满宽度并重排
+            try:
+                w = self.gallery_canvas.winfo_width()
+                self.gallery_canvas.itemconfigure(self.gallery_window, width=w)
+            except Exception:
+                pass
+            self._refresh_gallery()
+
+        self.gallery_inner.bind("<Configure>", _on_inner_config)
+        self.gallery_canvas.bind("<Configure>", _on_canvas_config)
+
+        # 初次渲染
+        self.after(50, self._refresh_gallery)
+
+    # ---------- 浏览事件 & 渲染 ----------
+    def _on_cat_select(self) -> None:
+        sel = self.cat_tree.selection()
+        if not sel:
+            return
+        iid = sel[0]
+        if iid == "all":
+            self._current_big_cat = None
+            self._current_sub_cat = None
+            self.lbl_cat_title.configure(text="全部")
+        elif iid.startswith("s:"):
+            _p, big, sub = iid.split(":", 2)
+            self._current_big_cat = big
+            self._current_sub_cat = sub
+            self.lbl_cat_title.configure(text=f"{big} / {sub}")
+        elif iid.startswith("b:"):
+            _p, big = iid.split(":", 1)
+            self._current_big_cat = big
+            self._current_sub_cat = None
+            self.lbl_cat_title.configure(text=big)
+        self._refresh_gallery()
+
+    def _filtered_goods_for_gallery(self) -> list[dict]:
+        q = (self.var_browse_q.get() or "").strip().lower()
+        items = list(self.goods or [])
+        res: list[dict] = []
+        for it in items:
+            if self._current_big_cat and str(it.get("big_category", "")) != self._current_big_cat:
+                continue
+            if self._current_sub_cat and str(it.get("sub_category", "")) != self._current_sub_cat:
+                continue
+            if q:
+                name = str(it.get("name", "")).lower()
+                sname = str(it.get("search_name", "")).lower()
+                if q not in name and q not in sname:
+                    continue
+            res.append(it)
+
+        sort = (self.var_sort.get() or "默认").strip()
+        if sort == "按名称":
+            res.sort(key=lambda x: str(x.get("name", "")))
+        return res
+
+    def _refresh_gallery(self) -> None:
+        # 清空后重建卡片网格
+        for w in self.gallery_inner.winfo_children():
+            w.destroy()
+
+        items = self._filtered_goods_for_gallery()
+        # 估算列数
+        try:
+            cw = max(1, self.gallery_canvas.winfo_width())
+        except Exception:
+            cw = 800
+        col_w = max(1, self._card_width)
+        cols = max(1, cw // col_w)
+        # 构建卡片
+        for idx, it in enumerate(items):
+            r, c = divmod(idx, cols)
+            card = self._build_card(self.gallery_inner, it)
+            card.grid(row=r, column=c, padx=6, pady=6, sticky="nsew")
+        # 让每列等宽
+        for c in range(cols):
+            try:
+                self.gallery_inner.grid_columnconfigure(c, weight=1)
+            except Exception:
+                pass
+
+    def _build_card(self, parent, it: dict) -> ttk.Frame:
+        frm = ttk.Frame(parent, relief=tk.SOLID, borderwidth=1)
+
+        # 头部：操作按钮（编辑/删除）
+        head = ttk.Frame(frm)
+        head.pack(side=tk.TOP, fill=tk.X)
+        # 右上：编辑/删除
+        btn_edit = ttk.Button(head, text="✎", width=2,
+                              command=lambda it_=it: self._open_item_modal(dict(it_)))
+        btn_edit.pack(side=tk.RIGHT, padx=(2, 2), pady=2)
+        btn_del = ttk.Button(head, text="🗑", width=2,
+                             command=lambda iid=str(it.get("id", "")): self._delete_item(iid))
+        btn_del.pack(side=tk.RIGHT, padx=(2, 4), pady=2)
+
+        # 图片
+        cnv = tk.Canvas(frm, width=180, height=130, bg="#f0f0f0", highlightthickness=0)
+        cnv.pack(side=tk.TOP, padx=8, pady=(0, 4))
+        tkimg = self._thumb_for_item(it)
+        if tkimg:
+            cnv.create_image(90, 65, image=tkimg)
+            cnv.image = tkimg
+
+        # 名称 + 分类
+        name = str(it.get("name", ""))
+        ttk.Label(frm, text=name, wraplength=200, justify=tk.LEFT).pack(side=tk.TOP, padx=8)
+        cat_txt = f"{it.get('big_category','')}/{it.get('sub_category','')}".strip("/")
+        ttk.Label(frm, text=cat_txt, foreground="#666").pack(side=tk.TOP, anchor="w", padx=8)
+
+        # 底栏：最近1天统计 + 当前价（可选）
+        hi, lo, avg = self._price_stats_1d(str(it.get("id", "")))
+        stats = f"1d 高:{hi if hi>0 else '—'} 低:{lo if lo>0 else '—'} 均:{avg if avg>0 else '—'}"
+        footer = ttk.Frame(frm)
+        footer.pack(side=tk.TOP, fill=tk.X, pady=(2, 6))
+        ttk.Label(footer, text=stats).pack(side=tk.LEFT, padx=8)
+        
+        return frm
+
+    def _thumb_for_item(self, it: dict) -> Optional[tk.PhotoImage]:
+        iid = str(it.get("id", ""))
+        path = str(it.get("image_path", "")) or self._ensure_default_img()
+        if not iid:
+            return None
+        if iid in self._thumb_cache:
+            return self._thumb_cache[iid]
+        try:
+            from PIL import Image, ImageTk  # type: ignore
+
+            im = Image.open(path)
+            im.thumbnail((180, 130))
+            tkimg = ImageTk.PhotoImage(im)
+        except Exception:
+            return None
+        self._thumb_cache[iid] = tkimg
+        return tkimg
+
+    # 收藏功能已移除
+
+    # ---------- 数据：价格统计（最近1天） ----------
+    def _price_stats_1d(self, iid: str) -> tuple[int, int, int]:
+        if not iid:
+            return 0, 0, 0
+        # 简易缓存，避免频繁 I/O
+        now = time.time()
+        cache = getattr(self, "_price_cache", None)
+        if cache is None:
+            cache = {}
+            self._price_cache = cache  # type: ignore
+        ent = cache.get(iid) if isinstance(cache, dict) else None
+        if isinstance(ent, tuple) and len(ent) == 2:
+            ts, val = ent
+            if now - float(ts) <= 10.0:
+                return tuple(val)  # type: ignore
+        try:
+            from history_store import query_price  # type: ignore
+        except Exception:
+            return 0, 0, 0
+        since = now - 24 * 3600
+        try:
+            recs = query_price(iid, since)
+        except Exception:
+            recs = []
+        prices = [int(r.get("price", 0)) for r in (recs or []) if int(r.get("price", 0)) > 0]
+        if not prices:
+            hi = lo = avg = 0
+        else:
+            hi = max(prices)
+            lo = min(prices)
+            avg = int(round(sum(prices) / len(prices)))
+        cache[iid] = (now, (hi, lo, avg))  # type: ignore
+        return hi, lo, avg
+
+    # ---------- 管理模态框 ----------
+    def _open_item_modal(self, item: Optional[dict]) -> None:
+        top = tk.Toplevel(self)
+        top.title("物品管理")
+        top.geometry("560x420")
+        top.transient(self)
+        try:
+            top.grab_set()
+        except Exception:
+            pass
+
+        # 变量（局部，不污染主界面变量）
+        var_id = tk.StringVar(value=str(item.get("id", "")) if item else "")
+        var_name = tk.StringVar(value=str(item.get("name", "")) if item else "")
+        var_sname = tk.StringVar(value=str(item.get("search_name", "")) if item else "")
+        var_big = tk.StringVar(value=str(item.get("big_category", "")) if item else "弹药")
+        var_sub = tk.StringVar(value=str(item.get("sub_category", "")) if item else "")
+        var_ex = tk.BooleanVar(value=bool(item.get("exchangeable", False)) if item else False)
+        var_cf = tk.BooleanVar(value=bool(item.get("craftable", False)) if item else False)
+        var_img = tk.StringVar(value=str(item.get("image_path", "")) if item and item.get("image_path") else self._ensure_default_img())
+
+        # 表单布局
+        frm = ttk.Frame(top)
+        frm.pack(fill=tk.BOTH, expand=True, padx=10, pady=8)
+
+        # 图片
+        row0 = ttk.Frame(frm)
+        row0.grid(row=0, column=0, columnspan=4, sticky="we")
+        ttk.Label(row0, text="图片").pack(side=tk.LEFT)
+        cnv = tk.Canvas(row0, width=140, height=100, bg="#f0f0f0")
+        cnv.pack(side=tk.LEFT, padx=8)
+
+        def _update_preview():
+            cnv.delete("all")
+            p = (var_img.get() or "").strip()
+            if not p or not os.path.exists(p):
+                return
+            try:
+                from PIL import Image, ImageTk  # type: ignore
+
+                im = Image.open(p)
+                im.thumbnail((140, 100))
+                tkimg = ImageTk.PhotoImage(im)
+            except Exception:
+                return
+            cnv.image = tkimg
+            cnv.create_image(0, 0, anchor=tk.NW, image=tkimg)
+
+        def _choose_file():
+            p = filedialog.askopenfilename(title="选择图片", filetypes=[["Images", "*.png;*.jpg;*.jpeg;*.bmp"]])
+            if p:
+                var_img.set(p)
+                _update_preview()
+
+        def _capture_to_cat():
+            # 固定尺寸截取（135x110），鼠标移动跟随，左键确认；仅用于商品新增/编辑页面
+            root = self.winfo_toplevel()
+            result_path: str | None = None
+
+            def _done(bounds):
+                nonlocal result_path
+                if not bounds:
+                    return
+                x1, y1, x2, y2 = bounds
+                w, h = max(1, x2 - x1), max(1, y2 - y1)
+                try:
+                    import pyautogui  # type: ignore
+
+                    # 适当裁剪到屏幕范围（避免越界）
+                    sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+                    x1b = max(0, min(int(x1), max(0, sw - w)))
+                    y1b = max(0, min(int(y1), max(0, sh - h)))
+                    img = pyautogui.screenshot(region=(x1b, y1b, int(w), int(h)))
+                except Exception as e:
+                    messagebox.showerror("截图", f"截屏失败: {e}")
+                    return
+                # 保存到对应大类
+                big_cat = var_big.get().strip() or "misc"
+                base_dir = self._category_dir(big_cat)
+                os.makedirs(base_dir, exist_ok=True)
+                fname = f"{uuid.uuid4().hex}.png"
+                path = os.path.join(base_dir, fname)
+                try:
+                    img.save(path)
+                except Exception as e:
+                    messagebox.showerror("截图", f"保存失败: {e}")
+                    return
+                result_path = path
+
+            sel = _FixedSizeSelector(root, 135, 110, _done)
+            try:
+                sel.show()
+            except Exception:
+                pass
+            root.wait_window(sel.top) if getattr(sel, "top", None) else None
+            if result_path:
+                var_img.set(result_path)
+                _update_preview()
+
+        ttk.Button(row0, text="选择图片", command=_choose_file).pack(side=tk.LEFT)
+        ttk.Button(row0, text="截图", command=_capture_to_cat).pack(side=tk.LEFT, padx=6)
+
+        ttk.Label(frm, text="名称").grid(row=1, column=0, sticky="e", padx=4, pady=6)
+        ttk.Entry(frm, textvariable=var_name, width=28).grid(row=1, column=1, sticky="w")
+        ttk.Label(frm, text="搜索名").grid(row=1, column=2, sticky="e", padx=4)
+        ttk.Entry(frm, textvariable=var_sname, width=18).grid(row=1, column=3, sticky="w")
+
+        ttk.Label(frm, text="大分类").grid(row=2, column=0, sticky="e", padx=4, pady=6)
+        cmb_big = ttk.Combobox(frm, textvariable=var_big, state="readonly", width=14,
+                               values=list(self.cat_map_en.keys()))
+        cmb_big.grid(row=2, column=1, sticky="w")
+        ttk.Label(frm, text="子分类").grid(row=2, column=2, sticky="e", padx=4)
+        cmb_sub = ttk.Combobox(frm, textvariable=var_sub, state="readonly", width=18)
+        cmb_sub.grid(row=2, column=3, sticky="w")
+
+        def _fill_sub():
+            try:
+                cmb_sub.configure(values=self.sub_map.get(var_big.get().strip(), []) or [])
+            except Exception:
+                pass
+
+        cmb_big.bind("<<ComboboxSelected>>", lambda _e: _fill_sub())
+        _fill_sub()
+
+        ttk.Checkbutton(frm, text="当前赛季可兑换", variable=var_ex).grid(row=3, column=0, columnspan=2, sticky="w", padx=4)
+        ttk.Checkbutton(frm, text="当前赛季可制造", variable=var_cf).grid(row=3, column=2, columnspan=2, sticky="w", padx=4)
+
+        # 操作按钮
+        btns = ttk.Frame(frm)
+        btns.grid(row=4, column=0, columnspan=4, sticky="we", pady=10)
+
+        def _do_save():
+            name = (var_name.get() or "").strip()
+            if not name:
+                messagebox.showwarning("保存", "名称不能为空。")
+                return
+            iid = (var_id.get() or "").strip() or uuid.uuid4().hex
+            item2 = {
+                "id": iid,
+                "name": name,
+                "search_name": (var_sname.get() or "").strip(),
+                "big_category": var_big.get().strip(),
+                "sub_category": var_sub.get().strip(),
+                "exchangeable": bool(var_ex.get()),
+                "craftable": bool(var_cf.get()),
+                "image_path": (var_img.get() or "").strip(),
+                # 可选字段：价格（若已有则保留）
+                "price": item.get("price") if item and "price" in item else None,
+            }
+            found = False
+            for i, g in enumerate(self.goods):
+                if str(g.get("id", "")) == iid:
+                    self.goods[i] = item2
+                    found = True
+                    break
+            if not found:
+                self.goods.append(item2)
+            self._save_goods()
+            self._refresh_gallery()
+            try:
+                top.grab_release()
+            except Exception:
+                pass
+            top.destroy()
+
+        def _do_delete():
+            iid = (var_id.get() or "").strip()
+            if not iid:
+                return
+            self._delete_item(iid)
+            try:
+                top.grab_release()
+            except Exception:
+                pass
+            top.destroy()
+
+        ttk.Button(btns, text="保存", command=_do_save).pack(side=tk.RIGHT)
+        ttk.Button(btns, text="取消", command=lambda: top.destroy()).pack(side=tk.RIGHT, padx=6)
+        if item and item.get("id"):
+            ttk.Button(btns, text="删除", command=_do_delete).pack(side=tk.LEFT)
+
+        # 首次预览
+        _update_preview()
+
+    def _delete_item(self, iid: str) -> None:
+        if not iid:
+            return
+        it = next((x for x in self.goods if str(x.get("id")) == iid), None)
+        if not it:
+            return
+        if not messagebox.askokcancel("删除", f"确认删除 [{it.get('name','')}]？"):
+            return
+        img_path = str(it.get("image_path", ""))
+        self.goods = [x for x in self.goods if str(x.get("id")) != iid]
+        self._save_goods()
+        self._refresh_gallery()
+        if img_path and os.path.exists(img_path):
+            if messagebox.askyesno("删除图片", "同时删除对应图片文件？"):
+                try:
+                    os.remove(img_path)
+                except Exception:
+                    pass
+
+    # ---------- UI: 管理（原有表格 + 表单） ----------
+    def _build_manage_tab(self, parent) -> None:
+        outer = parent
         # top: search + actions
         top = ttk.Frame(outer)
         top.pack(fill=tk.X, padx=8, pady=(8, 4))
@@ -5156,4 +6181,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

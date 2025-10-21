@@ -145,8 +145,8 @@
         "template": "images\\currency.png",
         "threshold": 0.8,
         "price_width": 63,
-        "ocr_engine": "umi",
-        "scale": 1.0
+        "ocr_engine": "tesseract",
+        "scale": 1.5
     },
     "avg_price_area": {
         "distance_from_buy_top": 5,
