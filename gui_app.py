@@ -301,6 +301,13 @@ class App(tk.Tk):
 
         self._build_tab1()
         self._build_tab2()
+        try:
+            nb2 = self.tab1.nametowidget(self.tab1.winfo_parent())
+            self.tab_goods = ttk.Frame(nb2)
+            nb2.add(self.tab_goods, text="物品市场")
+            self.goods_ui = GoodsMarketUI(self.tab_goods)
+        except Exception:
+            pass
         # Reflect initial run state and hotkey hint on the Run button
         try:
             self._update_run_controls()
@@ -4683,6 +4690,464 @@ class App(tk.Tk):
         ttk.Button(btnf, text="导出CSV", command=_export_csv).pack(side=tk.RIGHT, padx=6)
         ttk.Button(btnf, text="清空记录", command=_clear_purchase).pack(side=tk.RIGHT, padx=6)
 
+
+class GoodsMarketUI(ttk.Frame):
+    """物品市场管理（CRUD + 截图存图）
+
+    - 独立数据文件：`goods.json`
+    - 图片保存：`images/goods/<category_en>/<uuid>.png`
+    - 分类中文显示；目录英文（大类英文目录）
+    """
+
+    def __init__(self, master) -> None:
+        super().__init__(master)
+        self.pack(fill=tk.BOTH, expand=True)
+
+        self.goods_path = "goods.json"
+        self.goods: list[dict[str, object]] = []
+
+        self.cat_map_en: dict[str, str] = {
+            "装备": "equipment",
+            "武器配件": "weapon_parts",
+            "武器枪机": "firearms",
+            "弹药": "ammo",
+            "医疗用品": "medical",
+            "战术道具": "tactical",
+            "钥匙": "keys",
+            "杂物": "misc",
+            "饮食": "food",
+        }
+        self.sub_map: dict[str, list[str]] = {
+            "装备": [
+                "头盔",
+                "面罩",
+                "防弹衣",
+                "无甲单挂",
+                "有甲弹挂",
+                "背包",
+                "耳机 -防毒面具",
+            ],
+            "武器配件": [
+                "瞄具",
+                "弹匣",
+                "前握把",
+                "后握把",
+                "枪托",
+                "枪口",
+                "镭指器",
+                "枪管",
+                "护木",
+                "机匣&防尘盖",
+                "导轨",
+                "导气箍",
+                "枪栓",
+                "手电",
+            ],
+            "武器枪机": [
+                "突击步枪",
+                "冲锋枪",
+                "霰弹枪",
+                "轻机枪",
+                "栓动步枪",
+                "射手步枪",
+                "卡宾枪",
+                "手枪",
+            ],
+            "弹药": [
+                "5.45x39毫米子弹",
+                "5.56x45毫米子弹",
+                "5.7x28毫米子弹",
+                "5.8x42毫米子弹",
+                "7.62x25毫米子弹",
+                "7.62x39毫米子弹",
+                "7.62x51毫米子弹",
+                "7.62x54毫米子弹",
+                "9x19毫米子弹",
+                "9x39毫米子弹",
+                "12x70毫米子弹",
+                ".44口径子弹",
+                ".45口径子弹",
+                ".338口径子弹",
+            ],
+            "医疗用品": ["药物", "伤害救治", "医疗包", "药剂"],
+            "战术道具": ["投掷物"],
+            "钥匙": ["农场钥匙", "北山钥匙", "山谷钥匙", "前线要塞钥匙", "电视台钥匙"],
+            "杂物": [
+                "易燃物品",
+                "建筑材料",
+                "电脑配件",
+                "能源物品",
+                "工具",
+                "生活用品",
+                "医疗杂物",
+                "收藏品",
+                "纸制品",
+                "仪器仪表",
+                "军用杂物",
+                "首领信物",
+                "电子产品",
+            ],
+            "饮食": ["饮料", "食品"],
+        }
+
+        self._load_goods()
+        self._build_ui()
+        self._refresh_list()
+
+    # ---------- Storage ----------
+    def _load_goods(self) -> None:
+        try:
+            import json
+            if os.path.exists(self.goods_path):
+                with open(self.goods_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, list):
+                    self.goods = data
+                elif isinstance(data, dict) and isinstance(data.get("items"), list):
+                    self.goods = list(data.get("items") or [])
+                else:
+                    self.goods = []
+            else:
+                self.goods = []
+        except Exception:
+            self.goods = []
+
+    def _save_goods(self) -> None:
+        try:
+            import json
+            with open(self.goods_path, "w", encoding="utf-8") as f:
+                json.dump(self.goods, f, ensure_ascii=False, indent=4)
+        except Exception:
+            pass
+
+    # ---------- Utils ----------
+    def _ensure_default_img(self) -> str:
+        path = os.path.join("images", "goods", "_default.png")
+        try:
+            if not os.path.exists(path):
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                from PIL import Image, ImageDraw, ImageFont  # type: ignore
+
+                img = Image.new("RGBA", (160, 120), (240, 240, 240, 255))
+                dr = ImageDraw.Draw(img)
+                try:
+                    font = ImageFont.truetype("arial.ttf", 16)
+                except Exception:
+                    font = None
+                dr.rectangle([(0, 0), (159, 119)], outline=(200, 200, 200), width=2)
+                dr.text((20, 48), "No Image", fill=(120, 120, 120), font=font)
+                img.save(path)
+        except Exception:
+            pass
+        return path
+
+    def _category_dir(self, big_cat: str) -> str:
+        slug = self.cat_map_en.get(big_cat) or "misc"
+        return os.path.join("images", "goods", slug)
+
+    def _capture_image(self) -> str | None:
+        root = self.winfo_toplevel()
+        result_path: str | None = None
+
+        def _done(bounds):
+            nonlocal result_path
+            if not bounds:
+                return
+            x1, y1, x2, y2 = bounds
+            w, h = max(1, x2 - x1), max(1, y2 - y1)
+            try:
+                import pyautogui  # type: ignore
+
+                img = pyautogui.screenshot(region=(x1, y1, w, h))
+            except Exception as e:
+                messagebox.showerror("截图", f"截屏失败: {e}")
+                return
+
+            # decide save dir by big category
+            big_cat = self.var_big_cat.get().strip() or "杂物"
+            base_dir = self._category_dir(big_cat)
+            os.makedirs(base_dir, exist_ok=True)
+            fname = f"{uuid.uuid4().hex}.png"
+            path = os.path.join(base_dir, fname)
+            try:
+                img.save(path)
+            except Exception as e:
+                messagebox.showerror("截图", f"保存失败: {e}")
+                return
+            result_path = path
+
+        sel = _RegionSelector(root, _done)
+        try:
+            sel.show()
+        except Exception:
+            pass
+        # modal-like; actual selection returns via _done then overlay destroys itself
+        # We cannot block here; result_path will be set in callback.
+        # Provide a small polling to wait until overlay closes
+        # but keep UI responsive.
+        root.wait_window(sel.top) if getattr(sel, "top", None) else None
+        return result_path
+
+    # ---------- UI ----------
+    def _build_ui(self) -> None:
+        outer = self
+        # top: search + actions
+        top = ttk.Frame(outer)
+        top.pack(fill=tk.X, padx=8, pady=(8, 4))
+        ttk.Label(top, text="搜索").pack(side=tk.LEFT)
+        self.var_q = tk.StringVar(value="")
+        ent = ttk.Entry(top, textvariable=self.var_q, width=24)
+        ent.pack(side=tk.LEFT, padx=6)
+        ttk.Button(top, text="查询", command=self._refresh_list).pack(side=tk.LEFT)
+        ttk.Button(top, text="重置", command=self._reset_search).pack(side=tk.LEFT, padx=(6, 0))
+
+        # center: list + form
+        center = ttk.Frame(outer)
+        center.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+
+        # list
+        lf = ttk.Frame(center)
+        lf.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        cols = ("name", "sname", "bcat", "scat", "exch", "craft")
+        self.tree = ttk.Treeview(lf, columns=cols, show="headings", height=18)
+        self.tree.heading("name", text="名称")
+        self.tree.heading("sname", text="搜索名")
+        self.tree.heading("bcat", text="大分类")
+        self.tree.heading("scat", text="子分类")
+        self.tree.heading("exch", text="可兑换")
+        self.tree.heading("craft", text="可制造")
+        self.tree.column("name", width=200)
+        self.tree.column("sname", width=90)
+        self.tree.column("bcat", width=90)
+        self.tree.column("scat", width=140)
+        self.tree.column("exch", width=70, anchor="center")
+        self.tree.column("craft", width=70, anchor="center")
+        self.tree.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        self.tree.bind("<<TreeviewSelect>>", lambda _e: self._on_select())
+
+        btns = ttk.Frame(lf)
+        btns.pack(side=tk.TOP, fill=tk.X, pady=6)
+        ttk.Button(btns, text="新增", command=self._new_item).pack(side=tk.LEFT)
+        ttk.Button(btns, text="保存", command=self._save_current).pack(side=tk.LEFT, padx=6)
+        ttk.Button(btns, text="删除", command=self._delete_selected).pack(side=tk.LEFT)
+
+        # form
+        rf = ttk.LabelFrame(center, text="物品信息")
+        rf.pack(side=tk.LEFT, fill=tk.Y, padx=(10, 0))
+        # variables
+        self.var_id = tk.StringVar(value="")
+        self.var_name = tk.StringVar(value="")
+        self.var_sname = tk.StringVar(value="")
+        self.var_big_cat = tk.StringVar(value="弹药")
+        self.var_sub_cat = tk.StringVar(value="")
+        self.var_exch = tk.BooleanVar(value=False)
+        self.var_craft = tk.BooleanVar(value=False)
+        self.var_img = tk.StringVar(value=self._ensure_default_img())
+
+        # row 0: image preview + capture
+        img_row = ttk.Frame(rf)
+        img_row.grid(row=0, column=0, columnspan=4, sticky="we", pady=(6, 2))
+        ttk.Label(img_row, text="图片").pack(side=tk.LEFT)
+        self.img_preview_canvas = tk.Canvas(img_row, width=120, height=90, bg="#f0f0f0")
+        self.img_preview_canvas.pack(side=tk.LEFT, padx=8)
+        ttk.Button(img_row, text="截图", command=self._on_capture_img).pack(side=tk.LEFT)
+        ttk.Button(img_row, text="预览", command=lambda: self._preview_image(self.var_img.get(), "预览 - 物品图片")).pack(side=tk.LEFT, padx=6)
+
+        ttk.Label(rf, text="名称").grid(row=1, column=0, sticky="e", padx=4, pady=4)
+        ttk.Entry(rf, textvariable=self.var_name, width=30).grid(row=1, column=1, sticky="w")
+        ttk.Label(rf, text="搜索名").grid(row=1, column=2, sticky="e", padx=4)
+        ttk.Entry(rf, textvariable=self.var_sname, width=16).grid(row=1, column=3, sticky="w")
+
+        ttk.Label(rf, text="大分类").grid(row=2, column=0, sticky="e", padx=4, pady=4)
+        self.cmb_big = ttk.Combobox(rf, textvariable=self.var_big_cat, state="readonly", width=14,
+                                    values=list(self.cat_map_en.keys()))
+        self.cmb_big.grid(row=2, column=1, sticky="w")
+        self.cmb_big.bind("<<ComboboxSelected>>", lambda _e: self._fill_subcats())
+        ttk.Label(rf, text="子分类").grid(row=2, column=2, sticky="e", padx=4)
+        self.cmb_sub = ttk.Combobox(rf, textvariable=self.var_sub_cat, state="readonly", width=18)
+        self.cmb_sub.grid(row=2, column=3, sticky="w")
+
+        ttk.Checkbutton(rf, text="当前赛季可兑换", variable=self.var_exch).grid(row=3, column=0, columnspan=2, sticky="w", padx=4, pady=4)
+        ttk.Checkbutton(rf, text="当前赛季可制造", variable=self.var_craft).grid(row=3, column=2, columnspan=2, sticky="w", padx=4)
+
+        for i in range(4):
+            rf.columnconfigure(i, weight=0)
+
+        self._fill_subcats()
+        self._update_img_preview()
+
+    # ---------- Events ----------
+    def _reset_search(self) -> None:
+        self.var_q.set("")
+        self._refresh_list()
+
+    def _filter_goods(self) -> list[dict]:
+        q = (self.var_q.get() or "").strip().lower()
+        items = self.goods or []
+        if not q:
+            return items
+        res = []
+        for it in items:
+            name = str(it.get("name", "")).lower()
+            sname = str(it.get("search_name", "")).lower()
+            if q in name or q in sname:
+                res.append(it)
+        return res
+
+    def _refresh_list(self) -> None:
+        for iid in self.tree.get_children():
+            self.tree.delete(iid)
+        for it in self._filter_goods():
+            vals = (
+                str(it.get("name", "")),
+                str(it.get("search_name", "")),
+                str(it.get("big_category", "")),
+                str(it.get("sub_category", "")),
+                "是" if bool(it.get("exchangeable", False)) else "否",
+                "是" if bool(it.get("craftable", False)) else "否",
+            )
+            self.tree.insert("", tk.END, iid=str(it.get("id", "")), values=vals)
+
+    def _on_select(self) -> None:
+        sel = self.tree.selection()
+        if not sel:
+            return
+        iid = sel[0]
+        it = next((x for x in self.goods if str(x.get("id")) == iid), None)
+        if not it:
+            return
+        self.var_id.set(str(it.get("id", "")))
+        self.var_name.set(str(it.get("name", "")))
+        self.var_sname.set(str(it.get("search_name", "")))
+        self.var_big_cat.set(str(it.get("big_category", "")) or "杂物")
+        self._fill_subcats()
+        self.var_sub_cat.set(str(it.get("sub_category", "")))
+        self.var_exch.set(bool(it.get("exchangeable", False)))
+        self.var_craft.set(bool(it.get("craftable", False)))
+        self.var_img.set(str(it.get("image_path", "")) or self._ensure_default_img())
+        self._update_img_preview()
+
+    def _new_item(self) -> None:
+        self.var_id.set("")
+        self.var_name.set("")
+        self.var_sname.set("")
+        self.var_big_cat.set("弹药")
+        self._fill_subcats()
+        self.var_sub_cat.set("")
+        self.var_exch.set(False)
+        self.var_craft.set(False)
+        self.var_img.set(self._ensure_default_img())
+        self._update_img_preview()
+
+    def _save_current(self) -> None:
+        name = (self.var_name.get() or "").strip()
+        if not name:
+            messagebox.showwarning("保存", "名称不能为空。")
+            return
+        iid = (self.var_id.get() or "").strip()
+        item = {
+            "id": iid or uuid.uuid4().hex,
+            "name": name,
+            "search_name": (self.var_sname.get() or "").strip(),
+            "big_category": self.var_big_cat.get().strip(),
+            "sub_category": self.var_sub_cat.get().strip(),
+            "exchangeable": bool(self.var_exch.get()),
+            "craftable": bool(self.var_craft.get()),
+            "image_path": (self.var_img.get() or "").strip(),
+        }
+        existed = False
+        for i, g in enumerate(self.goods):
+            if str(g.get("id", "")) == item["id"]:
+                self.goods[i] = item
+                existed = True
+                break
+        if not existed:
+            self.goods.append(item)
+        self.var_id.set(str(item["id"]))
+        self._save_goods()
+        self._refresh_list()
+        messagebox.showinfo("保存", "已保存。")
+
+    def _delete_selected(self) -> None:
+        sel = self.tree.selection()
+        if not sel:
+            return
+        iid = sel[0]
+        it = next((x for x in self.goods if str(x.get("id")) == iid), None)
+        if not it:
+            return
+        if not messagebox.askokcancel("删除", f"确认删除 [{it.get('name','')}]？"):
+            return
+        img_path = str(it.get("image_path", ""))
+        self.goods = [x for x in self.goods if str(x.get("id")) != iid]
+        self._save_goods()
+        self._refresh_list()
+        self._new_item()
+        if img_path and os.path.exists(img_path):
+            # ask whether to delete image file
+            if messagebox.askyesno("删除图片", "同时删除对应图片文件？"):
+                try:
+                    os.remove(img_path)
+                except Exception:
+                    pass
+
+    def _fill_subcats(self) -> None:
+        b = self.var_big_cat.get().strip()
+        vals = self.sub_map.get(b) or []
+        try:
+            self.cmb_sub.configure(values=vals)
+        except Exception:
+            pass
+
+    def _update_img_preview(self) -> None:
+        self.img_preview_canvas.delete("all")
+        path = (self.var_img.get() or "").strip()
+        if not path or not os.path.exists(path):
+            return
+        try:
+            from PIL import Image, ImageTk  # type: ignore
+
+            im = Image.open(path)
+            im.thumbnail((120, 90))
+            tkimg = ImageTk.PhotoImage(im)
+        except Exception:
+            return
+        self.img_preview_canvas.image = tkimg
+        self.img_preview_canvas.create_image(0, 0, anchor=tk.NW, image=tkimg)
+
+    def _on_capture_img(self) -> None:
+        p = self._capture_image()
+        if p:
+            self.var_img.set(p)
+            self._update_img_preview()
+
+    # ---------- Local image preview ----------
+    def _preview_image(self, path: str, title: str = "预览") -> None:
+        p = (path or "").strip()
+        if not p or not os.path.exists(p):
+            messagebox.showwarning("预览", "图片不存在或路径为空。")
+            return
+        top = tk.Toplevel(self)
+        top.title(title)
+        top.geometry("560x420")
+        top.transient(self)
+        try:
+            top.grab_set()
+        except Exception:
+            pass
+        cv = tk.Canvas(top, bg="#222", highlightthickness=0)
+        cv.pack(fill=tk.BOTH, expand=True)
+        try:
+            from PIL import Image, ImageTk  # type: ignore
+
+            img = Image.open(p)
+            max_w, max_h = 1000, 800
+            img.thumbnail((max_w, max_h))
+            tkimg = ImageTk.PhotoImage(img)
+            cv.image = tkimg
+            cv.create_image(10, 10, anchor=tk.NW, image=tkimg)
+        except Exception as e:
+            cv.create_text(10, 10, anchor=tk.NW, text=f"加载失败: {e}", fill="#ddd")
 
 def main() -> None:
     app = App()
