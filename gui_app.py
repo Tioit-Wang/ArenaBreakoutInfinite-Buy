@@ -777,6 +777,54 @@ class App(tk.Tk):
         widget.bind("<Enter>", _enter)
         widget.bind("<Leave>", _leave)
 
+    # Responsive flow layout: arrange widgets left-to-right and wrap by container width
+    def _flow_layout(self, container, widgets: List[object], *, padx: int = 4, pady: int = 2) -> None:
+        def _relayout(_e=None):
+            try:
+                W = int(container.winfo_width())
+            except Exception:
+                W = 0
+            if W <= 1:
+                try:
+                    container.after(50, _relayout)
+                except Exception:
+                    pass
+                return
+            # Clear existing grid placements
+            for w in widgets:
+                try:
+                    w.grid_forget()
+                except Exception:
+                    pass
+            try:
+                container.update_idletasks()
+            except Exception:
+                pass
+            row = 0
+            col = 0
+            curw = 0
+            for w in widgets:
+                try:
+                    ww = int(w.winfo_reqwidth())
+                except Exception:
+                    ww = 80
+                need = ww if col == 0 else ww + padx
+                if curw + need > W and col > 0:
+                    row += 1
+                    col = 0
+                    curw = 0
+                try:
+                    w.grid(row=row, column=col, padx=(2, 2), pady=(pady, pady), sticky="w")
+                except Exception:
+                    pass
+                curw += need
+                col += 1
+        try:
+            container.bind("<Configure>", _relayout)
+        except Exception:
+            pass
+        _relayout()
+
     def _build_task_card(self, parent, idx: int | None, it: Dict[str, Any], *, editable: bool, draft: bool) -> None:
         card = ttk.Frame(parent, relief=tk.SOLID, borderwidth=1)
         card.pack(fill=tk.X, padx=6, pady=6)
@@ -803,45 +851,38 @@ class App(tk.Tk):
         var_h1 = tk.IntVar(value=h1); var_s1 = tk.IntVar(value=s1)
         var_h2 = tk.IntVar(value=h2); var_s2 = tk.IntVar(value=s2)
 
-        # Row 1: semantic sentence with inline inputs
+        # Row 1: semantic sentence with inline inputs (responsive flow layout)
         row = ttk.Frame(card)
         row.pack(fill=tk.X, padx=8, pady=(6, 2))
-        chk = ttk.Checkbutton(row, text="启用", variable=var_enabled)
-        chk.pack(side=tk.LEFT)
-        ttk.Label(row, text="：购买物品：").pack(side=tk.LEFT)
-        lbl_name = ttk.Label(row, textvariable=var_item_name, width=24)
-        lbl_name.pack(side=tk.LEFT)
+        widgets: list[tk.Widget] = []
+        chk = ttk.Checkbutton(row, text="启用", variable=var_enabled); widgets.append(chk)
+        widgets.append(ttk.Label(row, text="：购买物品："))
+        lbl_name = ttk.Label(row, textvariable=var_item_name, width=18); widgets.append(lbl_name)
         btn_pick = ttk.Button(row, text="选择…", width=8, command=lambda: self._open_goods_picker(lambda g: (var_item_name.set(str(g.get('name',''))), var_item_id.set(str(g.get('id',''))))))
-        btn_pick.pack(side=tk.LEFT, padx=(4,0))
-        # Threshold
-        ttk.Label(row, text="，小于").pack(side=tk.LEFT)
-        ent_thr = ttk.Entry(row, textvariable=var_thr, width=8)
-        ent_thr.pack(side=tk.LEFT)
-        lbl_fast = ttk.Label(row, text="的时候进行快速购买")
-        lbl_fast.pack(side=tk.LEFT)
+        widgets.append(btn_pick)
+        widgets.append(ttk.Label(row, text="，小于"))
+        ent_thr = ttk.Entry(row, textvariable=var_thr, width=8); widgets.append(ent_thr)
+        lbl_fast = ttk.Label(row, text="的时候进行快速购买"); widgets.append(lbl_fast)
         self._attach_tooltip(lbl_fast, "价格<=阈值时直接购买（默认数量，不调数量）")
-        ttk.Label(row, text="，允许价格浮动").pack(side=tk.LEFT)
-        ent_prem = ttk.Entry(row, textvariable=var_prem, width=5)
-        ent_prem.pack(side=tk.LEFT)
-        ttk.Label(row, text="% ，小于").pack(side=tk.LEFT)
-        ent_rest = ttk.Entry(row, textvariable=var_restock, width=8)
-        ent_rest.pack(side=tk.LEFT)
-        ttk.Label(row, text="的时候启用补货模式（自动点击Max买满），一共购买").pack(side=tk.LEFT)
-        ent_target = ttk.Entry(row, textvariable=var_target, width=8)
-        ent_target.pack(side=tk.LEFT)
-        ttk.Label(row, text="个，在").pack(side=tk.LEFT)
-
-        # Time start/end HH:MM
-        def _mk_time_fields(hvar, svar):
-            sp_h = ttk.Spinbox(row, from_=0, to=23, width=3, textvariable=hvar)
-            sp_h.pack(side=tk.LEFT)
-            ttk.Label(row, text=":").pack(side=tk.LEFT)
-            sp_s = ttk.Spinbox(row, from_=0, to=59, width=3, textvariable=svar)
-            sp_s.pack(side=tk.LEFT)
-        _mk_time_fields(var_h1, var_s1)
-        ttk.Label(row, text="到").pack(side=tk.LEFT)
-        _mk_time_fields(var_h2, var_s2)
-        ttk.Label(row, text="启动（时间）").pack(side=tk.LEFT)
+        widgets.append(ttk.Label(row, text="，允许价格浮动"))
+        ent_prem = ttk.Entry(row, textvariable=var_prem, width=5); widgets.append(ent_prem)
+        widgets.append(ttk.Label(row, text="% ，小于"))
+        ent_rest = ttk.Entry(row, textvariable=var_restock, width=8); widgets.append(ent_rest)
+        widgets.append(ttk.Label(row, text="的时候启用补货模式（自动点击Max买满），"))
+        widgets.append(ttk.Label(row, text="一共购买"))
+        ent_target = ttk.Entry(row, textvariable=var_target, width=8); widgets.append(ent_target)
+        widgets.append(ttk.Label(row, text="个，在"))
+        # Time start/end HH:SS
+        sp_h1 = ttk.Spinbox(row, from_=0, to=23, width=3, textvariable=var_h1); widgets.append(sp_h1)
+        colon1 = ttk.Label(row, text=":"); widgets.append(colon1)
+        sp_s1 = ttk.Spinbox(row, from_=0, to=59, width=3, textvariable=var_s1); widgets.append(sp_s1)
+        widgets.append(ttk.Label(row, text="到"))
+        sp_h2 = ttk.Spinbox(row, from_=0, to=23, width=3, textvariable=var_h2); widgets.append(sp_h2)
+        colon2 = ttk.Label(row, text=":"); widgets.append(colon2)
+        sp_s2 = ttk.Spinbox(row, from_=0, to=59, width=3, textvariable=var_s2); widgets.append(sp_s2)
+        widgets.append(ttk.Label(row, text="启动（时间）"))
+        # Apply responsive flow layout
+        self._flow_layout(row, widgets, padx=4, pady=2)
 
         # Tips line
         tips = ttk.Frame(card)
@@ -889,7 +930,7 @@ class App(tk.Tk):
 
         def _edit():
             ent_state = tk.NORMAL
-            for w in (ent_thr, ent_prem, ent_rest, ent_target, btn_pick):
+            for w in (ent_thr, ent_prem, ent_rest, ent_target, btn_pick, sp_h1, sp_s1, sp_h2, sp_s2):
                 try:
                     w.configure(state=ent_state)
                 except Exception:
@@ -932,7 +973,7 @@ class App(tk.Tk):
 
         # Disable editing if not editable
         if not editable:
-            for w in (ent_thr, ent_prem, ent_rest, ent_target, btn_pick):
+            for w in (ent_thr, ent_prem, ent_rest, ent_target, btn_pick, sp_h1, sp_s1, sp_h2, sp_s2):
                 try:
                     w.configure(state=tk.DISABLED)
                 except Exception:
