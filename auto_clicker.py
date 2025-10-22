@@ -5,6 +5,12 @@ from typing import Dict, List, Optional, Any
 import threading
 
 import pyautogui
+try:
+    from compat import ensure_pyautogui_confidence_compat
+
+    ensure_pyautogui_confidence_compat()
+except Exception:
+    pass
 from ahk import AHK
 from app_config import load_config  # type: ignore
 

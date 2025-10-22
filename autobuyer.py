@@ -5,6 +5,13 @@ import os
 import subprocess
 import shlex
 import uuid
+try:
+    # Ensure image matching calls don’t crash without OpenCV
+    from compat import ensure_pyautogui_confidence_compat
+
+    ensure_pyautogui_confidence_compat()
+except Exception:
+    pass
 
 from auto_clicker import MappingAutomator, ImageBasedAutomator
 from app_config import load_config  # type: ignore
@@ -64,7 +71,7 @@ class _RemovedAutoBuyer:
             self.default_buy_qty = 1
 
         # Runtime config for templates and ROI settings already loaded above
-        self._easyocr_reader = None  # lazy init when using EasyOCR
+        # EasyOCR support removed
         # PaddleOCR removed
 
     def log(self, msg: str) -> None:
@@ -325,15 +332,7 @@ class _RemovedAutoBuyer:
         height = max(1, int(y_bottom - y_top))
         return (x_left, y_top, width, height)
 
-    def _ensure_easyocr(self):
-        if getattr(self, "_easyocr_reader", None) is not None:
-            return self._easyocr_reader
-        try:
-            import easyocr  # type: ignore
-            self._easyocr_reader = easyocr.Reader(['en'], gpu=False)
-        except Exception:
-            self._easyocr_reader = None
-        return self._easyocr_reader
+    # EasyOCR support removed
 
     # PaddleOCR / OcrLite helpers removed
         out = (proc.stdout or "") + "\n" + (proc.stderr or "")
@@ -411,22 +410,9 @@ class _RemovedAutoBuyer:
                 bin_img = img
 
         # Choose OCR engine
-        engine = str(avg_cfg.get("ocr_engine", "tesseract")).lower()
+        engine = str(avg_cfg.get("ocr_engine", "umi")).lower()
         raw_text = ""
-        if engine == "easyocr":
-            reader = self._ensure_easyocr()
-            if reader is not None:
-                try:
-                    import numpy as _np  # type: ignore
-                    arr = _np.array(bin_img or img)
-                    texts = reader.readtext(arr, detail=0)
-                    raw_text = "\n".join(map(str, texts))
-                except Exception:
-                    raw_text = ""
-            else:
-                engine = "tesseract"
-        
-        elif engine in ("umi", "umi-ocr", "umiocr"):
+        if engine in ("umi", "umi-ocr", "umiocr"):
             try:
                 import base64, io, requests  # type: ignore
                 cfg = dict(self.cfg.get("umi_ocr", {}) or {})
@@ -1213,7 +1199,7 @@ class MultiBuyer:
             self.cfg: Dict[str, Any] = load_config("config.json")
         except Exception:
             self.cfg = {}
-        self._easyocr_reader = None  # type: ignore
+        # EasyOCR support removed
         # PaddleOCR removed
         # Cache template paths
         try:
@@ -1926,15 +1912,7 @@ class MultiBuyer:
         height = max(1, int(y_bottom - y_top))
         return (x_left, y_top, width, height)
 
-    def _ensure_easyocr(self):
-        if getattr(self, "_easyocr_reader", None) is not None:
-            return self._easyocr_reader
-        try:
-            import easyocr  # type: ignore
-            self._easyocr_reader = easyocr.Reader(['en'], gpu=False)
-        except Exception:
-            self._easyocr_reader = None
-        return self._easyocr_reader
+    # EasyOCR support removed
 
     # PaddleOCR removed
 
@@ -1984,21 +1962,39 @@ class MultiBuyer:
                 bin_img = th
             except Exception:
                 bin_img = img
-        engine = str(avg_cfg.get("ocr_engine", "tesseract")).lower()
+        engine = str(avg_cfg.get("ocr_engine", "umi")).lower()
         raw_text = ""
-        if engine == "easyocr":
-            reader = self._ensure_easyocr()
-            if reader is not None:
+        if engine in ("umi", "umi-ocr", "umiocr"):
+            try:
+                import base64, io, requests  # type: ignore
+                cfg = dict(self.cfg.get("umi_ocr", {}) or {})
+                base_url = str(cfg.get("base_url", "http://127.0.0.1:1224")).rstrip("/")
+                timeout = float(cfg.get("timeout_sec", 2.5) or 2.5)
+                opts = dict(cfg.get("options", {}) or {})
+                bio = io.BytesIO()
                 try:
-                    import numpy as _np  # type: ignore
-                    arr = _np.array(bin_img or img)
-                    texts = reader.readtext(arr, detail=0)
-                    raw_text = "\n".join(map(str, texts))
+                    (bin_img or img).save(bio, format="PNG")
                 except Exception:
-                    raw_text = ""
-            else:
-                engine = "tesseract"
-        
+                    img.save(bio, format="PNG")
+                data_b64 = base64.b64encode(bio.getvalue()).decode("ascii")
+                payload = {"base64": data_b64}
+                if opts:
+                    payload["options"] = opts
+                url = base_url + "/api/ocr"
+                r = requests.post(url, json=payload, timeout=timeout)
+                r.raise_for_status()
+                j = r.json()
+                if int(j.get("code", 0) or 0) == 100:
+                    d = j.get("data")
+                    if isinstance(d, list):
+                        raw_text = "\n".join(str(e.get("text", "")) for e in d if isinstance(e, dict) and e.get("text"))
+                    elif isinstance(d, str):
+                        raw_text = d
+                else:
+                    raw_text = str(j.get("data", ""))
+            except Exception:
+                raw_text = ""
+
         if not raw_text:
             allow = str(avg_cfg.get("ocr_allowlist", "0123456789KM"))
             need = "KMkm"
@@ -2407,15 +2403,7 @@ class MultiBuyer:
         height = max(1, int(y_bottom - y_top))
         return (x_left, y_top, width, height)
 
-    def _ensure_easyocr(self):
-        if getattr(self, "_easyocr_reader", None) is not None:
-            return self._easyocr_reader
-        try:
-            import easyocr  # type: ignore
-            self._easyocr_reader = easyocr.Reader(['en'], gpu=False)
-        except Exception:
-            self._easyocr_reader = None
-        return self._easyocr_reader
+    # EasyOCR support removed
 
     def _ocr_unit_price_from_region(self, region: Tuple[int, int, int, int]) -> Optional[int]:
         try:
@@ -2466,21 +2454,39 @@ class MultiBuyer:
             except Exception:
                 bin_img = img
         # OCR by engine
-        engine = str(avg_cfg.get("ocr_engine", "tesseract")).lower()
+        engine = str(avg_cfg.get("ocr_engine", "umi")).lower()
         raw_text = ""
-        if engine == "easyocr":
-            reader = self._ensure_easyocr()
-            if reader is not None:
+        if engine in ("umi", "umi-ocr", "umiocr"):
+            try:
+                import base64, io, requests  # type: ignore
+                cfg = dict(self.cfg.get("umi_ocr", {}) or {})
+                base_url = str(cfg.get("base_url", "http://127.0.0.1:1224")).rstrip("/")
+                timeout = float(cfg.get("timeout_sec", 2.5) or 2.5)
+                opts = dict(cfg.get("options", {}) or {})
+                bio = io.BytesIO()
                 try:
-                    import numpy as _np  # type: ignore
-                    arr = _np.array(bin_img or img)
-                    texts = reader.readtext(arr, detail=0)
-                    raw_text = "\n".join(map(str, texts))
+                    (bin_img or img).save(bio, format="PNG")
                 except Exception:
-                    raw_text = ""
-            else:
-                engine = "tesseract"
-        
+                    img.save(bio, format="PNG")
+                data_b64 = base64.b64encode(bio.getvalue()).decode("ascii")
+                payload = {"base64": data_b64}
+                if opts:
+                    payload["options"] = opts
+                url = base_url + "/api/ocr"
+                r = requests.post(url, json=payload, timeout=timeout)
+                r.raise_for_status()
+                j = r.json()
+                if int(j.get("code", 0) or 0) == 100:
+                    d = j.get("data")
+                    if isinstance(d, list):
+                        raw_text = "\n".join(str(e.get("text", "")) for e in d if isinstance(e, dict) and e.get("text"))
+                    elif isinstance(d, str):
+                        raw_text = d
+                else:
+                    raw_text = str(j.get("data", ""))
+            except Exception:
+                raw_text = ""
+
         if not raw_text:
             allow = str(avg_cfg.get("ocr_allowlist", "0123456789KM"))
             need = "KMkm"

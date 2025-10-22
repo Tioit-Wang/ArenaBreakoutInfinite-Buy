@@ -90,8 +90,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "height": 45,
         # Allowlist for PyTesseract preview (kept configurable for future tuning)
         "ocr_allowlist": "0123456789K",
-        # OCR engine: 'tesseract' | 'easyocr' | 'umi'
-        "ocr_engine": "tesseract",
+        # OCR engine: 'tesseract' | 'umi' (default: umi)
+        "ocr_engine": "umi",
         # Scale factor applied before binarization/OCR
         "scale": 1.0,
     },

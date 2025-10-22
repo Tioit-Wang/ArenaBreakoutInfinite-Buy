@@ -8,11 +8,30 @@
             "restock_price": 0,
             "target_total": 0,
             "time_start": "00:00",
-            "time_end": "00:00",
-            "id": "17b97770-6cc6-4817-8328-b3ca2518f26e"
+            "time_end": "11:59",
+            "duration_min": 10,
+            "id": "17b97770-6cc6-4817-8328-b3ca2518f26e",
+            "purchased": 0,
+            "order": 0
+        },
+        {
+            "enabled": true,
+            "item_name": "5.7×28毫米 R37.F子弹",
+            "price_threshold": 0,
+            "price_premium_pct": 0.0,
+            "restock_price": 0,
+            "target_total": 0,
+            "time_start": "12:00",
+            "time_end": "06:00",
+            "duration_min": 99,
+            "id": "bff82da9-c839-4a5f-a186-97f8502cf2d9",
+            "purchased": 0,
+            "order": 1
         }
     ],
     "step_delays": {
         "default": 0.01
-    }
+    },
+    "task_mode": "time",
+    "restart_every_min": 85
 }

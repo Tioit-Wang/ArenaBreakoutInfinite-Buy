@@ -11,11 +11,32 @@ dependencies = [
     "pyscreeze>=1.0.1",
     "ahk[binary]",
     "pytesseract>=0.3.13",
-    "python-bidi==0.4.2",
-    "easyocr>=1.7.2",
+    # easyocr removed; python-bidi removed
     "matplotlib>=3.9.0",
     "requests>=2.31.0",
 ]
 
 [project.scripts]
 wg1-gui = "gui_app:main"
+
+[tool.uv]
+# Treat this repository as a package so uv installs
+# `project.scripts` entry points like `wg1-gui`.
+package = true
+
+# Use setuptools to build/install this flat-module project so that
+# top-level modules like `gui_app.py` are importable for entry points.
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = [
+  "gui_app",
+  "app_config",
+  "autobuyer",
+  "auto_clicker",
+  "price_reader",
+  "ocr_reader",
+  "history_store",
+]

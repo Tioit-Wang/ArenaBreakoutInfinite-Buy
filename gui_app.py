@@ -7,6 +7,13 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 from app_config import ensure_default_config, load_config, save_config
+try:
+    # Ensure PyAutoGUI calls won’t crash if OpenCV is missing
+    from compat import ensure_pyautogui_confidence_compat
+
+    ensure_pyautogui_confidence_compat()
+except Exception:
+    pass
 from autobuyer import MultiBuyer
 
 
@@ -310,20 +317,21 @@ class TemplateRow(ttk.Frame):
         self.on_preview = on_preview
         self.on_change = on_change
 
-        ttk.Label(self, text=name, width=12).grid(row=0, column=0, sticky="w", padx=4, pady=2)
+        # 状态列（红/绿圆点）
+        self.path_status = tk.Label(self, text="", width=2, anchor="center")
+        self.path_status.grid(row=0, column=0, sticky="w", padx=(2, 4))
 
-        # 路径状态：未设置 / 已设置 / 缺失
-        self.path_status = ttk.Label(self, text="", width=8)
-        self.path_status.grid(row=0, column=1, sticky="w", padx=4)
+        # 名称列
+        ttk.Label(self, text=name, width=12).grid(row=0, column=1, sticky="w", padx=4, pady=2)
         # 当路径变量变化时，更新状态文案（并检测文件是否存在）
         def _update_path_status() -> None:
             p = self.get_path()
             if not p:
-                self.path_status.configure(text="未设置")
+                self.path_status.configure(text="●", fg="#d74c4c")  # red
             elif os.path.exists(p):
-                self.path_status.configure(text="已设置")
+                self.path_status.configure(text="●", fg="#2ea043")  # green
             else:
-                self.path_status.configure(text="缺失")
+                self.path_status.configure(text="●", fg="#d74c4c")  # red
         def _on_path_change(*_):
             _update_path_status()
             if self.on_change:
@@ -337,25 +345,26 @@ class TemplateRow(ttk.Frame):
             pass
         _update_path_status()
 
-        ttk.Label(self, text="置信度").grid(row=0, column=3, padx=4)
+        ttk.Label(self, text="置信度").grid(row=0, column=2, padx=4)
         # 数值输入框 0-1，步长 0.01
         try:
             sp = ttk.Spinbox(self, from_=0.0, to=1.0, increment=0.01, textvariable=self.var_conf, width=6, format="%.2f")
         except Exception:
             sp = tk.Spinbox(self, from_=0.0, to=1.0, increment=0.01, textvariable=self.var_conf, width=6)
-        sp.grid(row=0, column=4, sticky="w", padx=4)
+        sp.grid(row=0, column=3, sticky="w", padx=4)
         # autosave on change
         if self.on_change:
             try:
                 self.var_conf.trace_add("write", lambda *_: self.on_change())
             except Exception:
                 pass
-        ttk.Button(self, text="测试识别", command=lambda: self.on_test(self.name, self.get_path(), self.get_confidence())).grid(row=0, column=5, padx=4)
-        ttk.Button(self, text="截图", command=lambda: self.on_capture(self)).grid(row=0, column=6, padx=4)
-        ttk.Button(self, text="预览", command=lambda: self.on_preview(self.get_path(), f"预览 - {self.name}")).grid(row=0, column=7, padx=4)
+        ttk.Button(self, text="点击测试", command=lambda: self.on_test(self.name, self.get_path(), self.get_confidence())).grid(row=0, column=4, padx=4)
+        ttk.Button(self, text="模板捕获", command=lambda: self.on_capture(self)).grid(row=0, column=5, padx=4)
+        ttk.Button(self, text="模版预览", command=lambda: self.on_preview(self.get_path(), f"预览 - {self.name}")).grid(row=0, column=6, padx=4)
 
         # 保持布局稳定
-        self.columnconfigure(4, weight=0)
+        for c in range(0, 7):
+            self.columnconfigure(c, weight=0)
 
     def get_path(self) -> str:
         return self.var_path.get().strip()
@@ -382,6 +391,10 @@ class App(tk.Tk):
         # Independent tasks store (not reusing auto-buy purchase_items)
         self.tasks_path = "buy_tasks.json"
         self.tasks_data: Dict[str, Any] = self._load_tasks_data(self.tasks_path)
+        # Index of the task currently being edited (None if not editing)
+        self._editing_task_index: int | None = None
+        # References to task mode radio buttons (time/round)
+        self._task_mode_radios: tuple[ttk.Radiobutton, ttk.Radiobutton] | None = None  # type: ignore
         # Ensure each item has a stable id for history mapping
         try:
             self._ensure_item_ids()
@@ -463,6 +476,78 @@ class App(tk.Tk):
         # Timer for reflecting run state in UI
         self._run_state_after_id: str | None = None
 
+    # ---------- Mouse wheel binding helper ----------
+    def _bind_mousewheel(self, area, target=None) -> None:
+        """Enable mouse wheel scrolling on `target` when cursor is over `area`.
+
+        - Works for Canvas, Treeview, Text, Listbox (anything with yview/xview).
+        - Cross-platform: Windows/macOS via <MouseWheel>, Linux via <Button-4/5>.
+        """
+        if target is None:
+            target = area
+
+        def _y_scroll(units: int) -> None:
+            try:
+                target.yview_scroll(int(units), "units")
+            except Exception:
+                pass
+
+        def _x_scroll(units: int) -> None:
+            try:
+                target.xview_scroll(int(units), "units")
+            except Exception:
+                pass
+
+        def _on_mousewheel(e):  # Windows / macOS
+            try:
+                delta = int(e.delta)
+            except Exception:
+                delta = 0
+            if delta == 0:
+                return
+            step = -1 if delta > 0 else 1
+            _y_scroll(step)
+
+        def _on_shift_mousewheel(e):  # Horizontal scroll when Shift pressed
+            try:
+                delta = int(getattr(e, "delta", 0))
+            except Exception:
+                delta = 0
+            if delta == 0:
+                return
+            step = -1 if delta > 0 else 1
+            _x_scroll(step)
+
+        def _on_linux_up(_e):
+            _y_scroll(-1)
+
+        def _on_linux_down(_e):
+            _y_scroll(1)
+
+        def _bind_all(_e=None):
+            try:
+                area.bind_all("<MouseWheel>", _on_mousewheel)
+                area.bind_all("<Shift-MouseWheel>", _on_shift_mousewheel)
+                area.bind_all("<Button-4>", _on_linux_up)
+                area.bind_all("<Button-5>", _on_linux_down)
+            except Exception:
+                pass
+
+        def _unbind_all(_e=None):
+            try:
+                area.unbind_all("<MouseWheel>")
+                area.unbind_all("<Shift-MouseWheel>")
+                area.unbind_all("<Button-4>")
+                area.unbind_all("<Button-5>")
+            except Exception:
+                pass
+
+        try:
+            area.bind("<Enter>", _bind_all)
+            area.bind("<Leave>", _unbind_all)
+        except Exception:
+            pass
+
     # ---------- Window placement helper ----------
     def _place_modal(self, top: tk.Toplevel, width: int, height: int) -> None:
         """Place modal near the center of the current window within screen bounds."""
@@ -502,10 +587,24 @@ class App(tk.Tk):
                         data["tasks"] = []
                     if not isinstance(data.get("step_delays"), dict):
                         data["step_delays"] = {"default": 0.01}
+                    # New defaults for task mode and restart policy
+                    if str(data.get("task_mode") or "") not in ("time", "round"):
+                        data["task_mode"] = "time"
+                    try:
+                        rmin = int(data.get("restart_every_min", 60) or 60)
+                    except Exception:
+                        rmin = 60
+                    if rmin <= 0:
+                        rmin = 60
+                    data["restart_every_min"] = rmin
+                    # Ensure each task has an explicit order field
+                    for i, it in enumerate(data["tasks"]):
+                        if isinstance(it, dict) and "order" not in it:
+                            it["order"] = i
                     return data
         except Exception:
             pass
-        return {"tasks": [], "step_delays": {"default": 0.01}}
+        return {"tasks": [], "step_delays": {"default": 0.01}, "task_mode": "time", "restart_every_min": 60}
 
     def _save_tasks_data(self) -> None:
         try:
@@ -534,9 +633,60 @@ class App(tk.Tk):
         # Top controls
         top = ttk.Frame(frm)
         top.pack(fill=tk.X)
-        self.btn_add_task = ttk.Button(top, text="新增任务（仅允许1个未完成）", command=self._add_task_card)
+        self.btn_add_task = ttk.Button(top, text="新增任务", command=self._add_task_card)
         self.btn_add_task.pack(side=tk.LEFT)
-        ttk.Label(top, text="附加：步骤延时配置见下方模块").pack(side=tk.RIGHT)
+        ttk.Label(top, text="附加：高级配置见下方模块").pack(side=tk.RIGHT)
+
+        # Task mode configuration
+        mode_box = ttk.LabelFrame(frm, text="任务模式配置")
+        mode_box.pack(fill=tk.X, padx=0, pady=(8, 6))
+        self.var_task_mode = tk.StringVar(value=str(self.tasks_data.get("task_mode", "time")))
+        r1 = ttk.Radiobutton(mode_box, text="按时间区间执行", value="time", variable=self.var_task_mode)
+        r2 = ttk.Radiobutton(mode_box, text="轮流执行", value="round", variable=self.var_task_mode)
+        r1.pack(side=tk.LEFT, padx=8, pady=4)
+        r2.pack(side=tk.LEFT, padx=8, pady=4)
+        # Keep references for enabling/disabling during editing
+        self._task_mode_radios = (r1, r2)
+        # Subtle hint shown when mode is locked during editing/drafting
+        try:
+            self._task_mode_hint = ttk.Label(mode_box, text="", foreground="#666")
+        except Exception:
+            self._task_mode_hint = None
+        def _on_mode_change(*_):
+            # Block mode change while editing or drafting to avoid losing unsaved changes
+            try:
+                if (self._editing_task_index is not None) or self._task_draft_alive:
+                    cur = str(self.tasks_data.get("task_mode", "time"))
+                    # Only warn and revert if user actually attempted to change value
+                    if self.var_task_mode.get() != cur:
+                        try:
+                            messagebox.showwarning("任务模式", "请先保存或取消当前正在编辑/新增的任务，再切换任务模式。")
+                        except Exception:
+                            pass
+                        # Revert UI selection back to persisted value
+                        try:
+                            self.var_task_mode.set(cur)
+                        except Exception:
+                            pass
+                    return
+            except Exception:
+                pass
+            m = self.var_task_mode.get()
+            if m not in ("time", "round"):
+                m = "time"
+            self.tasks_data["task_mode"] = m
+            # Persist and re-render cards to reflect mode-specific fields
+            self._save_tasks_data()
+            self._render_task_cards()
+        try:
+            self.var_task_mode.trace_add("write", _on_mode_change)
+        except Exception:
+            pass
+        # Apply initial enable/disable state
+        try:
+            self._update_task_mode_controls_state()
+        except Exception:
+            pass
 
         # Scroll container for cards
         wrapper = ttk.Frame(frm)
@@ -564,6 +714,11 @@ class App(tk.Tk):
                 pass
         self.cards_inner.bind("<Configure>", _on_inner)
         self.cards_canvas.bind("<Configure>", _on_canvas)
+        # Enable mouse-wheel scrolling over the task cards area
+        try:
+            self._bind_mousewheel(self.cards_inner, self.cards_canvas)
+        except Exception:
+            pass
 
         # State: whether a draft card exists
         self._task_draft_alive = False
@@ -573,23 +728,79 @@ class App(tk.Tk):
         for w in self.cards_inner.winfo_children():
             w.destroy()
         items = list((self.tasks_data.get("tasks", []) or []))
-        # Show existing items as read-only cards with编辑
-        for i, it in enumerate(items):
-            self._build_task_card(self.cards_inner, i, it, editable=False, draft=False)
-        # Update add button availability
-        self._task_draft_alive = any(getattr(w, "_is_draft", False) for w in self.cards_inner.winfo_children())
         try:
-            self.btn_add_task.configure(state=(tk.DISABLED if self._task_draft_alive else tk.NORMAL))
+            items.sort(key=lambda d: (int(d.get("order", 0)) if isinstance(d, dict) else 0))
         except Exception:
             pass
-        # Step delay config panel
+        # Show existing items; if one is in editing state, render it as editable
+        for i, it in enumerate(items):
+            editable = (self._editing_task_index == i)
+            self._build_task_card(self.cards_inner, i, it, editable=editable, draft=False)
+        # Update add button availability: disable when a draft exists or editing an existing item
+        self._task_draft_alive = any(getattr(w, "_is_draft", False) for w in self.cards_inner.winfo_children())
+        try:
+            disable_add = bool(self._task_draft_alive or (self._editing_task_index is not None))
+        except Exception:
+            disable_add = self._task_draft_alive
+        try:
+            self.btn_add_task.configure(state=(tk.DISABLED if disable_add else tk.NORMAL))
+        except Exception:
+            pass
+        # Also enable/disable task mode radios accordingly
+        try:
+            self._update_task_mode_controls_state()
+        except Exception:
+            pass
+        # Advanced config panel
         try:
             self._build_step_delay_panel(self._tasks_root_frame)
         except Exception:
             pass
 
+    def _update_task_mode_controls_state(self) -> None:
+        """Enable/disable task-mode radio buttons based on editing/draft state."""
+        try:
+            radios = self._task_mode_radios
+        except Exception:
+            radios = None
+        if not radios:
+            return
+        disable = False
+        try:
+            disable = bool((self._editing_task_index is not None) or self._task_draft_alive)
+        except Exception:
+            pass
+        state = (tk.DISABLED if disable else tk.NORMAL)
+        for rb in radios:
+            try:
+                rb.configure(state=state)
+            except Exception:
+                pass
+        # Update subtle hint visibility/content
+        hint = getattr(self, "_task_mode_hint", None)
+        if hint is not None:
+            try:
+                if disable:
+                    hint.configure(text="编辑/新增中：任务模式已锁定")
+                    if not bool(hint.winfo_ismapped()):
+                        hint.pack(side=tk.LEFT, padx=8)
+                else:
+                    hint.configure(text="")
+                    if bool(hint.winfo_ismapped()):
+                        hint.pack_forget()
+            except Exception:
+                pass
+
     def _add_task_card(self) -> None:
+        # Disallow adding when editing an existing item or a draft already exists
+        try:
+            if self._editing_task_index is not None:
+                messagebox.showwarning("新增任务", "请先保存或取消当前正在编辑的任务。")
+                return
+        except Exception:
+            pass
         if self._task_draft_alive:
+            messagebox.showwarning("新增任务", "已存在一个正在新增的任务，请先保存或取消。")
             return
         # Create an empty draft card
         draft = {
@@ -606,6 +817,11 @@ class App(tk.Tk):
         self._task_draft_alive = True
         try:
             self.btn_add_task.configure(state=tk.DISABLED)
+        except Exception:
+            pass
+        # Disable task mode radios while drafting
+        try:
+            self._update_task_mode_controls_state()
         except Exception:
             pass
 
@@ -674,6 +890,11 @@ class App(tk.Tk):
         tree.column("big", width=120)
         tree.column("sub", width=180)
         tree.pack(fill=tk.BOTH, expand=True)
+        # Mouse-wheel support for picker list
+        try:
+            self._bind_mousewheel(tree, tree)
+        except Exception:
+            pass
 
         def _apply_filter(_e=None):
             q = (var_q.get() or "").strip().lower()
@@ -734,7 +955,7 @@ class App(tk.Tk):
                 old.destroy()
             except Exception:
                 pass
-        panel = ttk.LabelFrame(parent, text="步骤延时配置（秒）")
+        panel = ttk.LabelFrame(parent, text="高级配置")
         panel.pack(fill=tk.X, padx=8, pady=8)
         self._step_panel = panel
         inner = ttk.Frame(panel)
@@ -750,10 +971,20 @@ class App(tk.Tk):
         except Exception:
             cur_val = 0.01
 
-        ttk.Label(inner, text="延时(秒)", width=12).grid(row=0, column=0, sticky="w")
+        ttk.Label(inner, text="延时(秒)", width=14).grid(row=0, column=0, sticky="w")
         var_delay = tk.DoubleVar(value=cur_val)
         sp = ttk.Spinbox(inner, from_=0.0, to=1.0, increment=0.001, width=10, textvariable=var_delay)
         sp.grid(row=0, column=1, sticky="w")
+
+        # Restart policy: restart game every N minutes (default 60)
+        ttk.Label(inner, text="重启周期(分钟)", width=14).grid(row=1, column=0, sticky="w", pady=(6,0))
+        try:
+            cur_restart = int(self.tasks_data.get("restart_every_min", 60) or 60)
+        except Exception:
+            cur_restart = 60
+        var_restart = tk.IntVar(value=cur_restart)
+        sp2 = ttk.Spinbox(inner, from_=5, to=600, increment=5, width=10, textvariable=var_restart)
+        sp2.grid(row=1, column=1, sticky="w", pady=(6,0))
 
         def _apply_delay_from_widget() -> None:
             try:
@@ -771,6 +1002,16 @@ class App(tk.Tk):
             self.tasks_data.setdefault("step_delays", {})["default"] = float(val)
             self._save_tasks_data()
 
+        def _apply_restart_from_widget() -> None:
+            try:
+                val = int(var_restart.get())
+            except Exception:
+                return
+            if val <= 0:
+                val = 60
+            self.tasks_data["restart_every_min"] = int(val)
+            self._save_tasks_data()
+
         # Real-time save: on value change, focus out, and Enter
         try:
             var_delay.trace_add("write", lambda *_: _apply_delay_from_widget())
@@ -779,6 +1020,15 @@ class App(tk.Tk):
         try:
             sp.bind("<FocusOut>", lambda _e=None: _apply_delay_from_widget())
             sp.bind("<Return>", lambda _e=None: _apply_delay_from_widget())
+        except Exception:
+            pass
+        try:
+            var_restart.trace_add("write", lambda *_: _apply_restart_from_widget())
+        except Exception:
+            pass
+        try:
+            sp2.bind("<FocusOut>", lambda _e=None: _apply_restart_from_widget())
+            sp2.bind("<Return>", lambda _e=None: _apply_restart_from_widget())
         except Exception:
             pass
 
@@ -865,13 +1115,20 @@ class App(tk.Tk):
         card._is_draft = bool(draft)  # type: ignore
 
         # Variables
-        var_enabled = tk.BooleanVar(value=bool(it.get("enabled", True)))
+        # Use IntVar with explicit on/off to ensure check mark renders reliably
+        var_enabled = tk.IntVar(value=1 if bool(it.get("enabled", True)) else 0)
         var_item_name = tk.StringVar(value=str(it.get("item_name", "")))
         var_item_id = tk.StringVar(value=str(it.get("id", "")))
         var_thr = tk.IntVar(value=int(it.get("price_threshold", 0) or 0))
         var_prem = tk.DoubleVar(value=float(it.get("price_premium_pct", 0) or 0))
         var_restock = tk.IntVar(value=int(it.get("restock_price", 0) or 0))
         var_target = tk.IntVar(value=int(it.get("target_total", 0) or 0))
+        # For round-robin mode, execution duration (minutes)
+        try:
+            _dur_def = int(it.get("duration_min", 10) or 10)
+        except Exception:
+            _dur_def = 10
+        var_duration = tk.IntVar(value=max(1, _dur_def))
         # time_start/time_end as HH:MM only
         def _split_hhss(s: str) -> tuple[int, int]:
             s = str(s or "").strip()
@@ -880,19 +1137,28 @@ class App(tk.Tk):
                 return max(0, min(23, int(hh))), max(0, min(59, int(ss)))
             except Exception:
                 return 0, 0
-        h1, s1 = _split_hhss(str(it.get("time_start", "")))
-        h2, s2 = _split_hhss(str(it.get("time_end", "")))
-        var_h1 = tk.IntVar(value=h1); var_s1 = tk.IntVar(value=s1)
-        var_h2 = tk.IntVar(value=h2); var_s2 = tk.IntVar(value=s2)
+        ts_raw = str(it.get("time_start", "")).strip()
+        te_raw = str(it.get("time_end", "")).strip()
+        h1, s1 = _split_hhss(ts_raw)
+        h2, s2 = _split_hhss(te_raw)
+        # Use StringVar to preserve leading zeros in HH/MM display; leave empty if original was empty
+        var_h1 = tk.StringVar(value=(f"{h1:02d}" if ts_raw else "")); var_s1 = tk.StringVar(value=(f"{s1:02d}" if ts_raw else ""))
+        var_h2 = tk.StringVar(value=(f"{h2:02d}" if te_raw else "")); var_s2 = tk.StringVar(value=(f"{s2:02d}" if te_raw else ""))
 
         # Row 0: enable checkbox occupies its own line
         row_enable = ttk.Frame(card)
         row_enable.pack(fill=tk.X, padx=8, pady=(6, 0))
-        chk = ttk.Checkbutton(row_enable, text="启用", variable=var_enabled)
+        chk = ttk.Checkbutton(row_enable, text="启用", variable=var_enabled, onvalue=1, offvalue=0)
         try:
             chk.pack(side=tk.LEFT)
         except Exception:
             pass
+        # Show order if available
+        try:
+            order_num = (int(it.get("order", idx if idx is not None else 0)) if isinstance(it, dict) else (idx or 0)) + 1
+        except Exception:
+            order_num = (idx or 0) + 1
+        ttk.Label(row_enable, text=f"顺序：{order_num}").pack(side=tk.LEFT, padx=(12,0))
 
         # Row 1: semantic sentence with inline inputs (responsive flow layout)
         row = ttk.Frame(card)
@@ -913,16 +1179,48 @@ class App(tk.Tk):
         widgets.append(ttk.Label(row, text="的时候启用补货模式（自动点击Max买满），"))
         widgets.append(ttk.Label(row, text="一共购买"))
         ent_target = ttk.Entry(row, textvariable=var_target, width=8); widgets.append(ent_target)
-        widgets.append(ttk.Label(row, text="个，在"))
-        # Time start/end HH:SS
-        sp_h1 = ttk.Spinbox(row, from_=0, to=23, width=3, textvariable=var_h1); widgets.append(sp_h1)
-        colon1 = ttk.Label(row, text=":"); widgets.append(colon1)
-        sp_s1 = ttk.Spinbox(row, from_=0, to=59, width=3, textvariable=var_s1); widgets.append(sp_s1)
-        widgets.append(ttk.Label(row, text="到"))
-        sp_h2 = ttk.Spinbox(row, from_=0, to=23, width=3, textvariable=var_h2); widgets.append(sp_h2)
-        colon2 = ttk.Label(row, text=":"); widgets.append(colon2)
-        sp_s2 = ttk.Spinbox(row, from_=0, to=59, width=3, textvariable=var_s2); widgets.append(sp_s2)
-        widgets.append(ttk.Label(row, text="启动（时间）"))
+        widgets.append(ttk.Label(row, text="个，"))
+
+        # Mode-specific fields
+        mode = str(self.tasks_data.get("task_mode", "time"))
+        ent_dur = None
+        sp_h1 = sp_s1 = sp_h2 = sp_s2 = None
+        if mode == "round":
+            widgets.append(ttk.Label(row, text="执行时长(分钟)"))
+            try:
+                ent_dur = ttk.Spinbox(row, from_=1, to=1440, increment=1, width=6, textvariable=var_duration)
+            except Exception:
+                ent_dur = tk.Spinbox(row, from_=1, to=1440, increment=1, width=6, textvariable=var_duration)
+            widgets.append(ent_dur)
+        else:
+            widgets.append(ttk.Label(row, text="在"))
+            # Time start/end HH:MM via read-only comboboxes
+            hours_vals = [f"{i:02d}" for i in range(24)]
+            mins_vals = [f"{i:02d}" for i in range(60)]
+            try:
+                sp_h1 = ttk.Combobox(row, width=3, values=hours_vals, textvariable=var_h1, state="readonly")
+            except Exception:
+                sp_h1 = ttk.Entry(row, width=3, textvariable=var_h1)
+            widgets.append(sp_h1)
+            colon1 = ttk.Label(row, text=":"); widgets.append(colon1)
+            try:
+                sp_s1 = ttk.Combobox(row, width=3, values=mins_vals, textvariable=var_s1, state="readonly")
+            except Exception:
+                sp_s1 = ttk.Entry(row, width=3, textvariable=var_s1)
+            widgets.append(sp_s1)
+            widgets.append(ttk.Label(row, text="到"))
+            try:
+                sp_h2 = ttk.Combobox(row, width=3, values=hours_vals, textvariable=var_h2, state="readonly")
+            except Exception:
+                sp_h2 = ttk.Entry(row, width=3, textvariable=var_h2)
+            widgets.append(sp_h2)
+            colon2 = ttk.Label(row, text=":"); widgets.append(colon2)
+            try:
+                sp_s2 = ttk.Combobox(row, width=3, values=mins_vals, textvariable=var_s2, state="readonly")
+            except Exception:
+                sp_s2 = ttk.Entry(row, width=3, textvariable=var_s2)
+            widgets.append(sp_s2)
+            widgets.append(ttk.Label(row, text="启动（时间）"))
         # Apply responsive flow layout
         self._flow_layout(row, widgets, padx=4, pady=2)
 
@@ -938,42 +1236,120 @@ class App(tk.Tk):
             if not name:
                 messagebox.showwarning("保存", "请先选择‘购买物品’。")
                 return
-            # Compose record
+            # Compose record (time fields handled per mode below)
             rec: Dict[str, Any] = {
-                "enabled": bool(var_enabled.get()),
+                "enabled": bool(int(var_enabled.get()) != 0),
                 "item_name": name,
                 "price_threshold": int(var_thr.get() or 0),
                 "price_premium_pct": float(var_prem.get() or 0),
                 "restock_price": int(var_restock.get() or 0),
                 "target_total": int(var_target.get() or 0),
-                "time_start": f"{int(var_h1.get()):02d}:{int(var_s1.get()):02d}",
-                "time_end": f"{int(var_h2.get()):02d}:{int(var_s2.get()):02d}",
+                "duration_min": int(var_duration.get() or 10),
             }
+            # Validation depends on task mode
+            mode_now = str(self.tasks_data.get("task_mode", "time"))
+            if mode_now == "time":
+                # Build and validate HH:MM inputs; both required
+                h1s = (var_h1.get() or "").strip(); m1s = (var_s1.get() or "").strip()
+                h2s = (var_h2.get() or "").strip(); m2s = (var_s2.get() or "").strip()
+                def _mk_hhmm(hs: str, ms: str) -> str | None:
+                    try:
+                        if hs == "" or ms == "":
+                            return None
+                        hh = int(hs); mm = int(ms)
+                        if 0 <= hh <= 23 and 0 <= mm <= 59:
+                            return f"{hh:02d}:{mm:02d}"
+                    except Exception:
+                        return None
+                    return None
+                ts = _mk_hhmm(h1s, m1s)
+                te = _mk_hhmm(h2s, m2s)
+                if not ts or not te:
+                    messagebox.showwarning("保存", "按时间区间执行：请设置开始时间与结束时间（小时:分钟）。")
+                    return
+                if ts == te:
+                    messagebox.showwarning("保存", "按时间区间执行：开始时间与结束时间不能相同。")
+                    return
+                # Disallow duplicate time windows
+                items_all = self.tasks_data.setdefault("tasks", [])
+                for j, other in enumerate(items_all):
+                    if idx is not None and j == idx:
+                        continue
+                    try:
+                        if str(other.get("time_start")) == ts and str(other.get("time_end")) == te:
+                            messagebox.showwarning("保存", "存在相同的时间区间任务，请调整后再保存。")
+                            return
+                    except Exception:
+                        pass
+                rec["time_start"] = ts
+                rec["time_end"] = te
+            else:
+                # Round-robin: require positive duration
+                try:
+                    dur = int(rec.get("duration_min", 0))
+                except Exception:
+                    dur = 0
+                if dur <= 0:
+                    messagebox.showwarning("保存", "轮流执行：请设置大于 0 的执行时长(分钟)。")
+                    return
+                # Preserve existing time window values (not used in round mode)
+                try:
+                    rec["time_start"] = str(it.get("time_start", ""))
+                    rec["time_end"] = str(it.get("time_end", ""))
+                except Exception:
+                    pass
             # If editing existing
             items = self.tasks_data.setdefault("tasks", [])
             if idx is not None and 0 <= idx < len(items):
                 # keep existing id/purchased if present
                 rec["id"] = items[idx].get("id") or str(uuid.uuid4())
                 rec["purchased"] = int(items[idx].get("purchased", 0))
+                rec["order"] = int(items[idx].get("order", idx))
                 items[idx] = rec
             else:
                 rec["id"] = str(uuid.uuid4())
+                rec["order"] = len(items)
                 items.append(rec)
+            # Normalize order fields to match list order
+            for k, obj in enumerate(items):
+                try:
+                    obj["order"] = k
+                except Exception:
+                    pass
             self._save_tasks_data()
             self._task_draft_alive = False
             try:
                 self.btn_add_task.configure(state=tk.NORMAL)
             except Exception:
                 pass
+            # If we were editing an existing item, exit editing mode
+            try:
+                self._editing_task_index = None
+            except Exception:
+                pass
             self._render_task_cards()
 
         def _edit():
-            ent_state = tk.NORMAL
-            for w in (ent_thr, ent_prem, ent_rest, ent_target, btn_pick, sp_h1, sp_s1, sp_h2, sp_s2):
+            # Prevent editing while a draft card exists
+            if self._task_draft_alive:
                 try:
-                    w.configure(state=ent_state)
+                    messagebox.showwarning("编辑", "请先保存或取消‘新增任务’卡片后再编辑其他任务。")
                 except Exception:
                     pass
+                return
+            # If another item is currently being edited, confirm switching
+            if (self._editing_task_index is not None) and (self._editing_task_index != idx):
+                try:
+                    if not messagebox.askokcancel("编辑", "已有任务在编辑中，切换将丢弃未保存更改，是否继续？"):
+                        return
+                except Exception:
+                    pass
+            # Switch this card into editing mode with Save/Cancel
+            try:
+                self._editing_task_index = idx
+            except Exception:
+                self._editing_task_index = None
+            self._render_task_cards()
 
         def _cancel():
             if draft and (idx is None):
@@ -988,6 +1364,11 @@ class App(tk.Tk):
                 except Exception:
                     pass
             else:
+                # If cancelling editing for an existing item, exit editing mode
+                try:
+                    self._editing_task_index = None
+                except Exception:
+                    pass
                 self._render_task_cards()
 
         def _delete():
@@ -998,6 +1379,15 @@ class App(tk.Tk):
                 return
             if not messagebox.askokcancel("删除", f"确定删除任务 [{items[idx].get('item_name','')}]？"):
                 return
+            # Adjust current editing index if needed
+            try:
+                if self._editing_task_index is not None:
+                    if self._editing_task_index == idx:
+                        self._editing_task_index = None
+                    elif idx < self._editing_task_index:
+                        self._editing_task_index -= 1
+            except Exception:
+                pass
             del items[idx]
             self._save_tasks_data()
             self._render_task_cards()
@@ -1010,13 +1400,58 @@ class App(tk.Tk):
             ttk.Button(btns, text="编辑", command=_edit).pack(side=tk.RIGHT)
             ttk.Button(btns, text="删除", command=_delete).pack(side=tk.RIGHT, padx=(0,6))
 
+        # Reorder controls (only for existing items when not editing)
+        if (not draft) and (idx is not None) and (not editable):
+            def _move_up():
+                items = self.tasks_data.get("tasks", [])
+                i = idx
+                if not (0 <= i < len(items)):
+                    return
+                if i == 0:
+                    return
+                items[i-1], items[i] = items[i], items[i-1]
+                for k, obj in enumerate(items):
+                    if isinstance(obj, dict):
+                        obj["order"] = k
+                self._save_tasks_data()
+                self._render_task_cards()
+            def _move_down():
+                items = self.tasks_data.get("tasks", [])
+                i = idx
+                if not (0 <= i < len(items)):
+                    return
+                if i >= len(items) - 1:
+                    return
+                items[i+1], items[i] = items[i], items[i+1]
+                for k, obj in enumerate(items):
+                    if isinstance(obj, dict):
+                        obj["order"] = k
+                self._save_tasks_data()
+                self._render_task_cards()
+            # Place on the left
+            ttk.Button(btns, text="上移", command=_move_up).pack(side=tk.LEFT)
+            ttk.Button(btns, text="下移", command=_move_down).pack(side=tk.LEFT, padx=(6,0))
+
         # Disable editing if not editable
         if not editable:
-            for w in (ent_thr, ent_prem, ent_rest, ent_target, btn_pick, sp_h1, sp_s1, sp_h2, sp_s2):
+            # Disable appropriate fields depending on mode
+            mode_now = str(self.tasks_data.get("task_mode", "time"))
+            to_disable = [ent_thr, ent_prem, ent_rest, ent_target, btn_pick]
+            if mode_now == "round":
+                if ent_dur is not None:
+                    to_disable.append(ent_dur)
+            else:
+                for w_ in (sp_h1, sp_s1, sp_h2, sp_s2):
+                    if w_ is not None:
+                        to_disable.append(w_)
+            for w in to_disable:
                 try:
                     w.configure(state=tk.DISABLED)
                 except Exception:
                     pass
+
+        # Keep a strong reference to Tk variables to avoid GC issues (checkbox display)
+        card._vars = (var_enabled, var_item_name, var_item_id, var_thr, var_prem, var_restock, var_target, var_h1, var_s1, var_h2, var_s2, var_duration)  # type: ignore
 
     def _hotkey_to_display(self, seq: str) -> str:
         s = str(seq or "").strip()
@@ -1166,6 +1601,11 @@ class App(tk.Tk):
             self.tab1_canvas.bind("<Configure>", _on_canvas)
         except Exception:
             pass
+        # Enable mouse-wheel scroll for Tab1 content
+        try:
+            self._bind_mousewheel(self.tab1_inner, self.tab1_canvas)
+        except Exception:
+            pass
 
         # Use inner frame as the layout root for this tab
         outer = self.tab1_inner
@@ -1238,19 +1678,27 @@ class App(tk.Tk):
         _game_box_container = box_game
 
         def test_match(name: str, path: str, conf: float):
+            """在屏幕上查找模板，找到则移动鼠标并点击一次；失败才提示。"""
             if not os.path.exists(path):
                 messagebox.showwarning("测试识别", f"文件不存在: {path}")
                 return
             try:
                 import pyautogui  # type: ignore
-                loc = pyautogui.locateCenterOnScreen(path, confidence=conf)
+                center = pyautogui.locateCenterOnScreen(path, confidence=conf)
+                if center:
+                    try:
+                        pyautogui.moveTo(center.x, center.y, duration=0.1)
+                        pyautogui.click(center.x, center.y)
+                    except Exception:
+                        pass
+                    return  # 成功不弹窗
+                # 未找到时，尝试返回矩形以辅助日志
+                box = pyautogui.locateOnScreen(path, confidence=conf)
             except Exception as e:
                 messagebox.showerror("测试识别", f"调用失败: {e}")
                 return
-            if loc:
-                messagebox.showinfo("测试识别", f"{name} 匹配成功: ({loc.x}, {loc.y})")
-            else:
-                messagebox.showwarning("测试识别", f"{name} 未匹配到。可降低置信度或重截图片。")
+            # 失败：提示
+            messagebox.showwarning("测试识别", f"{name} 未匹配到。可降低置信度或重截图片。")
 
         def capture_into_row(row: "TemplateRow"):
             # User drag-select a region; then capture and save under images/<name>.png
@@ -1276,8 +1724,7 @@ class App(tk.Tk):
                 row.var_path.set(path)
                 # Autosave (debounced)
                 self._schedule_autosave()
-                # Modal preview
-                self._preview_image(path, f"预览 - {row.name}")
+                # 截图成功后仅更新状态，不弹窗，不自动预览
 
             self._select_region(_after)
 
@@ -1370,11 +1817,14 @@ class App(tk.Tk):
                         messagebox.showerror("模板识别", f"识别失败: {e}")
                         return
                     if center:
-                        messagebox.showinfo("模板识别", f"{nm} 匹配成功: ({center.x}, {center.y})")
-                    elif box:
-                        messagebox.showinfo("模板识别", f"{nm} 匹配成功: 区域=({int(getattr(box,'left',0))},{int(getattr(box,'top',0))},{int(getattr(box,'width',0))},{int(getattr(box,'height',0))})")
-                    else:
-                        messagebox.showwarning("模板识别", f"{nm} 未匹配到，请降低阈值或重截清晰模板。")
+                        try:
+                            pyautogui.moveTo(center.x, center.y, duration=0.1)
+                            pyautogui.click(center.x, center.y)
+                        except Exception:
+                            pass
+                        return  # 成功不弹窗
+                    # 失败提示
+                    messagebox.showwarning("模板识别", f"{nm} 未匹配到，请降低阈值或重截清晰模板。")
 
                 r.on_test = _logged_on_test
             except Exception:
@@ -1411,9 +1861,9 @@ class App(tk.Tk):
         except Exception:
             sp_top = tk.Spinbox(box_roi, from_=0.0, to=1.0, increment=0.01, textvariable=self.var_roi_top_thr, width=6)
         sp_top.grid(row=0, column=4, sticky="w", padx=4)
-        ttk.Button(box_roi, text="测试识别", command=lambda: test_match("价格区域-顶部模板", self.var_roi_top_tpl.get().strip(), float(self.var_roi_top_thr.get() or 0.55))).grid(row=0, column=5, padx=4)
-        ttk.Button(box_roi, text="截图", command=lambda: _capture_roi_into(self.var_roi_top_tpl, slug="buy_data_top", title="顶部模板")).grid(row=0, column=6, padx=4)
-        ttk.Button(box_roi, text="预览", command=lambda: self._preview_image(self.var_roi_top_tpl.get().strip(), "预览 - 顶部模板")).grid(row=0, column=7, padx=4)
+        ttk.Button(box_roi, text="点击测试", command=lambda: test_match("价格区域-顶部模板", self.var_roi_top_tpl.get().strip(), float(self.var_roi_top_thr.get() or 0.55))).grid(row=0, column=5, padx=4)
+        ttk.Button(box_roi, text="模板捕获", command=lambda: _capture_roi_into(self.var_roi_top_tpl, slug="buy_data_top", title="顶部模板")).grid(row=0, column=6, padx=4)
+        ttk.Button(box_roi, text="模版预览", command=lambda: self._preview_image(self.var_roi_top_tpl.get().strip(), "预览 - 顶部模板")).grid(row=0, column=7, padx=4)
 
         # 底部模板（样式与模板管理一致）
         ttk.Label(box_roi, text="底部模板", width=12).grid(row=1, column=0, sticky="w", padx=4, pady=2)
@@ -1425,9 +1875,9 @@ class App(tk.Tk):
         except Exception:
             sp_btm = tk.Spinbox(box_roi, from_=0.0, to=1.0, increment=0.01, textvariable=self.var_roi_btm_thr, width=6)
         sp_btm.grid(row=1, column=4, sticky="w", padx=4)
-        ttk.Button(box_roi, text="测试识别", command=lambda: test_match("价格区域-底部模板", self.var_roi_btm_tpl.get().strip(), float(self.var_roi_btm_thr.get() or 0.55))).grid(row=1, column=5, padx=4)
-        ttk.Button(box_roi, text="截图", command=lambda: _capture_roi_into(self.var_roi_btm_tpl, slug="buy_data_btm", title="底部模板")).grid(row=1, column=6, padx=4)
-        ttk.Button(box_roi, text="预览", command=lambda: self._preview_image(self.var_roi_btm_tpl.get().strip(), "预览 - 底部模板")).grid(row=1, column=7, padx=4)
+        ttk.Button(box_roi, text="点击测试", command=lambda: test_match("价格区域-底部模板", self.var_roi_btm_tpl.get().strip(), float(self.var_roi_btm_thr.get() or 0.55))).grid(row=1, column=5, padx=4)
+        ttk.Button(box_roi, text="模板捕获", command=lambda: _capture_roi_into(self.var_roi_btm_tpl, slug="buy_data_btm", title="底部模板")).grid(row=1, column=6, padx=4)
+        ttk.Button(box_roi, text="模版预览", command=lambda: self._preview_image(self.var_roi_btm_tpl.get().strip(), "预览 - 底部模板")).grid(row=1, column=7, padx=4)
 
         # 偏移/边距 + 预览（保持在下一行）
         ttk.Label(box_roi, text="顶部偏移").grid(row=2, column=0, padx=4, pady=4, sticky="e")
@@ -1441,7 +1891,7 @@ class App(tk.Tk):
         # 行3：识别引擎 + 放大倍率（供基于 ROI 的读取流程使用）
         ttk.Label(box_roi, text="识别引擎").grid(row=3, column=0, padx=4, pady=4, sticky="e")
         self.cmb_roi_engine = ttk.Combobox(box_roi, textvariable=self.var_roi_engine, state="readonly",
-                                           values=["", "tesseract", "easyocr", "umi"], width=12)
+                                           values=["", "tesseract", "umi"], width=12)
         self.cmb_roi_engine.grid(row=3, column=1, sticky="w")
         ttk.Label(box_roi, text="放大倍率").grid(row=3, column=2, padx=8, pady=4, sticky="e")
         try:
@@ -1501,8 +1951,7 @@ class App(tk.Tk):
                 var.set(path)
                 # 自动保存（去抖）
                 self._schedule_autosave()
-                # 预览
-                self._preview_image(path, f"预览 - {title}")
+                # 截图后不自动预览
 
             self._select_region(_after)
 
@@ -1517,7 +1966,7 @@ class App(tk.Tk):
         # Defaults
         self.var_avg_dist = tk.IntVar(value=int(avg_cfg.get("distance_from_buy_top", 5)))
         self.var_avg_height = tk.IntVar(value=int(avg_cfg.get("height", 45)))
-        self.var_avg_engine = tk.StringVar(value=str(avg_cfg.get("ocr_engine", "tesseract")))
+        self.var_avg_engine = tk.StringVar(value=str(avg_cfg.get("ocr_engine", "umi")))
         try:
             _sc_def = float(avg_cfg.get("scale", 1.0))
         except Exception:
@@ -1543,7 +1992,7 @@ class App(tk.Tk):
         # Row 1: OCR engine + scale
         ttk.Label(box_avg, text="识别引擎").grid(row=1, column=0, padx=4, pady=4, sticky="e")
         self.cmb_avg_engine = ttk.Combobox(box_avg, textvariable=self.var_avg_engine, state="readonly",
-                                           values=["tesseract", "easyocr", "umi"], width=12)
+                                           values=["tesseract", "umi"], width=12)
         self.cmb_avg_engine.grid(row=1, column=1, sticky="w")
         ttk.Label(box_avg, text="放大倍率").grid(row=1, column=2, padx=8, pady=4, sticky="e")
         try:
@@ -1592,9 +2041,9 @@ class App(tk.Tk):
         except Exception:
             sp_cur_thr = tk.Spinbox(box_cur, from_=0.0, to=1.0, increment=0.01, textvariable=self.var_cur_thr, width=6)
         sp_cur_thr.grid(row=0, column=4, sticky="w", padx=4)
-        ttk.Button(box_cur, text="测试识别", command=lambda: test_match("货币模板", self.var_cur_tpl.get().strip(), float(self.var_cur_thr.get() or 0.8))).grid(row=0, column=5, padx=4)
-        ttk.Button(box_cur, text="截图", command=lambda: _capture_roi_into(self.var_cur_tpl, slug="currency", title="货币模板")).grid(row=0, column=6, padx=4)
-        ttk.Button(box_cur, text="预览", command=self._currency_roi_preview).grid(row=0, column=7, padx=4)
+        ttk.Button(box_cur, text="点击测试", command=lambda: test_match("货币模板", self.var_cur_tpl.get().strip(), float(self.var_cur_thr.get() or 0.8))).grid(row=0, column=5, padx=4)
+        ttk.Button(box_cur, text="模板捕获", command=lambda: _capture_roi_into(self.var_cur_tpl, slug="currency", title="货币模板")).grid(row=0, column=6, padx=4)
+        ttk.Button(box_cur, text="模版预览", command=self._currency_roi_preview).grid(row=0, column=7, padx=4)
 
         # 行1：宽度
         ttk.Label(box_cur, text="价格区域宽(px)").grid(row=1, column=0, padx=4, pady=4, sticky="e")
@@ -1607,7 +2056,7 @@ class App(tk.Tk):
         # 行1（续）：引擎 + 放大
         ttk.Label(box_cur, text="识别引擎").grid(row=1, column=2, padx=8, pady=4, sticky="e")
         self.cmb_cur_engine = ttk.Combobox(box_cur, textvariable=self.var_cur_engine, state="readonly",
-                                           values=["", "tesseract", "easyocr", "umi"], width=12)
+                                           values=["", "tesseract", "umi"], width=12)
         self.cmb_cur_engine.grid(row=1, column=3, sticky="w")
         ttk.Label(box_cur, text="放大倍率").grid(row=1, column=4, padx=8, pady=4, sticky="e")
         try:
@@ -1733,7 +2182,7 @@ class App(tk.Tk):
         self.cfg["price_roi"]["lr_pad"] = int(self.var_roi_lr_pad.get() or 0)
         # 新增：引擎与放大倍率
         eng = str(self.var_roi_engine.get() or "").strip().lower()
-        if eng not in ("", "tesseract", "easyocr", "umi"):
+        if eng not in ("", "tesseract", "umi"):
             eng = ""
         self.cfg["price_roi"]["ocr_engine"] = eng
         try:
@@ -1751,9 +2200,9 @@ class App(tk.Tk):
             self.cfg.setdefault("avg_price_area", {})
             self.cfg["avg_price_area"]["distance_from_buy_top"] = int(self.var_avg_dist.get() or 0)
             self.cfg["avg_price_area"]["height"] = int(self.var_avg_height.get() or 0)
-            eng = str(self.var_avg_engine.get() or "tesseract").lower()
-            if eng not in ("tesseract", "easyocr", "umi"):
-                eng = "tesseract"
+            eng = str(self.var_avg_engine.get() or "umi").lower()
+            if eng not in ("tesseract", "umi"):
+                eng = "umi"
             self.cfg["avg_price_area"]["ocr_engine"] = eng
             try:
                 sc = float(self.var_avg_scale.get() or 1.0)
@@ -1779,7 +2228,7 @@ class App(tk.Tk):
             self.cfg["currency_area"]["threshold"] = float(self.var_cur_thr.get() or 0.8)
             self.cfg["currency_area"]["price_width"] = int(self.var_cur_width.get() or 220)
             eng = str(self.var_cur_engine.get() or "").strip().lower()
-            if eng not in ("", "tesseract", "easyocr", "umi"):
+            if eng not in ("", "tesseract", "umi"):
                 eng = ""
             self.cfg["currency_area"]["ocr_engine"] = eng
             try:
@@ -1945,9 +2394,9 @@ class App(tk.Tk):
         except Exception:
             _cur = ""
         try:
-            eng = _cur if _cur else str(self.var_avg_engine.get() or "tesseract").lower()
+            eng = _cur if _cur else str(self.var_avg_engine.get() or "umi").lower()
         except Exception:
-            eng = "tesseract"
+            eng = "umi"
         try:
             import time as _time
             from PIL import Image as _Image  # type: ignore
@@ -1970,24 +2419,14 @@ class App(tk.Tk):
                     img = None
 
             t0 = _time.perf_counter()
-            if eng == "easyocr":
-                try:
-                    import easyocr  # type: ignore
-                    if getattr(self, "_easyocr_reader", None) is None:
-                        self._easyocr_reader = easyocr.Reader(['en'], gpu=False)
-                    arr = _np.array(img) if img is not None else crop_bgr[:, :, ::-1]
-                    texts = self._easyocr_reader.readtext(arr, detail=0)
-                    raw_text = "\n".join(map(str, texts))
-                except Exception as _e:
-                    raw_text = f"[easyocr失败] {_e}"
-            elif eng in ("umi", "umi-ocr", "umiocr"):
+            if eng in ("umi", "umi-ocr", "umiocr"):
                 try:
                     o_texts, o_ms = self._run_umi_ocr(pil_image=img)
                     raw_text = "\n".join(map(str, o_texts or []))
                     elapsed_ms = float(o_ms)
                 except Exception as _e:
                     raw_text = f"[umi失败] {_e}"
-            if (not raw_text or raw_text.startswith("[easyocr失败]")):
+            if not raw_text:
                 allow = str(self.cfg.get("avg_price_area", {}).get("ocr_allowlist", "0123456789KM"))
                 need = "KMkm"
                 allow_ex = allow + "".join(ch for ch in need if ch not in allow)
@@ -2108,7 +2547,7 @@ class App(tk.Tk):
                 sc = 2.5
             try:
                 cur_eng = str(self.var_cur_engine.get() or "").strip().lower()
-                eng_used = cur_eng if cur_eng else str(self.var_avg_engine.get() or "tesseract").lower()
+                eng_used = cur_eng if cur_eng else str(self.var_avg_engine.get() or "umi").lower()
                 self._append_log(f"[货币ROI预览] 匹配到 {len(crops)} 个区域 引擎={eng_used} 放大={sc:.2f}")
             except Exception:
                 pass
@@ -2137,7 +2576,7 @@ class App(tk.Tk):
         except Exception:
             cur = ""
         try:
-            eng = cur if cur else str(self.var_avg_engine.get() or "tesseract").lower()
+            eng = cur if cur else str(self.var_avg_engine.get() or "umi").lower()
         except Exception:
             eng = "tesseract"
         raw_text = ""
@@ -2173,18 +2612,7 @@ class App(tk.Tk):
             except Exception:
                 pass
 
-            if eng == "easyocr":
-                try:
-                    import easyocr  # type: ignore
-                    if getattr(self, "_easyocr_reader", None) is None:
-                        self._easyocr_reader = easyocr.Reader(['en'], gpu=False)
-                    arr = _np.array(img) if img is not None else fallback_img
-                    texts = self._easyocr_reader.readtext(arr, detail=0)
-                    raw_text = "\n".join(map(str, texts))
-                except Exception as _e:
-                    raw_text = f"[easyocr失败] {_e}"
-
-            elif eng in ("umi", "umi-ocr", "umiocr"):
+            if eng in ("umi", "umi-ocr", "umiocr"):
                 try:
                     # Log Umi-OCR config
                     try:
@@ -2200,7 +2628,7 @@ class App(tk.Tk):
                     elapsed_ms = float(o_ms)
                 except Exception as _e:
                     raw_text = f"[umi失败] {_e}"
-            if (not raw_text or raw_text.startswith("[easyocr失败]")):
+            if not raw_text:
                 allow = str(self.cfg.get("avg_price_area", {}).get("ocr_allowlist", "0123456789KM"))
                 need = "KMkm"
                 allow_ex = allow + "".join(ch for ch in need if ch not in allow)
@@ -2239,8 +2667,8 @@ class App(tk.Tk):
         top = tk.Toplevel(self)
         try:
             cur = (self.var_cur_engine.get() or "").strip().lower()
-            eng = cur if cur else (self.var_avg_engine.get() or "tesseract").lower()
-            eng_map = {"tesseract": "PyTesseract", "easyocr": "EasyOCR", "umi": "Umi-OCR"}
+            eng = cur if cur else (self.var_avg_engine.get() or "umi").lower()
+            eng_map = {"tesseract": "PyTesseract", "umi": "Umi-OCR"}
             top.title(f"预览 - 货币价格区域（{eng_map.get(eng, eng)}）")
         except Exception:
             pass
@@ -3007,28 +3435,16 @@ class App(tk.Tk):
                 _maybe_init_tesseract()
             except Exception:
                 pass
-            eng = str(self.var_avg_engine.get() or "tesseract").lower()
+            eng = str(self.var_avg_engine.get() or "umi").lower()
             t0 = _time.perf_counter()
-            if eng == "easyocr":
-                try:
-                    import easyocr  # type: ignore
-                    import numpy as _np  # type: ignore
-                    if getattr(self, "_easyocr_reader", None) is None:
-                        self._easyocr_reader = easyocr.Reader(['en'], gpu=False)
-                    arr = _np.array(bin_img or img)
-                    texts = self._easyocr_reader.readtext(arr, detail=0)
-                    raw_text = "\n".join(map(str, texts))
-                except Exception as _e:
-                    raw_text = f"[easyocr失败] {_e}"
-            
-            elif eng in ("umi", "umi-ocr", "umiocr"):
+            if eng in ("umi", "umi-ocr", "umiocr"):
                 try:
                     o_texts, o_ms = self._run_umi_ocr(pil_image=bin_img or img)
                     raw_text = "\n".join(map(str, o_texts or []))
                     elapsed_ms = float(o_ms)
                 except Exception as _e:
                     raw_text = f"[umi失败] {_e}"
-            if (not raw_text or raw_text.startswith("[easyocr失败]")):
+            if not raw_text:
                 allow = str(self.cfg.get("avg_price_area", {}).get("ocr_allowlist", "0123456789KM"))
                 need = "KMkm"
                 allow_ex = allow + "".join(ch for ch in need if ch not in allow)
@@ -3063,7 +3479,7 @@ class App(tk.Tk):
 
         try:
             self._preview_avg_price_window(crop_path, raw_text, cleaned, parsed_val, elapsed_ms,
-                                           engine=str(self.var_avg_engine.get() or "tesseract").lower())
+                                           engine=str(self.var_avg_engine.get() or "umi").lower())
         except Exception as e:
             messagebox.showerror("预览", f"显示失败: {e}")
 
@@ -3073,7 +3489,7 @@ class App(tk.Tk):
             return
         top = tk.Toplevel(self)
         try:
-            eng_map = {"tesseract": "PyTesseract", "easyocr": "EasyOCR", "umi": "Umi-OCR"}
+            eng_map = {"tesseract": "PyTesseract", "umi": "Umi-OCR"}
             eng_name = eng_map.get(engine.lower(), engine)
             ttl_base = title if isinstance(title, str) and title else "平均单价区域"
             top.title(f"预览 - {ttl_base}（截图 + {eng_name}）")
@@ -3386,6 +3802,11 @@ class App(tk.Tk):
         self.lab_steps_inner = ttk.Frame(self.lab_steps_canvas)
         self.lab_steps_canvas.create_window((0, 0), window=self.lab_steps_inner, anchor="nw")
         self.lab_steps_inner.bind("<Configure>", lambda e: self.lab_steps_canvas.configure(scrollregion=self.lab_steps_canvas.bbox("all")))
+        # Enable wheel scroll on the step preview pane
+        try:
+            self._bind_mousewheel(self.lab_steps_inner, self.lab_steps_canvas)
+        except Exception:
+            pass
         # keep references to Tk images to avoid GC
         self._lab_step_tkimgs: list[Any] = []
 
@@ -4988,6 +5409,24 @@ class App(tk.Tk):
         # Time window
         v_tstart = tk.StringVar(value=str(data.get("time_start", "")))
         v_tend = tk.StringVar(value=str(data.get("time_end", "")))
+        # Parsed time values for Spinbox selector
+        def _parse_hm(s: str):
+            s2 = (s or "").strip()
+            try:
+                hh, mm = s2.split(":")
+                h, m = int(hh), int(mm)
+                if 0 <= h <= 23 and 0 <= m <= 59:
+                    return h, m
+            except Exception:
+                pass
+            return 0, 0
+        _h1, _m1 = _parse_hm(v_tstart.get())
+        _h2, _m2 = _parse_hm(v_tend.get())
+        v_time_enabled = tk.BooleanVar(value=bool((v_tstart.get() or "").strip() or (v_tend.get() or "").strip()))
+        v_ts_h = tk.IntVar(value=_h1)
+        v_ts_m = tk.IntVar(value=_m1)
+        v_te_h = tk.IntVar(value=_h2)
+        v_te_m = tk.IntVar(value=_m2)
         # Price mode fields
         v_mode = tk.StringVar(value=str(data.get("price_mode", "fixed")))
         v_avg_samples = tk.IntVar(value=int(data.get("avg_samples", 100)))
@@ -5024,6 +5463,45 @@ class App(tk.Tk):
         ttk.Label(tw, text="~").pack(side=tk.LEFT, padx=4)
         ent_te = ttk.Entry(tw, textvariable=v_tend, width=8)
         ent_te.pack(side=tk.LEFT)
+        # Replace text entries with a time range selector (Spinbox hour:minute)
+        try:
+            for w in list(tw.winfo_children()):
+                w.pack_forget()
+        except Exception:
+            pass
+        def _set_time_widgets_state(*_args):
+            st = "normal" if bool(v_time_enabled.get()) else "disabled"
+            for w in (sb_ts_h, sb_ts_m, sb_te_h, sb_te_m):
+                try:
+                    w.configure(state=st)
+                except Exception:
+                    pass
+        ttk.Checkbutton(tw, text="启用", variable=v_time_enabled, command=_set_time_widgets_state).pack(side=tk.LEFT, padx=(0,6))
+        try:
+            sb_ts_h = ttk.Spinbox(tw, from_=0, to=23, width=3, textvariable=v_ts_h)
+        except Exception:
+            sb_ts_h = tk.Spinbox(tw, from_=0, to=23, width=3, textvariable=v_ts_h)
+        sb_ts_h.pack(side=tk.LEFT)
+        ttk.Label(tw, text=":").pack(side=tk.LEFT)
+        try:
+            sb_ts_m = ttk.Spinbox(tw, from_=0, to=59, width=3, textvariable=v_ts_m)
+        except Exception:
+            sb_ts_m = tk.Spinbox(tw, from_=0, to=59, width=3, textvariable=v_ts_m)
+        sb_ts_m.pack(side=tk.LEFT, padx=(0,6))
+        ttk.Label(tw, text="~").pack(side=tk.LEFT, padx=4)
+        try:
+            sb_te_h = ttk.Spinbox(tw, from_=0, to=23, width=3, textvariable=v_te_h)
+        except Exception:
+            sb_te_h = tk.Spinbox(tw, from_=0, to=23, width=3, textvariable=v_te_h)
+        sb_te_h.pack(side=tk.LEFT)
+        ttk.Label(tw, text=":").pack(side=tk.LEFT)
+        try:
+            sb_te_m = ttk.Spinbox(tw, from_=0, to=59, width=3, textvariable=v_te_m)
+        except Exception:
+            sb_te_m = tk.Spinbox(tw, from_=0, to=59, width=3, textvariable=v_te_m)
+        sb_te_m.pack(side=tk.LEFT)
+        ttk.Label(tw, text="(HH:MM，可选；跨天请设置 结束<开始)").pack(side=tk.LEFT, padx=(6,0))
+        _set_time_widgets_state()
         ttk.Label(tw, text="(HH:MM，可留空)").pack(side=tk.LEFT, padx=(6,0))
 
         # Price mode group
@@ -5110,8 +5588,20 @@ class App(tk.Tk):
                     return 0 <= hh <= 23 and 0 <= mm <= 59
                 except Exception:
                     return False
-            ts_val = (v_tstart.get() or "").strip()
-            te_val = (v_tend.get() or "").strip()
+            if bool(v_time_enabled.get()):
+                try:
+                    ts_val = f"{int(v_ts_h.get()):02d}:{int(v_ts_m.get()):02d}"
+                    te_val = f"{int(v_te_h.get()):02d}:{int(v_te_m.get()):02d}"
+                except Exception:
+                    ts_val, te_val = "", ""
+                try:
+                    v_tstart.set(ts_val)
+                    v_tend.set(te_val)
+                except Exception:
+                    pass
+            else:
+                ts_val = ""
+                te_val = ""
             if not _valid_time(ts_val) or not _valid_time(te_val):
                 messagebox.showwarning("校验", "执行时间段格式需为 HH:MM（可留空）", parent=top)
                 return
@@ -5824,6 +6314,11 @@ class GoodsMarketUI(ttk.Frame):
             self.cat_tree.selection_set("all")
         except Exception:
             pass
+        # Enable wheel scroll on the category tree
+        try:
+            self._bind_mousewheel(self.cat_tree, self.cat_tree)
+        except Exception:
+            pass
 
         # 右侧：顶部工具条 + 滚动卡片区
         right = ttk.Frame(outer)
@@ -5879,6 +6374,11 @@ class GoodsMarketUI(ttk.Frame):
 
         self.gallery_inner.bind("<Configure>", _on_inner_config)
         self.gallery_canvas.bind("<Configure>", _on_canvas_config)
+        # Enable wheel scroll over the gallery area
+        try:
+            self._bind_mousewheel(self.gallery_inner, self.gallery_canvas)
+        except Exception:
+            pass
 
         # 初次渲染
         self.after(50, lambda: self._schedule_refresh_gallery(0))

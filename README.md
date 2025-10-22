@@ -65,7 +65,7 @@ wg1/
 
 ## OCR 引擎
 
-- 预览下拉可选择：`tesseract`、`easyocr`、`umi`。
+- 仅支持：`umi` 与 `tesseract`（默认：`umi`）。
 - `umi` 使用本地 Umi-OCR HTTP 接口（默认 `http://127.0.0.1:1224/api/ocr`）。
   - 可在 `config.json` 的 `umi_ocr` 节调整 `base_url`、`timeout_sec` 与 `options`。
-  - 运行逻辑（自动购买）与预览共用配置键 `avg_price_area.ocr_engine`，可按配置切换至 `umi`。
+  - 运行逻辑（自动购买）与预览共用配置键 `avg_price_area.ocr_engine`，建议设为 `umi`。

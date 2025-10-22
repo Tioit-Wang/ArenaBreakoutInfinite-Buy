@@ -134,20 +134,20 @@
     ],
     "price_roi": {
         "top_template": "images\\buy_data_top.png",
-        "top_threshold": 0.8,
+        "top_threshold": 0.84,
         "bottom_template": "images\\buy_data_btm.png",
-        "bottom_threshold": 0.8,
+        "bottom_threshold": 0.79,
         "top_offset": 0,
         "bottom_offset": 0,
         "lr_pad": -15,
         "ocr_engine": "umi",
-        "scale": 1.5
+        "scale": 1.2
     },
     "currency_area": {
         "template": "images\\currency.png",
         "threshold": 0.8,
         "price_width": 63,
-        "ocr_engine": "easyocr",
+        "ocr_engine": "",
         "scale": 1.4
     },
     "avg_price_area": {

@@ -4,7 +4,6 @@ Simple OCR abstraction that accepts an image and returns raw text.
 Supports engines:
 - "umi" (Umi-OCR HTTP API)
 - "tesseract" (pytesseract)
-- "easyocr" (EasyOCR)
 
 Design goals:
 - Input accepts file path, PIL.Image, or numpy array.
@@ -115,44 +114,6 @@ def _ocr_tesseract(pil_img: "Image.Image", config: Optional[str] = None) -> str:
         raise RuntimeError(f"Tesseract 识别失败: {e}") from e
 
 
-# -------------------- EasyOCR --------------------
-
-_EASYOCR_CACHE: dict[tuple[tuple[str, ...], bool], Any] = {}
-
-
-def _get_easyocr_reader(langs: Iterable[str], gpu: Optional[bool] = None):
-    try:
-        import easyocr  # type: ignore
-    except Exception as e:  # pragma: no cover
-        raise RuntimeError("缺少 easyocr 依赖，请安装 easyocr 包。") from e
-    key = (tuple(langs), bool(gpu) if gpu is not None else False)
-    rdr = _EASYOCR_CACHE.get(key)
-    if rdr is None:
-        rdr = easyocr.Reader(list(langs), gpu=gpu if gpu is not None else False)
-        _EASYOCR_CACHE[key] = rdr
-    return rdr
-
-
-def _ocr_easyocr(pil_img: "Image.Image", *, langs: Optional[Iterable[str]] = None, gpu: Optional[bool] = None) -> str:
-    if np is None:
-        raise RuntimeError("缺少 numpy 依赖，请安装 numpy 包。")
-    langs = list(langs) if langs else ["en"]
-    reader = _get_easyocr_reader(langs, gpu=gpu)
-    arr = np.array(pil_img)
-    # EasyOCR expects RGB numpy array
-    results = reader.readtext(arr, detail=1)
-    # results: List[ [bbox, text, confidence], ... ]
-    texts: List[str] = []
-    for item in results:
-        try:
-            t = str(item[1]).strip()
-            if t:
-                texts.append(t)
-        except Exception:
-            continue
-    return "\n".join(texts)
-
-
 # -------------------- Umi-OCR (HTTP) --------------------
 
 @dataclass
@@ -209,13 +170,10 @@ def _ocr_umi_http(pil_img: "Image.Image", cfg: Optional[UmiConfig] = None) -> st
 def read_text(
     image: ImageLike,
     *,
-    engine: str = "tesseract",
+    engine: str = "umi",
     grayscale: bool = False,
     # Tesseract options
     tess_config: Optional[str] = None,
-    # EasyOCR options
-    easyocr_langs: Optional[Iterable[str]] = None,
-    easyocr_gpu: Optional[bool] = None,
     # Umi options
     umi_base_url: Optional[str] = None,
     umi_timeout: float = 5.0,
@@ -225,11 +183,9 @@ def read_text(
 
     Parameters:
         image: str|PIL.Image|np.ndarray
-        engine: one of {"umi", "tesseract", "easyocr"}
+        engine: one of {"umi", "tesseract"}
         grayscale: whether to convert to grayscale before OCR
         tess_config: optional passthrough config string for pytesseract
-        easyocr_langs: languages for EasyOCR (default: ["en"]) 
-        easyocr_gpu: whether to use GPU for EasyOCR (default: False)
         umi_base_url: HTTP base URL for Umi-OCR service
         umi_timeout: HTTP timeout seconds
         umi_options: forward options to Umi-OCR (e.g., {"data.format": "text"})
@@ -247,8 +203,6 @@ def read_text(
     eng = (engine or "tesseract").strip().lower()
     if eng in ("tesseract", "tess", "ts"):
         return _ocr_tesseract(pil, config=tess_config)
-    if eng in ("easyocr", "easy"):
-        return _ocr_easyocr(pil, langs=easyocr_langs, gpu=easyocr_gpu)
     if eng in ("umi", "umi-ocr", "umiocr"):
         cfg = UmiConfig(
             base_url=umi_base_url or "http://127.0.0.1:1224",
@@ -256,11 +210,10 @@ def read_text(
             options=umi_options or {},
         )
         return _ocr_umi_http(pil, cfg)
-    raise ValueError(f"未知的 OCR 引擎: {engine!r}，可选：umi / tesseract / easyocr")
+    raise ValueError(f"未知的 OCR 引擎: {engine!r}，可选：umi / tesseract")
 
 
 __all__ = [
     "read_text",
     "UmiConfig",
 ]
-

@@ -13,10 +13,9 @@ Run:
 
 Options (see -h):
   --repeats N         number of runs per case (default: 3)
-  --engines ...       comma list: tesseract,easyocr,umi (default: all)
+  --engines ...       comma list: tesseract,umi (default: all)
   --umi-url URL       Umi-OCR HTTP base URL (default: http://127.0.0.1:1224)
   --umi-timeout SEC   Umi-OCR HTTP timeout seconds (default: 2.5)
-  --easyocr-langs ... comma list, e.g. en,ch_sim (default: en)
   --print-full        print full text (default: truncate)
 """
 
@@ -53,8 +52,8 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--engines",
-        default="tesseract,easyocr,umi",
-        help="Comma list of engines to test: tesseract,easyocr,umi (default: all)",
+        default="tesseract,umi",
+        help="Comma list of engines to test: tesseract,umi (default: all)",
     )
     p.add_argument(
         "--images",
@@ -69,9 +68,6 @@ def parse_args() -> argparse.Namespace:
         "--umi-timeout", type=float, default=2.5, help="Umi-OCR HTTP timeout seconds (default: 2.5)",
     )
     p.add_argument(
-        "--easyocr-langs", default="en", help="EasyOCR languages, comma list (default: en)",
-    )
-    p.add_argument(
         "--print-full", action="store_true", help="Print full OCR text instead of truncating",
     )
     return p.parse_args()
@@ -79,7 +75,7 @@ def parse_args() -> argparse.Namespace:
 
 def engine_list(s: str) -> List[str]:
     items = [x.strip().lower() for x in s.split(",") if x.strip()]
-    valid = {"tesseract", "easyocr", "umi"}
+    valid = {"tesseract", "umi"}
     return [x for x in items if x in valid]
 
 
@@ -98,7 +94,7 @@ def ensure_exists(paths: Iterable[Path]) -> List[Path]:
     return out
 
 
-def warm_up(engine: str, *, umi_url: str, umi_timeout: float, easyocr_langs: List[str]) -> None:
+def warm_up(engine: str, *, umi_url: str, umi_timeout: float) -> None:
     """A tiny warm-up call per engine to initialize models/binaries."""
     from PIL import Image
 
@@ -106,8 +102,6 @@ def warm_up(engine: str, *, umi_url: str, umi_timeout: float, easyocr_langs: Lis
     try:
         if engine == "tesseract":
             _ = read_text(tiny, engine="tesseract", grayscale=False, tess_config="--oem 3 --psm 6")
-        elif engine == "easyocr":
-            _ = read_text(tiny, engine="easyocr", grayscale=False, easyocr_langs=easyocr_langs)
         elif engine == "umi":
             _ = read_text(tiny, engine="umi", grayscale=False, umi_base_url=umi_url, umi_timeout=umi_timeout)
     except Exception:
@@ -122,7 +116,6 @@ def run_case(
     *,
     umi_url: str,
     umi_timeout: float,
-    easyocr_langs: List[str],
 ) -> Tuple[float, str, str | None]:
     """Returns (elapsed_sec, text, error)."""
     t0 = time.perf_counter()
@@ -133,13 +126,6 @@ def run_case(
                 engine="tesseract",
                 grayscale=grayscale,
                 tess_config="--oem 3 --psm 6",
-            )
-        elif engine == "easyocr":
-            text = read_text(
-                str(img_path),
-                engine="easyocr",
-                grayscale=grayscale,
-                easyocr_langs=easyocr_langs,
             )
         elif engine == "umi":
             text = read_text(
@@ -163,14 +149,12 @@ def main() -> None:
     args = parse_args()
     engines = engine_list(args.engines)
     if not engines:
-        print("No valid engines selected; choose from: tesseract,easyocr,umi")
+        print("No valid engines selected; choose from: tesseract,umi")
         return
     imgs = ensure_exists(Path(p) for p in args.images)
     if not imgs:
         print("No images to test.")
         return
-
-    easy_langs = [x.strip() for x in args.easyocr_langs.split(",") if x.strip()]
 
     print("Engines:", ", ".join(engines))
     print("Repeats per case:", args.repeats)
@@ -178,7 +162,7 @@ def main() -> None:
 
     # Warm up each engine once to reduce one-time overhead
     for eng in engines:
-        warm_up(eng, umi_url=args.umi_url, umi_timeout=args.umi_timeout, easyocr_langs=easy_langs)
+        warm_up(eng, umi_url=args.umi_url, umi_timeout=args.umi_timeout)
 
     for img in imgs:
         print(f"Image: {img}")
@@ -195,7 +179,6 @@ def main() -> None:
                         gray,
                         umi_url=args.umi_url,
                         umi_timeout=args.umi_timeout,
-                        easyocr_langs=easy_langs,
                     )
                     times.append(dt)
                     last_text = text

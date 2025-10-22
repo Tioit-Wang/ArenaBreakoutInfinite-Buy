@@ -398,10 +398,10 @@ def read_lowest_price_from_roi(
     """
     pil = pyautogui.screenshot(region=region)
     eng = (engine or "").lower().strip() if engine else ""
-    # OcrLite path removed
-    elif eng in ("umi", "umi-ocr", "umiocr"):
+    # Prefer Umi-OCR when requested
+    if eng in ("umi", "umi-ocr", "umiocr"):
         try:
-            umi_cfg = ( _load_app_config(config_path).get("umi_ocr", {}) or {} )
+            umi_cfg = (_load_app_config("config.json").get("umi_ocr", {}) or {})
         except Exception:
             umi_cfg = {}
         try:
@@ -562,7 +562,7 @@ def read_lowest_price_from_config(*, config_path: str = "config.json", debug: bo
         return None
     save = os.path.join("images", "_debug_price_proc.png") if debug else None
     avg = (cfg.get("avg_price_area", {}) or {})
-    eng = str(avg.get("ocr_engine", "tesseract") or "tesseract").lower()
+    eng = str(avg.get("ocr_engine", "umi") or "umi").lower()
     return read_lowest_price_from_roi(region, debug_save=save, engine=eng)
 
 
@@ -625,7 +625,7 @@ def read_currency_prices_from_config(
     if cur_eng:
         eng = cur_eng
     else:
-        eng = str(((cfg.get("avg_price_area", {}) or {}).get("ocr_engine", "tesseract") or "tesseract")).lower()
+        eng = str(((cfg.get("avg_price_area", {}) or {}).get("ocr_engine", "umi") or "umi")).lower()
     try:
         sc = float(cur.get("scale", 1.0))
     except Exception:
@@ -684,9 +684,8 @@ def read_currency_prices_from_config(
         rois.append(("avg" if idx == 0 else "total", (x1, y1, max(1, x2 - x1), max(1, y2 - y1))))
 
     def _ocr_one(region: Tuple[int, int, int, int]) -> Optional[int]:
-        # OcrLite path
-        # OcrLite path removed
-        elif eng in ("umi", "umi-ocr", "umiocr"):
+        # Prefer Umi-OCR if selected; otherwise fall back to Tesseract
+        if eng in ("umi", "umi-ocr", "umiocr"):
             try:
                 img = pyautogui.screenshot(region=region)
             except Exception:
