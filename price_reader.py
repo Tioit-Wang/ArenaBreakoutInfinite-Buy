@@ -298,9 +298,29 @@ def _run_umi_ocr_on_pil(pil_img, cfg: Optional[Dict[str, Any]] = None) -> List[s
     payload = {"base64": data_b64}
     if options:
         payload["options"] = options
+    # Log basic request info for troubleshooting (stdout)
+    try:
+        import time as _time  # type: ignore
+        _t0 = _time.perf_counter()
+        _sz = len(payload.get("base64", ""))
+        print(f"[UmiOCR] POST {url} timeout={timeout}s payload_b64_len={_sz} opts={list(options.keys())}")
+    except Exception:
+        _t0 = None
     resp = requests.post(url, json=payload, timeout=timeout)
-    resp.raise_for_status()
+    try:
+        resp.raise_for_status()
+    except Exception as e:
+        print(f"[UmiOCR] HTTP error: {e}")
+        raise
     j = resp.json()
+    try:
+        _elapsed = ((_time.perf_counter() - _t0) * 1000.0) if _t0 is not None else -1.0
+        _n = 0
+        if isinstance(j.get("data"), list):
+            _n = len(j.get("data"))
+        print(f"[UmiOCR] code={j.get('code')} elapsed_ms={int(_elapsed)} items={_n}")
+    except Exception:
+        pass
     code = int(j.get("code", 0) or 0)
     data = j.get("data")
     texts: List[str] = []
@@ -317,11 +337,30 @@ def _run_umi_ocr_on_pil(pil_img, cfg: Optional[Dict[str, Any]] = None) -> List[s
 
 
 def _parse_price_from_texts(texts: List[str]) -> Optional[int]:
-    """Parse integer price supporting K/M suffix from a list of strings."""
+    """Parse integer price supporting K/M suffix from a list of strings.
+
+    Safety: Ignore known error/diagnostic strings (e.g. exceptions) to avoid
+    mistakenly parsing numbers from messages like "line 358".
+    """
     best: Optional[int] = None
     for raw in texts or []:
         try:
-            t = (raw or "").strip().upper()
+            t_raw = (raw or "").strip()
+            # Skip obvious error or diagnostic messages
+            tl = t_raw.lower()
+            if any(s in tl for s in (
+                "ocr失败",  # our own failure tag
+                "invalid syntax",
+                "traceback",
+                "exception",
+                "error:",
+                " file ",
+                ".py",
+                " line ",
+            )):
+                continue
+
+            t = t_raw.upper()
             # tokenize by spaces/commas
             for token in t.replace(",", " ").split():
                 mult = 1
@@ -331,7 +370,12 @@ def _parse_price_from_texts(texts: List[str]) -> Optional[int]:
                 elif token.endswith("K"):
                     mult = 1_000
                     token = token[:-1]
-                digits = "".join(ch for ch in token if ch.isdigit())
+                # Only accept tokens that are purely numeric after stripping
+                # common punctuation; reject if they still contain letters
+                token_stripped = token.strip("()[]{}<>:;.")
+                if not token_stripped or any(ch.isalpha() for ch in token_stripped):
+                    continue
+                digits = "".join(ch for ch in token_stripped if ch.isdigit())
                 if digits:
                     v = int(digits) * mult
                     best = v if best is None or v < best else best
@@ -586,6 +630,10 @@ def read_currency_prices_from_config(
         sc = float(cur.get("scale", 1.0))
     except Exception:
         sc = 1.0
+    try:
+        print(f"[CurrencyOCR] engine={eng} scale={sc}")
+    except Exception:
+        pass
     # OcrLite config removed
     try:
         import pyautogui  # type: ignore

@@ -371,7 +371,7 @@ class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("基于图像识别的自动购买助手")
-        self.geometry("980x680")
+        self.geometry("1120x740")
         # Autosave scheduler
         self._autosave_after_id: str | None = None
         self._autosave_delay_ms: int = 300
@@ -462,6 +462,33 @@ class App(tk.Tk):
 
         # Timer for reflecting run state in UI
         self._run_state_after_id: str | None = None
+
+    # ---------- Window placement helper ----------
+    def _place_modal(self, top: tk.Toplevel, width: int, height: int) -> None:
+        """Place modal near the center of the current window within screen bounds."""
+        try:
+            sw, sh = int(self.winfo_screenwidth()), int(self.winfo_screenheight())
+        except Exception:
+            sw, sh = 1920, 1080
+        try:
+            px, py = int(self.winfo_rootx()), int(self.winfo_rooty())
+            pw, ph = int(self.winfo_width() or 0), int(self.winfo_height() or 0)
+        except Exception:
+            px, py, pw, ph = 100, 100, 980, 680
+        if pw <= 0 or ph <= 0:
+            pw, ph = 980, 680
+        x = px + max(0, (pw - int(width)) // 2)
+        y = py + max(0, (ph - int(height)) // 2)
+        # Clamp inside screen
+        x = max(0, min(x, sw - int(width)))
+        y = max(0, min(y, sh - int(height)))
+        try:
+            top.geometry(f"{int(width)}x{int(height)}+{int(x)}+{int(y)}")
+        except Exception:
+            try:
+                top.geometry(f"{int(width)}x{int(height)}")
+            except Exception:
+                pass
 
     # ---------- Tasks data I/O ----------
     def _load_tasks_data(self, path: str) -> Dict[str, Any]:
@@ -651,8 +678,11 @@ class App(tk.Tk):
         def _apply_filter(_e=None):
             q = (var_q.get() or "").strip().lower()
             b = var_big.get(); s = var_sub.get()
+            # Clear existing rows before rebuilding the list
             for iid in tree.get_children():
                 tree.delete(iid)
+            # Guard against duplicate iids within the current dataset
+            seen_iids: set[str] = set()
             for g in goods:
                 name = str(g.get("name", ""))
                 big = str(g.get("big_category", ""))
@@ -663,7 +693,12 @@ class App(tk.Tk):
                     continue
                 if q and (q not in name.lower() and q not in str(g.get("search_name", "")).lower()):
                     continue
-                tree.insert("", tk.END, iid=str(g.get("id", name)), values=(name, big, sub))
+                iid = str(g.get("id", name))
+                if iid in seen_iids or tree.exists(iid):
+                    # Skip duplicates to avoid TclError: Item ... already exists
+                    continue
+                seen_iids.add(iid)
+                tree.insert("", tk.END, iid=iid, values=(name, big, sub))
         ent.bind("<KeyRelease>", _apply_filter)
         cmb_big.bind("<<ComboboxSelected>>", _apply_filter)
         cmb_sub.bind("<<ComboboxSelected>>", _apply_filter)
@@ -704,49 +739,48 @@ class App(tk.Tk):
         self._step_panel = panel
         inner = ttk.Frame(panel)
         inner.pack(fill=tk.X, padx=8, pady=6)
-        self._step_rows: list[tuple[tk.StringVar, tk.DoubleVar]] = []
 
-        def _render():
-            for w in inner.winfo_children():
-                w.destroy()
-            self._step_rows.clear()
-            delays = dict(self.tasks_data.get("step_delays", {}) or {})
-            if not delays:
-                delays = {"default": 0.01}
-            ttk.Label(inner, text="步骤标识", width=24).grid(row=0, column=0, sticky="w")
-            ttk.Label(inner, text="延时(秒)", width=12).grid(row=0, column=1, sticky="w")
-            r = 1
-            for k, v in delays.items():
-                vk = tk.StringVar(value=str(k))
-                vv = tk.DoubleVar(value=float(v))
-                ttk.Entry(inner, textvariable=vk, width=24).grid(row=r, column=0, sticky="w", padx=(0,8), pady=2)
-                ttk.Entry(inner, textvariable=vv, width=12).grid(row=r, column=1, sticky="w", pady=2)
-                self._step_rows.append((vk, vv))
-                r += 1
-        _render()
+        # Use a single global delay value, default 0.01s; save in real time
+        delays = dict(self.tasks_data.get("step_delays", {}) or {})
+        if not delays or not isinstance(delays, dict):
+            delays = {"default": 0.01}
+        cur_val = 0.01
+        try:
+            cur_val = float(delays.get("default", 0.01) or 0.01)
+        except Exception:
+            cur_val = 0.01
 
-        btns = ttk.Frame(panel)
-        btns.pack(fill=tk.X, padx=8, pady=(0,6))
-        def _add_row():
-            self._step_rows.append((tk.StringVar(value=""), tk.DoubleVar(value=0.01)))
-            _render()
-        def _save_rows():
-            m: Dict[str, float] = {}
-            for vk, vv in self._step_rows:
-                k = (vk.get() or "").strip()
-                try:
-                    val = float(vv.get() or 0.01)
-                except Exception:
-                    val = 0.01
-                if not k:
-                    continue
-                m[k] = val
-            if not m:
-                m = {"default": 0.01}
-            self.tasks_data["step_delays"] = m
+        ttk.Label(inner, text="延时(秒)", width=12).grid(row=0, column=0, sticky="w")
+        var_delay = tk.DoubleVar(value=cur_val)
+        sp = ttk.Spinbox(inner, from_=0.0, to=1.0, increment=0.001, width=10, textvariable=var_delay)
+        sp.grid(row=0, column=1, sticky="w")
+
+        def _apply_delay_from_widget() -> None:
+            try:
+                val = float(var_delay.get())
+            except Exception:
+                return
+            # Clamp to a reasonable range [0.0, 1.0]
+            try:
+                if val < 0.0:
+                    val = 0.0
+                if val > 1.0:
+                    val = 1.0
+            except Exception:
+                pass
+            self.tasks_data.setdefault("step_delays", {})["default"] = float(val)
             self._save_tasks_data()
-        ttk.Button(btns, text="新增一行", command=_add_row).pack(side=tk.LEFT)
-        ttk.Button(btns, text="保存延时", command=_save_rows).pack(side=tk.RIGHT)
+
+        # Real-time save: on value change, focus out, and Enter
+        try:
+            var_delay.trace_add("write", lambda *_: _apply_delay_from_widget())
+        except Exception:
+            pass
+        try:
+            sp.bind("<FocusOut>", lambda _e=None: _apply_delay_from_widget())
+            sp.bind("<Return>", lambda _e=None: _apply_delay_from_widget())
+        except Exception:
+            pass
 
     # Small tooltip helper
     def _attach_tooltip(self, widget, text: str) -> None:
@@ -851,11 +885,19 @@ class App(tk.Tk):
         var_h1 = tk.IntVar(value=h1); var_s1 = tk.IntVar(value=s1)
         var_h2 = tk.IntVar(value=h2); var_s2 = tk.IntVar(value=s2)
 
+        # Row 0: enable checkbox occupies its own line
+        row_enable = ttk.Frame(card)
+        row_enable.pack(fill=tk.X, padx=8, pady=(6, 0))
+        chk = ttk.Checkbutton(row_enable, text="启用", variable=var_enabled)
+        try:
+            chk.pack(side=tk.LEFT)
+        except Exception:
+            pass
+
         # Row 1: semantic sentence with inline inputs (responsive flow layout)
         row = ttk.Frame(card)
-        row.pack(fill=tk.X, padx=8, pady=(6, 2))
+        row.pack(fill=tk.X, padx=8, pady=(2, 2))
         widgets: list[tk.Widget] = []
-        chk = ttk.Checkbutton(row, text="启用", variable=var_enabled); widgets.append(chk)
         widgets.append(ttk.Label(row, text="：购买物品："))
         lbl_name = ttk.Label(row, textvariable=var_item_name, width=18); widgets.append(lbl_name)
         btn_pick = ttk.Button(row, text="选择…", width=8, command=lambda: self._open_goods_picker(lambda g: (var_item_name.set(str(g.get('name',''))), var_item_id.set(str(g.get('id',''))))))
@@ -884,10 +926,7 @@ class App(tk.Tk):
         # Apply responsive flow layout
         self._flow_layout(row, widgets, padx=4, pady=2)
 
-        # Tips line
-        tips = ttk.Frame(card)
-        tips.pack(fill=tk.X, padx=8, pady=(2, 6))
-        ttk.Label(tips, text="说明：步骤延时请到下方‘步骤延时配置’设置").pack(side=tk.LEFT)
+        # Removed tips line about step delay per requirement
 
         # Buttons
         btns = ttk.Frame(card)
@@ -1084,7 +1123,52 @@ class App(tk.Tk):
 
     # ---------- Tab1 ----------
     def _build_tab1(self) -> None:
-        outer = self.tab1
+        # Wrap Tab1 in a scrollable container so content adapts to window height
+        container = ttk.Frame(self.tab1)
+        try:
+            container.pack(fill=tk.BOTH, expand=True)
+        except Exception:
+            container.pack(fill=tk.BOTH)
+
+        self.tab1_canvas = tk.Canvas(container, highlightthickness=0)
+        vsb = ttk.Scrollbar(container, orient="vertical", command=self.tab1_canvas.yview)
+        try:
+            self.tab1_canvas.configure(yscrollcommand=vsb.set)
+        except Exception:
+            pass
+        self.tab1_canvas.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        try:
+            container.rowconfigure(0, weight=1)
+            container.columnconfigure(0, weight=1)
+        except Exception:
+            pass
+
+        # Inner frame acts as original parent for Tab1 widgets
+        self.tab1_inner = ttk.Frame(self.tab1_canvas)
+        self.tab1_window = self.tab1_canvas.create_window((0, 0), window=self.tab1_inner, anchor="nw")
+
+        def _on_inner(_e=None):
+            try:
+                self.tab1_canvas.configure(scrollregion=self.tab1_canvas.bbox("all"))
+            except Exception:
+                pass
+
+        def _on_canvas(_e=None):
+            try:
+                w = self.tab1_canvas.winfo_width()
+                self.tab1_canvas.itemconfigure(self.tab1_window, width=w)
+            except Exception:
+                pass
+
+        try:
+            self.tab1_inner.bind("<Configure>", _on_inner)
+            self.tab1_canvas.bind("<Configure>", _on_canvas)
+        except Exception:
+            pass
+
+        # Use inner frame as the layout root for this tab
+        outer = self.tab1_inner
 
         # Game launcher
         game_cfg = self.cfg.get("game", {}) if isinstance(self.cfg.get("game"), dict) else {}
@@ -1309,6 +1393,13 @@ class App(tk.Tk):
         self.var_roi_top_off = tk.IntVar(value=int(roi_cfg.get("top_offset", 0)))
         self.var_roi_btm_off = tk.IntVar(value=int(roi_cfg.get("bottom_offset", 0)))
         self.var_roi_lr_pad = tk.IntVar(value=int(roi_cfg.get("lr_pad", 0)))
+        # 新增：初始化区域模板/ROI 的 OCR 引擎与放大倍率
+        self.var_roi_engine = tk.StringVar(value=str(roi_cfg.get("ocr_engine", "")))
+        try:
+            _sc_def_roi = float(roi_cfg.get("scale", 1.0))
+        except Exception:
+            _sc_def_roi = 1.0
+        self.var_roi_scale = tk.DoubleVar(value=_sc_def_roi)
 
         # 顶部模板（样式与模板管理一致）
         ttk.Label(box_roi, text="顶部模板", width=12).grid(row=0, column=0, sticky="w", padx=4, pady=2)
@@ -1347,6 +1438,18 @@ class App(tk.Tk):
         ttk.Entry(box_roi, textvariable=self.var_roi_lr_pad, width=8).grid(row=2, column=5, sticky="w")
         ttk.Button(box_roi, text="预览", command=self._roi_preview_from_screen).grid(row=2, column=6, padx=6)
 
+        # 行3：识别引擎 + 放大倍率（供基于 ROI 的读取流程使用）
+        ttk.Label(box_roi, text="识别引擎").grid(row=3, column=0, padx=4, pady=4, sticky="e")
+        self.cmb_roi_engine = ttk.Combobox(box_roi, textvariable=self.var_roi_engine, state="readonly",
+                                           values=["", "tesseract", "easyocr", "umi"], width=12)
+        self.cmb_roi_engine.grid(row=3, column=1, sticky="w")
+        ttk.Label(box_roi, text="放大倍率").grid(row=3, column=2, padx=8, pady=4, sticky="e")
+        try:
+            sp_roi_sc = ttk.Spinbox(box_roi, from_=0.6, to=2.5, increment=0.1, textvariable=self.var_roi_scale, width=6)
+        except Exception:
+            sp_roi_sc = tk.Spinbox(box_roi, from_=0.6, to=2.5, increment=0.1, textvariable=self.var_roi_scale, width=6)
+        sp_roi_sc.grid(row=3, column=3, sticky="w")
+
         # 状态文本更新器
         def _upd_status(var: tk.StringVar, lab: ttk.Label) -> None:
             p = var.get().strip()
@@ -1369,6 +1472,11 @@ class App(tk.Tk):
             pass
         _upd_status(self.var_roi_top_tpl, self.lab_roi_top_status)
         _upd_status(self.var_roi_btm_tpl, self.lab_roi_btm_status)
+        try:
+            self.var_roi_engine.trace_add("write", lambda *_: self._schedule_autosave())
+            self.var_roi_scale.trace_add("write", lambda *_: self._schedule_autosave())
+        except Exception:
+            pass
 
         # 截图到变量（与模板管理一致的交互）
         def _capture_roi_into(var: tk.StringVar, *, slug: str, title: str):
@@ -1623,6 +1731,20 @@ class App(tk.Tk):
         self.cfg["price_roi"]["top_offset"] = int(self.var_roi_top_off.get() or 0)
         self.cfg["price_roi"]["bottom_offset"] = int(self.var_roi_btm_off.get() or 0)
         self.cfg["price_roi"]["lr_pad"] = int(self.var_roi_lr_pad.get() or 0)
+        # 新增：引擎与放大倍率
+        eng = str(self.var_roi_engine.get() or "").strip().lower()
+        if eng not in ("", "tesseract", "easyocr", "umi"):
+            eng = ""
+        self.cfg["price_roi"]["ocr_engine"] = eng
+        try:
+            sc = float(self.var_roi_scale.get() or 1.0)
+        except Exception:
+            sc = 1.0
+        if sc < 0.6:
+            sc = 0.6
+        if sc > 2.5:
+            sc = 2.5
+        self.cfg["price_roi"]["scale"] = float(sc)
 
         # Flush average price area (distance/height)
         try:
@@ -1778,17 +1900,122 @@ class App(tk.Tk):
         if y_bot - y_top < 3:
             y_bot = min(h - 1, y_top + 3)
 
-        # Save outputs and draw debug
+        # Save outputs and OCR preview（与“平均单价区域”一致的处理：放大+二值化+可选引擎）
         os.makedirs("images", exist_ok=True)
-        crop = img_bgr[y_top:y_bot, x_left:x_right]
-        crop_path = os.path.join("images", "price_area_roi.png")
-        _cv2.imwrite(crop_path, crop)
-
-        # Skip debug image generation; only preview the crop
-
-        # 预览：左右并排显示 调试图 与 截取图（固定大小、不可调整）
+        crop_bgr = img_bgr[y_top:y_bot, x_left:x_right]
+        # Scale from price_roi, clamp
         try:
-            self._preview_roi_simple(crop_path)
+            sc = float(self.var_roi_scale.get() or 1.0)
+        except Exception:
+            sc = 1.0
+        if sc < 0.6:
+            sc = 0.6
+        if sc > 2.5:
+            sc = 2.5
+        try:
+            if abs(sc - 1.0) > 1e-3:
+                h0, w0 = crop_bgr.shape[:2]
+                crop_bgr = _cv2.resize(crop_bgr, (max(1, int(w0 * sc)), max(1, int(h0 * sc))), interpolation=_cv2.INTER_CUBIC)
+        except Exception:
+            pass
+        # Binarize (Otsu)
+        try:
+            grayc = _cv2.cvtColor(crop_bgr, _cv2.COLOR_BGR2GRAY)
+            _thr, thb = _cv2.threshold(grayc, 0, 255, _cv2.THRESH_BINARY + _cv2.THRESH_OTSU)
+        except Exception:
+            thb = None
+        # Save preview crop (binary if available)
+        crop_path = os.path.join("images", "_price_roi.png")
+        try:
+            if thb is not None:
+                _cv2.imwrite(crop_path, thb)
+            else:
+                _cv2.imwrite(crop_path, crop_bgr)
+        except Exception:
+            pass
+
+        # OCR using configured engine (price_roi.ocr_engine fallback -> avg_price_area.ocr_engine)
+        raw_text = ""
+        cleaned = ""
+        parsed_val = None
+        elapsed_ms = -1.0
+        # Decide OCR engine (price_roi override -> avg engine)
+        try:
+            _cur = str(self.var_roi_engine.get() or "").strip().lower()
+        except Exception:
+            _cur = ""
+        try:
+            eng = _cur if _cur else str(self.var_avg_engine.get() or "tesseract").lower()
+        except Exception:
+            eng = "tesseract"
+        try:
+            import time as _time
+            from PIL import Image as _Image  # type: ignore
+            import numpy as _np  # type: ignore
+            import pytesseract  # type: ignore
+            from price_reader import _maybe_init_tesseract  # type: ignore
+            _maybe_init_tesseract()
+            # Compose PIL image from bin/crop
+            img = None
+            if thb is not None:
+                try:
+                    img = _Image.fromarray(thb)
+                except Exception:
+                    img = None
+            if img is None:
+                try:
+                    arr = _np.array(crop_bgr)
+                    img = _Image.fromarray(arr[:, :, ::-1])
+                except Exception:
+                    img = None
+
+            t0 = _time.perf_counter()
+            if eng == "easyocr":
+                try:
+                    import easyocr  # type: ignore
+                    if getattr(self, "_easyocr_reader", None) is None:
+                        self._easyocr_reader = easyocr.Reader(['en'], gpu=False)
+                    arr = _np.array(img) if img is not None else crop_bgr[:, :, ::-1]
+                    texts = self._easyocr_reader.readtext(arr, detail=0)
+                    raw_text = "\n".join(map(str, texts))
+                except Exception as _e:
+                    raw_text = f"[easyocr失败] {_e}"
+            elif eng in ("umi", "umi-ocr", "umiocr"):
+                try:
+                    o_texts, o_ms = self._run_umi_ocr(pil_image=img)
+                    raw_text = "\n".join(map(str, o_texts or []))
+                    elapsed_ms = float(o_ms)
+                except Exception as _e:
+                    raw_text = f"[umi失败] {_e}"
+            if (not raw_text or raw_text.startswith("[easyocr失败]")):
+                allow = str(self.cfg.get("avg_price_area", {}).get("ocr_allowlist", "0123456789KM"))
+                need = "KMkm"
+                allow_ex = allow + "".join(ch for ch in need if ch not in allow)
+                cfg = f"--oem 3 --psm 6 -c tessedit_char_whitelist={allow_ex}"
+                raw_text = pytesseract.image_to_string(img, config=cfg) if img is not None else ""
+            if elapsed_ms < 0:
+                elapsed_ms = (_time.perf_counter() - t0) * 1000.0
+            up = (raw_text or "").upper()
+            cleaned = "".join(ch for ch in up if ch in "0123456789KM")
+            t = cleaned.strip().upper()
+            mult = 1
+            if t.endswith("M"):
+                mult = 1_000_000
+                t = t[:-1]
+            elif t.endswith("K"):
+                mult = 1_000
+                t = t[:-1]
+            digits = "".join(ch for ch in t if ch.isdigit())
+            if digits:
+                parsed_val = int(digits) * mult
+        except Exception as e:
+            raw_text = f"[OCR失败] {e}"
+            cleaned = ""
+            parsed_val = None
+
+        try:
+            self._preview_avg_price_window(crop_path, raw_text, cleaned, parsed_val, elapsed_ms,
+                                           engine=eng, title="价格区域（模板ROI）")
         except Exception as e:
             messagebox.showerror("预览", f"显示失败: {e}")
 
@@ -1879,6 +2106,12 @@ class App(tk.Tk):
                 sc = 0.6
             if sc > 2.5:
                 sc = 2.5
+            try:
+                cur_eng = str(self.var_cur_engine.get() or "").strip().lower()
+                eng_used = cur_eng if cur_eng else str(self.var_avg_engine.get() or "tesseract").lower()
+                self._append_log(f"[货币ROI预览] 匹配到 {len(crops)} 个区域 引擎={eng_used} 放大={sc:.2f}")
+            except Exception:
+                pass
             for tag, crop in crops:
                 try:
                     # Apply scale before threshold
@@ -1933,6 +2166,13 @@ class App(tk.Tk):
                     img = _Image2.fromarray(arr[:, :, ::-1])
                 except Exception:
                     img = None
+            # Log engine and image shape for troubleshooting
+            try:
+                h0, w0 = (bin_img.shape[:2] if bin_img is not None else (fallback_img.shape[:2] if fallback_img is not None else (0, 0)))
+                self._append_log(f"[货币ROI预览] 引擎={eng} 输入={w0}x{h0}")
+            except Exception:
+                pass
+
             if eng == "easyocr":
                 try:
                     import easyocr  # type: ignore
@@ -1943,9 +2183,18 @@ class App(tk.Tk):
                     raw_text = "\n".join(map(str, texts))
                 except Exception as _e:
                     raw_text = f"[easyocr失败] {_e}"
-            
+
             elif eng in ("umi", "umi-ocr", "umiocr"):
                 try:
+                    # Log Umi-OCR config
+                    try:
+                        ocfg = dict(self.cfg.get("umi_ocr", {}) or {})
+                        base_url = str(ocfg.get("base_url", "http://127.0.0.1:1224")).rstrip("/")
+                        timeout = float(ocfg.get("timeout_sec", 2.5) or 2.5)
+                        opt_keys = ",".join(sorted(map(str, (ocfg.get("options", {}) or {}).keys())))
+                        self._append_log(f"[货币ROI预览] Umi-OCR base_url={base_url} timeout={timeout}s opts={opt_keys or '-'}")
+                    except Exception:
+                        pass
                     texts, o_ms = self._run_umi_ocr(pil_image=img)
                     raw_text = "\n".join(map(str, texts or []))
                     elapsed_ms = float(o_ms)
@@ -1958,6 +2207,10 @@ class App(tk.Tk):
                 cfg = f"--oem 3 --psm 6 -c tessedit_char_whitelist={allow_ex}"
                 raw_text = pytesseract.image_to_string(img, config=cfg) if img is not None else ""
             elapsed_ms = (_time.perf_counter() - t0) * 1000.0
+            try:
+                self._append_log(f"[货币ROI预览] 耗时={int(elapsed_ms)}ms 结果={(raw_text or '').strip()[:64]}")
+            except Exception:
+                pass
             up = (raw_text or "").upper()
             cleaned = "".join(ch for ch in up if ch in "0123456789KM")
             t = cleaned.strip().upper()
@@ -1996,12 +2249,20 @@ class App(tk.Tk):
             top.resizable(False, False)
         except Exception:
             pass
+        # Layout constants for sizing
+        margin, gap = 10, 10
+        img_w, img_h = 460, 160
+        right_w = 420
+        rows = 2  # avg + total
+        total_w = margin + img_w + gap + right_w + margin
+        total_h = margin + rows * (img_h + 60) + margin  # 60 for label + paddings per row
+
         frm = ttk.Frame(top)
         frm.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         def _render_row(parent, title, bgr_img, raw, cleaned, parsed, ms):
             row = ttk.LabelFrame(parent, text=title)
             row.pack(fill=tk.X, pady=6)
-            cv = tk.Canvas(row, width=460, height=160, highlightthickness=1, highlightbackground="#888")
+            cv = tk.Canvas(row, width=img_w, height=img_h, highlightthickness=1, highlightbackground="#888")
             cv.pack(side=tk.LEFT, padx=6, pady=6)
             rgt = ttk.Frame(row)
             rgt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=6, pady=6)
@@ -2011,11 +2272,11 @@ class App(tk.Tk):
                 rgb = bgr_img[:, :, ::-1]
                 img = Image.fromarray(rgb)
                 w0, h0 = img.size
-                sc = min(460 / max(1.0, w0), 160 / max(1.0, h0))
+                sc = min(img_w / max(1.0, w0), img_h / max(1.0, h0))
                 nw, nh = max(1, int(w0 * sc)), max(1, int(h0 * sc))
                 tkimg = ImageTk.PhotoImage(img.resize((nw, nh), Image.LANCZOS))
-                x = (460 - tkimg.width()) // 2
-                y = (160 - tkimg.height()) // 2
+                x = (img_w - tkimg.width()) // 2
+                y = (img_h - tkimg.height()) // 2
                 cv.create_image(x, y, image=tkimg, anchor=tk.NW)
                 cv.image = tkimg
             except Exception:
@@ -2028,6 +2289,11 @@ class App(tk.Tk):
         if "total" in crop_map:
             raw, cleaned, parsed, ms = res_map.get("total", ("", "", None, -1.0))
             _render_row(frm, "合计价格", crop_map.get("total"), raw, cleaned, parsed, ms)
+        # Place window relative to main window
+        try:
+            self._place_modal(top, total_w, total_h)
+        except Exception:
+            pass
 
     # ---------- Game launch test ----------
     def _test_game_launch(self) -> None:
@@ -2366,6 +2632,11 @@ class App(tk.Tk):
             except Exception as e:
                 ttk.Label(frm, text=f"无法加载图片: {e}").pack(padx=10, pady=10)
         ttk.Button(frm, text="关闭", command=top.destroy).pack(pady=(0, 10))
+        # Place window at a suitable position (near center of main window)
+        try:
+            self._place_modal(top, 940, 640)
+        except Exception:
+            pass
 
     def _preview_roi_simple(self, crop_path: str) -> None:
         # Simplified preview: left (crop image), right (OCR text + timing)
@@ -2410,7 +2681,6 @@ class App(tk.Tk):
         total_w = margin + img_w + gap + pane_w + margin
         total_h = margin + img_h + 70 + margin
         try:
-            top.geometry(f"{total_w}x{total_h}")
             top.resizable(False, False)
         except Exception:
             pass
@@ -2489,6 +2759,11 @@ class App(tk.Tk):
         footer = ttk.Frame(frm)
         footer.pack(fill=tk.X, padx=margin, pady=(8, margin))
         ttk.Button(footer, text="关闭", command=top.destroy).pack(side=tk.RIGHT)
+        # Place window relative to main window
+        try:
+            self._place_modal(top, total_w, total_h)
+        except Exception:
+            pass
     # PaddleOCR path removed
 
     # PaddleOCR ensure removed
@@ -2792,7 +3067,7 @@ class App(tk.Tk):
         except Exception as e:
             messagebox.showerror("预览", f"显示失败: {e}")
 
-    def _preview_avg_price_window(self, crop_path: str, raw_text: str, cleaned: str, parsed_val, elapsed_ms: float, *, engine: str = "tesseract") -> None:
+    def _preview_avg_price_window(self, crop_path: str, raw_text: str, cleaned: str, parsed_val, elapsed_ms: float, *, engine: str = "tesseract", title: str | None = None) -> None:
         if not os.path.exists(crop_path):
             messagebox.showwarning("预览", "ROI 截图不存在。")
             return
@@ -2800,7 +3075,8 @@ class App(tk.Tk):
         try:
             eng_map = {"tesseract": "PyTesseract", "easyocr": "EasyOCR", "umi": "Umi-OCR"}
             eng_name = eng_map.get(engine.lower(), engine)
-            top.title(f"预览 - 平均单价区域（截图 + {eng_name}）")
+            ttl_base = title if isinstance(title, str) and title else "平均单价区域"
+            top.title(f"预览 - {ttl_base}（截图 + {eng_name}）")
         except Exception:
             pass
         top.transient(self)
@@ -5365,17 +5641,17 @@ class GoodsMarketUI(ttk.Frame):
                 "手枪",
             ],
             "弹药": [
-                "5.45x39毫米子弹",
-                "5.56x45毫米子弹",
-                "5.7x28毫米子弹",
-                "5.8x42毫米子弹",
-                "7.62x25毫米子弹",
-                "7.62x39毫米子弹",
-                "7.62x51毫米子弹",
-                "7.62x54毫米子弹",
-                "9x19毫米子弹",
-                "9x39毫米子弹",
-                "12x70毫米子弹",
+                "5.45×39毫米子弹",
+                "5.56×45毫米子弹",
+                "5.7×28毫米子弹",
+                "5.8×42毫米子弹",
+                "7.62×25毫米子弹",
+                "7.62×39毫米子弹",
+                "7.62×51毫米子弹",
+                "7.62×54毫米子弹",
+                "9×19毫米子弹",
+                "9×39毫米子弹",
+                "12×70毫米子弹",
                 ".44口径子弹",
                 ".45口径子弹",
                 ".338口径子弹",
@@ -5403,9 +5679,17 @@ class GoodsMarketUI(ttk.Frame):
 
         # 浏览视图相关状态
         self._thumb_cache: dict[str, tk.PhotoImage] = {}
+        # 共享路径级缓存：默认占位图等可被多物品复用，减少重复解码
+        self._img_cache_by_path: dict[str, tk.PhotoImage] = {}
         self._current_big_cat: str | None = None
         self._current_sub_cat: str | None = None
         self._card_width = 220  # 单卡近似宽度（含边距）
+
+        # 画廊刷新与分批构建的调度控制，降低频繁重建导致的卡顿
+        self._gallery_refresh_after: str | None = None
+        self._gallery_build_after: str | None = None
+        self._gallery_build_token: int = 0
+        self._last_cols: int = 0
 
         self._load_goods()
         self._build_views()
@@ -5522,8 +5806,8 @@ class GoodsMarketUI(ttk.Frame):
         self.var_browse_q = tk.StringVar(value="")
         ent = ttk.Entry(srow, textvariable=self.var_browse_q, width=22)
         ent.pack(side=tk.LEFT, padx=6)
-        ent.bind("<Return>", lambda _e: self._refresh_gallery())
-        ttk.Button(srow, text="查询", command=self._refresh_gallery).pack(side=tk.LEFT)
+        ent.bind("<Return>", lambda _e: self._schedule_refresh_gallery(0))
+        ttk.Button(srow, text="查询", command=lambda: self._schedule_refresh_gallery(0)).pack(side=tk.LEFT)
 
         # 类目树
         self.cat_tree = ttk.Treeview(left, show="tree", height=24)
@@ -5556,7 +5840,7 @@ class GoodsMarketUI(ttk.Frame):
                                      values=["默认", "按名称"] ,
                                      textvariable=self.var_sort)
         self.cmb_sort.pack(side=tk.RIGHT, padx=(0, 6))
-        self.cmb_sort.bind("<<ComboboxSelected>>", lambda _e: self._refresh_gallery())
+        self.cmb_sort.bind("<<ComboboxSelected>>", lambda _e: self._schedule_refresh_gallery(50))
 
         # Canvas + Scrollbar 包裹网格卡片
         wrapper = ttk.Frame(right)
@@ -5584,13 +5868,20 @@ class GoodsMarketUI(ttk.Frame):
                 self.gallery_canvas.itemconfigure(self.gallery_window, width=w)
             except Exception:
                 pass
-            self._refresh_gallery()
+            # 仅当列数发生变化时刷新，避免频繁重建
+            try:
+                cols_now = max(1, int(max(1, w) // self._card_width))
+            except Exception:
+                cols_now = 1
+            if cols_now != self._last_cols:
+                self._last_cols = cols_now
+                self._schedule_refresh_gallery(50)
 
         self.gallery_inner.bind("<Configure>", _on_inner_config)
         self.gallery_canvas.bind("<Configure>", _on_canvas_config)
 
         # 初次渲染
-        self.after(50, self._refresh_gallery)
+        self.after(50, lambda: self._schedule_refresh_gallery(0))
 
     # ---------- 浏览事件 & 渲染 ----------
     def _on_cat_select(self) -> None:
@@ -5612,7 +5903,7 @@ class GoodsMarketUI(ttk.Frame):
             self._current_big_cat = big
             self._current_sub_cat = None
             self.lbl_cat_title.configure(text=big)
-        self._refresh_gallery()
+        self._schedule_refresh_gallery(0)
 
     def _filtered_goods_for_gallery(self) -> list[dict]:
         q = (self.var_browse_q.get() or "").strip().lower()
@@ -5635,8 +5926,25 @@ class GoodsMarketUI(ttk.Frame):
             res.sort(key=lambda x: str(x.get("name", "")))
         return res
 
+    def _schedule_refresh_gallery(self, delay_ms: int = 0) -> None:
+        """延迟刷新画廊，合并短时间内的多次触发，降低卡顿。"""
+        try:
+            if self._gallery_refresh_after:
+                self.after_cancel(self._gallery_refresh_after)
+        except Exception:
+            pass
+        self._gallery_refresh_after = self.after(max(0, int(delay_ms)), self._refresh_gallery)
+
     def _refresh_gallery(self) -> None:
-        # 清空后重建卡片网格
+        # 取消在途分批构建任务
+        try:
+            if self._gallery_build_after:
+                self.after_cancel(self._gallery_build_after)
+        except Exception:
+            pass
+        self._gallery_build_after = None
+
+        # 清空后分批重建卡片网格，避免主线程长时间阻塞
         for w in self.gallery_inner.winfo_children():
             w.destroy()
 
@@ -5648,11 +5956,7 @@ class GoodsMarketUI(ttk.Frame):
             cw = 800
         col_w = max(1, self._card_width)
         cols = max(1, cw // col_w)
-        # 构建卡片
-        for idx, it in enumerate(items):
-            r, c = divmod(idx, cols)
-            card = self._build_card(self.gallery_inner, it)
-            card.grid(row=r, column=c, padx=6, pady=6, sticky="nsew")
+        self._last_cols = cols
         # 让每列等宽
         for c in range(cols):
             try:
@@ -5660,19 +5964,51 @@ class GoodsMarketUI(ttk.Frame):
             except Exception:
                 pass
 
+        batch = 24
+        total = len(items)
+        token = self._gallery_build_token = (self._gallery_build_token + 1) % 1_000_000
+
+        def _build(i: int) -> None:
+            # 若已启动新一轮刷新，停止旧批次
+            if token != self._gallery_build_token:
+                return
+            end = min(i + batch, total)
+            for idx in range(i, end):
+                it = items[idx]
+                r, c = divmod(idx, cols)
+                card = self._build_card(self.gallery_inner, it)
+                card.grid(row=r, column=c, padx=6, pady=6, sticky="nsew")
+            if end < total:
+                self._gallery_build_after = self.after(0, lambda: _build(end))
+            else:
+                self._gallery_build_after = None
+
+        _build(0)
+
     def _build_card(self, parent, it: dict) -> ttk.Frame:
         frm = ttk.Frame(parent, relief=tk.SOLID, borderwidth=1)
 
         # 头部：操作按钮（编辑/删除）
         head = ttk.Frame(frm)
         head.pack(side=tk.TOP, fill=tk.X)
-        # 右上：编辑/删除
+        # 右上：快速截图（仅默认图时显示）+ 编辑/删除
+        try:
+            img_path = str(it.get("image_path", "")).strip()
+            is_default_img = (not img_path) or (img_path == self._ensure_default_img())
+        except Exception:
+            is_default_img = False
+        if is_default_img:
+            btn_cap = ttk.Button(
+                head,
+                text="📷",
+                width=2,
+                command=lambda it_=dict(it): self._quick_capture_item_image(it_),
+            )
+            btn_cap.pack(side=tk.RIGHT, padx=(2, 2), pady=2)
         btn_edit = ttk.Button(head, text="✎", width=2,
                               command=lambda it_=it: self._open_item_modal(dict(it_)))
         btn_edit.pack(side=tk.RIGHT, padx=(2, 2), pady=2)
-        btn_del = ttk.Button(head, text="🗑", width=2,
-                             command=lambda iid=str(it.get("id", "")): self._delete_item(iid))
-        btn_del.pack(side=tk.RIGHT, padx=(2, 4), pady=2)
+        # 按需保留“删除”仅在管理界面/编辑对话框中提供，浏览卡片不再提供删除按钮
 
         # 图片
         cnv = tk.Canvas(frm, width=180, height=130, bg="#f0f0f0", highlightthickness=0)
@@ -5704,6 +6040,10 @@ class GoodsMarketUI(ttk.Frame):
             return None
         if iid in self._thumb_cache:
             return self._thumb_cache[iid]
+        if path in self._img_cache_by_path:
+            tkimg = self._img_cache_by_path[path]
+            self._thumb_cache[iid] = tkimg
+            return tkimg
         try:
             from PIL import Image, ImageTk  # type: ignore
 
@@ -5713,7 +6053,84 @@ class GoodsMarketUI(ttk.Frame):
         except Exception:
             return None
         self._thumb_cache[iid] = tkimg
+        self._img_cache_by_path[path] = tkimg
         return tkimg
+
+    def _quick_capture_item_image(self, item: dict) -> None:
+        """在卡片上执行快速截图（与编辑对话框中的固定尺寸截图一致）。
+
+        - 使用固定尺寸 135x110 的选择框，鼠标移动跟随，左键确认。
+        - 保存到对应大类目录下并更新该物品的 `image_path`。
+        - 刷新画廊并清理该物品缩略图缓存。
+        """
+        iid = str(item.get("id", ""))
+        if not iid:
+            return
+
+        root = self.winfo_toplevel()
+        result_path: str | None = None
+
+        def _done(bounds):
+            nonlocal result_path
+            if not bounds:
+                return
+            x1, y1, x2, y2 = bounds
+            w, h = max(1, int(x2 - x1)), max(1, int(y2 - y1))
+            try:
+                import pyautogui  # type: ignore
+
+                # 适当裁剪到屏幕范围（避免越界）
+                sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+                x1b = max(0, min(int(x1), max(0, sw - w)))
+                y1b = max(0, min(int(y1), max(0, sh - h)))
+                img = pyautogui.screenshot(region=(x1b, y1b, w, h))
+            except Exception as e:
+                messagebox.showerror("截图", f"截屏失败: {e}")
+                return
+
+            # 保存到对应大类目录
+            big_cat = str(item.get("big_category", "") or "杂物").strip()
+            base_dir = self._category_dir(big_cat)
+            try:
+                os.makedirs(base_dir, exist_ok=True)
+            except Exception:
+                pass
+            fname = f"{uuid.uuid4().hex}.png"
+            path = os.path.join(base_dir, fname)
+            try:
+                img.save(path)
+            except Exception as e:
+                messagebox.showerror("截图", f"保存失败: {e}")
+                return
+            result_path = path
+
+        sel = _FixedSizeSelector(root, 135, 110, _done)
+        try:
+            sel.show()
+        except Exception:
+            pass
+        root.wait_window(sel.top) if getattr(sel, "top", None) else None
+
+        if not result_path:
+            return
+
+        # 更新该物品的图片路径
+        for i, g in enumerate(self.goods):
+            if str(g.get("id", "")) == iid:
+                g = dict(g)
+                g["image_path"] = result_path
+                self.goods[i] = g
+                break
+        else:
+            return
+
+        # 持久化与刷新
+        self._save_goods()
+        try:
+            self._thumb_cache.pop(iid, None)
+        except Exception:
+            pass
+        self._schedule_refresh_gallery(0)
 
     # 收藏功能已移除
 

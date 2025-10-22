@@ -139,21 +139,23 @@
         "bottom_threshold": 0.8,
         "top_offset": 0,
         "bottom_offset": 0,
-        "lr_pad": -15
+        "lr_pad": -15,
+        "ocr_engine": "umi",
+        "scale": 1.5
     },
     "currency_area": {
         "template": "images\\currency.png",
         "threshold": 0.8,
         "price_width": 63,
-        "ocr_engine": "tesseract",
-        "scale": 1.5
+        "ocr_engine": "easyocr",
+        "scale": 1.4
     },
     "avg_price_area": {
         "distance_from_buy_top": 5,
         "height": 45,
         "ocr_allowlist": "0123456789K",
         "ocr_engine": "umi",
-        "scale": 1.0
+        "scale": 1.5
     },
     "ocrlite": {
         "exe_path": "bli\\win-BIN-x64\\OcrLiteOnnx.exe",

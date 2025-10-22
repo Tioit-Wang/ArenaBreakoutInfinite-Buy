@@ -1,0 +1,18 @@
+{
+    "tasks": [
+        {
+            "enabled": true,
+            "item_name": "5.56x45毫米 M995子弹",
+            "price_threshold": 0,
+            "price_premium_pct": 0.0,
+            "restock_price": 0,
+            "target_total": 0,
+            "time_start": "00:00",
+            "time_end": "00:00",
+            "id": "17b97770-6cc6-4817-8328-b3ca2518f26e"
+        }
+    ],
+    "step_delays": {
+        "default": 0.01
+    }
+}
