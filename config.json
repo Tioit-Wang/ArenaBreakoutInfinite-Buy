@@ -85,24 +85,6 @@
             "confidence": 0.85
         }
     },
-    "points": {
-        "first_item": {
-            "x": 482,
-            "y": 295
-        },
-        "quantity_input": {
-            "x": 1237,
-            "y": 625
-        }
-    },
-    "rects": {
-        "price_region": {
-            "x1": 1891,
-            "y1": 666,
-            "x2": 2213,
-            "y2": 723
-        }
-    },
     "purchase": {
         "item_name": "",
         "price_threshold": 0,
@@ -162,13 +144,6 @@
         "lr_pad": -15,
         "ocr_engine": "umi",
         "scale": 1.2
-    },
-    "currency_area": {
-        "template": "images\\currency.png",
-        "threshold": 0.9,
-        "price_width": 63,
-        "ocr_engine": "umi",
-        "scale": 2.1
     },
     "avg_price_area": {
         "distance_from_buy_top": 5,

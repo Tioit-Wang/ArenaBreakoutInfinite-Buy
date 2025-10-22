@@ -14,7 +14,6 @@ try:
     ensure_pyautogui_confidence_compat()
 except Exception:
     pass
-from autobuyer import MultiBuyer
 from task_runner import TaskRunner
 
 
@@ -407,9 +406,7 @@ class App(tk.Tk):
         nb.pack(fill=tk.BOTH, expand=True)
 
         self.tab1 = ttk.Frame(nb)
-        self.tab2 = ttk.Frame(nb)
         nb.add(self.tab1, text="初始化配置")
-        nb.add(self.tab2, text="自动购买")
         # New: 购买任务配置（仅配置，不含启动）
         self.tab_tasks = ttk.Frame(nb)
         nb.add(self.tab_tasks, text="购买任务配置")
@@ -418,7 +415,6 @@ class App(tk.Tk):
         nb.add(self.tab_exec, text="执行日志")
 
         self._build_tab1()
-        self._build_tab2()
         self._build_tab_tasks()
         self._build_tab_exec()
         try:
@@ -428,11 +424,7 @@ class App(tk.Tk):
             self.goods_ui = GoodsMarketUI(self.tab_goods)
         except Exception:
             pass
-        # Reflect initial run state and hotkey hint on the Run button
-        try:
-            self._update_run_controls()
-        except Exception:
-            pass
+        # 旧自动购买运行状态已移除
         # OCR 调参面板已移除
 
         # State
@@ -1591,19 +1583,8 @@ class App(tk.Tk):
         # Bind configured sequence (normalized) and a fallback default
         cfg_seq = self._normalize_tk_hotkey(self._get_toggle_hotkey())
         fall_seq = "<Control-Alt-t>"
-        for seq in [cfg_seq, fall_seq]:
-            if seq in self._bound_toggle_hotkeys:
-                continue
-            try:
-                self.bind_all(seq, lambda _e: self._toggle_run())
-                self._bound_toggle_hotkeys.append(seq)
-            except Exception:
-                pass
-        # Refresh button text to reflect current hotkey
-        try:
-            self._update_run_controls()
-        except Exception:
-            pass
+        # 旧自动购买切换热键已移除，不再绑定全局热键
+        self._bound_toggle_hotkeys = []
 
     # ---------- Autosave ----------
     def _schedule_autosave(self) -> None:
@@ -2166,105 +2147,6 @@ class App(tk.Tk):
             except Exception:
                 pass
 
-        # 货币模板 → 右侧 N 像素作为价格区域（高度与模板相同）
-        box_cur = ttk.LabelFrame(outer, text="货币价格区域（模板→右侧N像素）")
-        box_cur.pack(fill=tk.X, padx=8, pady=8)
-
-        cur_cfg = self.cfg.get("currency_area", {}) if isinstance(self.cfg.get("currency_area"), dict) else {}
-        self.var_cur_tpl = tk.StringVar(value=str(cur_cfg.get("template", os.path.join("images", "currency.png"))))
-        self.var_cur_thr = tk.DoubleVar(value=float(cur_cfg.get("threshold", 0.80)))
-        try:
-            _w_def = int(cur_cfg.get("price_width", 220))
-        except Exception:
-            _w_def = 220
-        self.var_cur_width = tk.IntVar(value=_w_def)
-        # OCR engine (optional override) and scale
-        self.var_cur_engine = tk.StringVar(value=str(cur_cfg.get("ocr_engine", "")))
-        try:
-            _sc_def_cur = float(cur_cfg.get("scale", 1.0))
-        except Exception:
-            _sc_def_cur = 1.0
-        self.var_cur_scale = tk.DoubleVar(value=_sc_def_cur)
-
-        # 行0：模板与置信度 + 操作
-        ttk.Label(box_cur, text="货币模板", width=12).grid(row=0, column=0, sticky="w", padx=4, pady=2)
-        self.lab_cur_status = ttk.Label(box_cur, text="", width=8)
-        self.lab_cur_status.grid(row=0, column=1, sticky="w", padx=4)
-        ttk.Label(box_cur, text="置信度").grid(row=0, column=3, padx=4)
-        try:
-            sp_cur_thr = ttk.Spinbox(box_cur, from_=0.0, to=1.0, increment=0.01, textvariable=self.var_cur_thr, width=6, format="%.2f")
-        except Exception:
-            sp_cur_thr = tk.Spinbox(box_cur, from_=0.0, to=1.0, increment=0.01, textvariable=self.var_cur_thr, width=6)
-        sp_cur_thr.grid(row=0, column=4, sticky="w", padx=4)
-        ttk.Button(box_cur, text="点击测试", command=lambda: test_match("货币模板", self.var_cur_tpl.get().strip(), float(self.var_cur_thr.get() or 0.8))).grid(row=0, column=5, padx=4)
-        ttk.Button(box_cur, text="模板捕获", command=lambda: _capture_roi_into(self.var_cur_tpl, slug="currency", title="货币模板")).grid(row=0, column=6, padx=4)
-        ttk.Button(box_cur, text="模版预览", command=self._currency_roi_preview).grid(row=0, column=7, padx=4)
-
-        # 行1：宽度
-        ttk.Label(box_cur, text="价格区域宽(px)").grid(row=1, column=0, padx=4, pady=4, sticky="e")
-        try:
-            sp_cur_w = ttk.Spinbox(box_cur, from_=20, to=2000, increment=5, textvariable=self.var_cur_width, width=8)
-        except Exception:
-            sp_cur_w = tk.Spinbox(box_cur, from_=20, to=2000, increment=5, textvariable=self.var_cur_width, width=8)
-        sp_cur_w.grid(row=1, column=1, sticky="w")
-
-        # 行1（续）：引擎 + 放大
-        ttk.Label(box_cur, text="识别引擎").grid(row=1, column=2, padx=8, pady=4, sticky="e")
-        self.cmb_cur_engine = ttk.Combobox(box_cur, textvariable=self.var_cur_engine, state="readonly",
-                                           values=["", "tesseract", "umi"], width=12)
-        self.cmb_cur_engine.grid(row=1, column=3, sticky="w")
-        ttk.Label(box_cur, text="放大倍率").grid(row=1, column=4, padx=8, pady=4, sticky="e")
-        try:
-            sp_cur_sc = ttk.Spinbox(box_cur, from_=0.6, to=2.5, increment=0.1, textvariable=self.var_cur_scale, width=6)
-        except Exception:
-            sp_cur_sc = tk.Spinbox(box_cur, from_=0.6, to=2.5, increment=0.1, textvariable=self.var_cur_scale, width=6)
-        sp_cur_sc.grid(row=1, column=5, sticky="w")
-
-        # 状态文本更新与自动保存
-        def _upd_cur_status(*_):
-            p = self.var_cur_tpl.get().strip()
-            if not p:
-                self.lab_cur_status.configure(text="未设置")
-            elif os.path.exists(p):
-                self.lab_cur_status.configure(text="已设置")
-            else:
-                self.lab_cur_status.configure(text="缺失")
-            self._schedule_autosave()
-        try:
-            self.var_cur_tpl.trace_add("write", _upd_cur_status)
-            self.var_cur_thr.trace_add("write", lambda *_: self._schedule_autosave())
-            self.var_cur_width.trace_add("write", lambda *_: self._schedule_autosave())
-            self.var_cur_engine.trace_add("write", lambda *_: self._schedule_autosave())
-            self.var_cur_scale.trace_add("write", lambda *_: self._schedule_autosave())
-        except Exception:
-            pass
-        _upd_cur_status()
-
-        # Points（移除价格区域坐标配置，仅保留单点捕获）
-        box_pos = ttk.LabelFrame(outer, text="坐标与区域配置")
-        box_pos.pack(fill=tk.X, padx=8, pady=8)
-
-        # 第一个商品点（优先 ASCII 键 first_item，兼容旧键）
-        p_first = self.cfg.get("points", {}).get("first_item") or self.cfg.get("points", {}).get("第一个商品", {"x": 0, "y": 0})
-        self.var_first_x = tk.IntVar(value=int(p_first.get("x", 0)))
-        self.var_first_y = tk.IntVar(value=int(p_first.get("y", 0)))
-        ttk.Label(box_pos, text="第一个商品").grid(row=0, column=0, padx=4, pady=4, sticky="e")
-        ttk.Entry(box_pos, textvariable=self.var_first_x, width=8).grid(row=0, column=1)
-        ttk.Entry(box_pos, textvariable=self.var_first_y, width=8).grid(row=0, column=2)
-        ttk.Button(box_pos, text="捕获", command=lambda: self._capture_point(self.var_first_x, self.var_first_y, label="请将鼠标移动到 第一个商品 上…")).grid(row=0, column=3, padx=4)
-
-        # 数量输入框点
-        p_qty = self.cfg.get("points", {}).get("quantity_input") or self.cfg.get("points", {}).get("数量输入框", {"x": 0, "y": 0})
-        self.var_qty_x = tk.IntVar(value=int(p_qty.get("x", 0)))
-        self.var_qty_y = tk.IntVar(value=int(p_qty.get("y", 0)))
-        ttk.Label(box_pos, text="数量输入框").grid(row=1, column=0, padx=4, pady=4, sticky="e")
-        ttk.Entry(box_pos, textvariable=self.var_qty_x, width=8).grid(row=1, column=1)
-        ttk.Entry(box_pos, textvariable=self.var_qty_y, width=8).grid(row=1, column=2)
-        ttk.Button(box_pos, text="捕获", command=lambda: self._capture_point(self.var_qty_x, self.var_qty_y, label="请将鼠标移动到 数量输入框 上…")).grid(row=1, column=3, padx=4)
-
-        for i in range(4):
-            box_pos.columnconfigure(i, weight=1)
-
         # ROI 分组变量
         for v in [
             self.var_roi_top_tpl,
@@ -2280,35 +2162,6 @@ class App(tk.Tk):
             except Exception:
                 pass
 
-        # 单点坐标变量
-        for v in [self.var_first_x, self.var_first_y, self.var_qty_x, self.var_qty_y]:
-            try:
-                v.trace_add("write", lambda *_: self._schedule_autosave())
-            except Exception:
-                pass
-
-    def _capture_point(self, var_x: tk.IntVar, var_y: tk.IntVar, *, label: str) -> None:
-        # Simple countdown prompt
-        top = tk.Toplevel(self)
-        top.title("捕获坐标")
-        ttk.Label(top, text=label).pack(padx=10, pady=8)
-        lb = ttk.Label(top, text="3")
-        lb.pack(pady=6)
-
-        def countdown(n: int):
-            if n <= 0:
-                try:
-                    import pyautogui  # type: ignore
-                    x, y = pyautogui.position()
-                    var_x.set(int(x)); var_y.set(int(y))
-                except Exception as e:
-                    messagebox.showerror("捕获坐标", f"失败: {e}")
-                top.destroy()
-                return
-            lb.config(text=str(n))
-            self.after(1000, lambda: countdown(n - 1))
-
-        countdown(3)
 
     def _save_and_sync(self, *, silent: bool = False) -> None:
         # Flush templates
@@ -2371,32 +2224,7 @@ class App(tk.Tk):
         except Exception:
             pass
 
-        # Flush points (write ASCII keys)
-        self.cfg.setdefault("points", {})
-        self.cfg["points"]["first_item"] = {"x": int(self.var_first_x.get()), "y": int(self.var_first_y.get())}
-        self.cfg["points"]["quantity_input"] = {"x": int(self.var_qty_x.get()), "y": int(self.var_qty_y.get())}
 
-        # Currency area
-        try:
-            self.cfg.setdefault("currency_area", {})
-            self.cfg["currency_area"]["template"] = str(self.var_cur_tpl.get() or "").strip()
-            self.cfg["currency_area"]["threshold"] = float(self.var_cur_thr.get() or 0.8)
-            self.cfg["currency_area"]["price_width"] = int(self.var_cur_width.get() or 220)
-            eng = str(self.var_cur_engine.get() or "").strip().lower()
-            if eng not in ("", "tesseract", "umi"):
-                eng = ""
-            self.cfg["currency_area"]["ocr_engine"] = eng
-            try:
-                sc = float(self.var_cur_scale.get() or 1.0)
-            except Exception:
-                sc = 1.0
-            if sc < 0.6:
-                sc = 0.6
-            if sc > 2.5:
-                sc = 2.5
-            self.cfg["currency_area"]["scale"] = float(sc)
-        except Exception:
-            pass
 
         save_config(self.cfg, "config.json")
         if not silent:
@@ -2613,116 +2441,7 @@ class App(tk.Tk):
         except Exception as e:
             messagebox.showerror("预览", f"显示失败: {e}")
 
-    def _currency_roi_preview(self) -> None:
-        # 单货币模板：在屏幕查找两个位置（上=平均单价，下=合计价格），
-        # 并在每个模板的右侧 N 像素区域内进行 OCR 预览。
-        p = self.var_cur_tpl.get().strip()
-        if not p or not os.path.exists(p):
-            messagebox.showwarning("预览", "货币模板未选择或文件不存在。")
-            return
-        try:
-            import pyautogui  # type: ignore
-            import numpy as _np  # type: ignore
-            import cv2 as _cv2  # type: ignore
-        except Exception as e:
-            messagebox.showerror("预览", f"缺少依赖或导入失败: {e}")
-            return
-        try:
-            img_pil = pyautogui.screenshot()
-        except Exception as e:
-            messagebox.showerror("预览", f"截屏失败: {e}")
-            return
-        try:
-            scr = _np.array(img_pil)[:, :, ::-1].copy()  # BGR
-        except Exception as e:
-            messagebox.showerror("预览", f"图像转换失败: {e}")
-            return
-        tmpl = _cv2.imread(p, _cv2.IMREAD_COLOR)
-        if tmpl is None:
-            messagebox.showwarning("预览", "无法读取货币模板图片。")
-            return
-        try:
-            thr = float(self.var_cur_thr.get() or 0.8)
-        except Exception:
-            thr = 0.8
-        th, tw = tmpl.shape[0], tmpl.shape[1]
-        gray = _cv2.cvtColor(scr, _cv2.COLOR_BGR2GRAY)
-        tgray = _cv2.cvtColor(tmpl, _cv2.COLOR_BGR2GRAY) if tmpl.ndim == 3 else tmpl
-        res = _cv2.matchTemplate(gray, tgray, _cv2.TM_CCOEFF_NORMED)
-        ys, xs = _np.where(res >= thr)
-        cand = [(int(y), int(x), float(res[y, x])) for y, x in zip(ys, xs)]
-        cand.sort(key=lambda a: a[2], reverse=True)
-        picks: list[tuple[int, int, float]] = []
-        for y, x, s in cand:
-            ok = True
-            for py, px, _ in picks:
-                if abs(py - y) < th // 2 and abs(px - x) < tw // 2:
-                    ok = False
-                    break
-            if ok:
-                picks.append((y, x, s))
-            if len(picks) >= 2:
-                break
-        if not picks:
-            messagebox.showwarning("预览", "未找到匹配位置，请降低阈值或重截模板。")
-            return
-        picks.sort(key=lambda a: a[0])  # top->bottom
-        try:
-            pw = int(self.var_cur_width.get() or 220)
-        except Exception:
-            pw = 220
-        h, w = gray.shape[:2]
-        os.makedirs("images", exist_ok=True)
-        crops: list[tuple[str, _np.ndarray]] = []
-        for idx, (y, x, s) in enumerate(picks[:2]):
-            x1 = max(0, x + tw)
-            y1 = max(0, y)
-            x2 = min(w, x1 + max(1, pw))
-            y2 = min(h, y1 + th)
-            crop = scr[y1:y2, x1:x2]
-            tag = "avg" if idx == 0 else "total"
-            path = os.path.join("images", f"_currency_{tag}_roi.png")
-            try:
-                _cv2.imwrite(path, crop)
-            except Exception:
-                pass
-            crops.append((tag, crop))
-
-        # OCR both and show quick combined preview
-        try:
-            res_list = []
-            # Read scale for currency
-            try:
-                sc = float(self.var_cur_scale.get() or 1.0)
-            except Exception:
-                sc = 1.0
-            if sc < 0.6:
-                sc = 0.6
-            if sc > 2.5:
-                sc = 2.5
-            try:
-                cur_eng = str(self.var_cur_engine.get() or "").strip().lower()
-                eng_used = cur_eng if cur_eng else str(self.var_avg_engine.get() or "umi").lower()
-                self._append_log(f"[货币ROI预览] 匹配到 {len(crops)} 个区域 引擎={eng_used} 放大={sc:.2f}")
-            except Exception:
-                pass
-            for tag, crop in crops:
-                try:
-                    # Apply scale before threshold
-                    if abs(sc - 1.0) > 1e-3:
-                        h0, w0 = crop.shape[:2]
-                        crop_s = _cv2.resize(crop, (max(1, int(w0 * sc)), max(1, int(h0 * sc))), interpolation=_cv2.INTER_CUBIC)
-                    else:
-                        crop_s = crop
-                    grayc = _cv2.cvtColor(crop_s, _cv2.COLOR_BGR2GRAY)
-                    _thr, thb = _cv2.threshold(grayc, 0, 255, _cv2.THRESH_BINARY + _cv2.THRESH_OTSU)
-                except Exception:
-                    thb = None
-                raw_text, cleaned, parsed, elapsed = self._ocr_text_parse_km(thb, fallback_img=crop_s)
-                res_list.append((tag, raw_text, cleaned, parsed, elapsed))
-            self._preview_currency_window(crops, res_list)
-        except Exception as e:
-            messagebox.showerror("预览", f"识别失败: {e}")
+    
 
     # ---------- 数量输入区域（基于数量-/数量+ 模板的水平ROI） ----------
     def _qty__locate_boxes(self):
@@ -2937,72 +2656,9 @@ class App(tk.Tk):
             pass
         return raw_text, cleaned, parsed_val, float(elapsed_ms)
 
-    def _preview_currency_window(self, crops, results) -> None:
-        # crops: list[(tag, bgr_img)], results: list[(tag, raw, cleaned, parsed, ms)]
-        try:
-            from PIL import Image, ImageTk  # type: ignore
-            import numpy as _np  # type: ignore
-        except Exception as e:
-            messagebox.showerror("预览", f"缺少依赖: {e}")
-            return
-        top = tk.Toplevel(self)
-        try:
-            cur = (self.var_cur_engine.get() or "").strip().lower()
-            eng = cur if cur else (self.var_avg_engine.get() or "umi").lower()
-            eng_map = {"tesseract": "PyTesseract", "umi": "Umi-OCR"}
-            top.title(f"预览 - 货币价格区域（{eng_map.get(eng, eng)}）")
-        except Exception:
-            pass
-        top.transient(self)
-        try:
-            top.resizable(False, False)
-        except Exception:
-            pass
-        # Layout constants for sizing
-        margin, gap = 10, 10
-        img_w, img_h = 460, 160
-        right_w = 420
-        rows = 2  # avg + total
-        total_w = margin + img_w + gap + right_w + margin
-        total_h = margin + rows * (img_h + 60) + margin  # 60 for label + paddings per row
-
-        frm = ttk.Frame(top)
-        frm.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        def _render_row(parent, title, bgr_img, raw, cleaned, parsed, ms):
-            row = ttk.LabelFrame(parent, text=title)
-            row.pack(fill=tk.X, pady=6)
-            cv = tk.Canvas(row, width=img_w, height=img_h, highlightthickness=1, highlightbackground="#888")
-            cv.pack(side=tk.LEFT, padx=6, pady=6)
-            rgt = ttk.Frame(row)
-            rgt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=6, pady=6)
-            info = f"原始: {(raw or '').strip()}\n清洗: {cleaned or ''}\n数值: {('-' if parsed is None else parsed)}\n耗时: {int(ms)} ms"
-            ttk.Label(rgt, text=info, justify=tk.LEFT).pack(anchor="w")
-            try:
-                rgb = bgr_img[:, :, ::-1]
-                img = Image.fromarray(rgb)
-                w0, h0 = img.size
-                sc = min(img_w / max(1.0, w0), img_h / max(1.0, h0))
-                nw, nh = max(1, int(w0 * sc)), max(1, int(h0 * sc))
-                tkimg = ImageTk.PhotoImage(img.resize((nw, nh), Image.LANCZOS))
-                x = (img_w - tkimg.width()) // 2
-                y = (img_h - tkimg.height()) // 2
-                cv.create_image(x, y, image=tkimg, anchor=tk.NW)
-                cv.image = tkimg
-            except Exception:
-                pass
-        res_map = {tag: (raw, cleaned, parsed, ms) for tag, raw, cleaned, parsed, ms in results}
-        crop_map = {tag: img for tag, img in crops}
-        if "avg" in crop_map:
-            raw, cleaned, parsed, ms = res_map.get("avg", ("", "", None, -1.0))
-            _render_row(frm, "平均单价", crop_map.get("avg"), raw, cleaned, parsed, ms)
-        if "total" in crop_map:
-            raw, cleaned, parsed, ms = res_map.get("total", ("", "", None, -1.0))
-            _render_row(frm, "合计价格", crop_map.get("total"), raw, cleaned, parsed, ms)
-        # Place window relative to main window
-        try:
-            self._place_modal(top, total_w, total_h)
-        except Exception:
-            pass
+    # 货币ROI预览窗口（已废弃）
+    # def _preview_currency_window(self, crops, results) -> None:
+    #     pass
 
     # ---------- Template helpers (shared by preview launch/exit) ----------
     def _get_tpl_path_conf(self, key: str) -> tuple[str, float]:
@@ -5751,102 +5407,7 @@ class App(tk.Tk):
             self.txt.see(tk.END)
             self.txt.configure(state=tk.DISABLED)
 
-    def _start_multi(self) -> None:
-        if self._is_running():
-            messagebox.showwarning("运行", "任务已在运行中。")
-            return
-        items = self.cfg.get("purchase_items", [])
-        if not items:
-            messagebox.showwarning("运行", "请先添加至少一个商品任务。")
-            return
-        # Reset purchased counts for enabled items
-        for it in items:
-            it.setdefault("purchased", 0)
-            if it.get("enabled", True):
-                it["purchased"] = int(it.get("purchased", 0))
-        save_config(self.cfg, "config.json")
-        self._multi = MultiBuyer(
-            items,
-            on_log=self._append_log,
-            on_item_update=lambda idx, it: self.after(0, self._on_item_update, idx, it),
-        )
-        self._append_log("启动多商品轮询…")
-        self._multi.start()
-        self._update_run_controls()
-        self._schedule_run_state_poll()
-
-    def _stop(self) -> None:
-        if hasattr(self, "_multi") and self._multi:
-            self._multi.stop()
-            self._append_log("停止信号已发送。")
-        self._update_run_controls()
-        self._cancel_run_state_poll()
-
-    # ---------- Run state helpers ----------
-    def _is_running(self) -> bool:
-        try:
-            m = getattr(self, "_multi", None)
-            if not m:
-                return False
-            # If stop has been requested, treat as not running for UI purposes
-            try:
-                st = getattr(m, "_stop", None)
-                if st is not None and st.is_set():
-                    return False
-            except Exception:
-                pass
-            t = getattr(m, "_thread", None)
-            return bool(t and t.is_alive())
-        except Exception:
-            return False
-
-    def _toggle_run(self) -> None:
-        if self._is_running():
-            self._stop()
-        else:
-            self._start_multi()
-
-    def _get_run_button_text(self) -> str:
-        try:
-            # Display normalized configured hotkey for clarity
-            hint = self._hotkey_to_display(self._normalize_tk_hotkey(self._get_toggle_hotkey()))
-        except Exception:
-            hint = "Ctrl+Alt+T"
-        return ("停止" if self._is_running() else "开始") + f" ({hint})"
-
-    def _update_run_controls(self) -> None:
-        try:
-            self.btn_run.configure(text=self._get_run_button_text())
-        except Exception:
-            pass
-
-    def _schedule_run_state_poll(self) -> None:
-        try:
-            if self._run_state_after_id is not None:
-                self.after_cancel(self._run_state_after_id)
-        except Exception:
-            pass
-        # Poll while running to reflect natural completion
-        def _tick():
-            self._run_state_after_id = None
-            self._update_run_controls()
-            if self._is_running():
-                try:
-                    self._run_state_after_id = self.after(500, _tick)
-                except Exception:
-                    pass
-        try:
-            self._run_state_after_id = self.after(500, _tick)
-        except Exception:
-            pass
-
-    def _cancel_run_state_poll(self) -> None:
-        try:
-            if self._run_state_after_id is not None:
-                self.after_cancel(self._run_state_after_id)
-                self._run_state_after_id = None
-        except Exception:
-            pass
+    # 旧自动购买相关方法已移除
 
     # ---------- Items list management ----------
     def _load_items_from_cfg(self) -> None:

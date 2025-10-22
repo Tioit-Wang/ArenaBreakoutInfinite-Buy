@@ -45,16 +45,6 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "qty_minus": {"path": os.path.join("images", "qty_minus.png"), "confidence": 0.85},
         "qty_plus": {"path": os.path.join("images", "qty_plus.png"), "confidence": 0.85},
     },
-    "points": {
-        # 单点坐标 (ASCII keys)
-        "first_item": {"x": 0, "y": 0},
-        "quantity_input": {"x": 0, "y": 0},
-    },
-    "rects": {
-        # 区域坐标 (ASCII keys)
-        "price_region": {"x1": 0, "y1": 0, "x2": 0, "y2": 0},
-        # 可扩展: "stock_region": {...}
-    },
     "purchase": {
         "item_name": "",
         "price_threshold": 0,
@@ -75,17 +65,6 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "top_offset": 0,
         "bottom_offset": 0,
         "lr_pad": 0,
-    },
-    "currency_area": {
-        # 单个货币图标模板；右侧 N 像素为价格区域；模板高度即为区域高度
-        "template": os.path.join("images", "currency.png"),
-        "threshold": 0.80,
-        # 价格区域宽度（像素）
-        "price_width": 220,
-        # 识别引擎（与平均单价相同的选项）；留空则沿用 avg_price_area.ocr_engine
-        "ocr_engine": "",
-        # 放大倍率（0.6-2.5），用于 ROI 识别前的缩放
-        "scale": 1.0,
     },
     "avg_price_area": {
         # ROI width follows the Buy button width; these control vertical position/size
@@ -211,7 +190,7 @@ def load_config(
     if migrate_legacy:
         cfg, ch_m = _migrate_from_key_mapping(cfg, mapping_path="key_mapping.json")
         changed = changed or ch_m
-    # Normalize keys (Chinese -> ASCII) for templates/points/rects
+    # Normalize keys (Chinese -> ASCII) for templates
     def _normalize_ascii_keys(conf: Dict[str, Any]) -> bool:
         changed_local = False
         # templates
@@ -246,46 +225,6 @@ def load_config(
                 if nk != k:
                     changed_local = True
             conf["templates"] = new_tpl
-        # points
-        pmap = {
-            "第一个商品": "first_item",
-            "第1个商品": "first_item",
-            "第一个商品位置": "first_item",
-            "数量输入框": "quantity_input",
-            "数量输入": "quantity_input",
-            "购买数量": "quantity_input",
-            "首页按钮": "btn_home",
-            "市场按钮": "btn_market",
-            "市场搜索栏": "input_search",
-            "市场搜索按钮": "btn_search",
-            "购买按钮": "btn_buy",
-            "商品关闭位置": "btn_close",
-            "刷新按钮": "btn_refresh",
-        }
-        pts = conf.get("points")
-        if isinstance(pts, dict):
-            new_pts: Dict[str, Any] = {}
-            for k, v in pts.items():
-                nk = pmap.get(str(k)) or (str(k) if str(k).isascii() else None)
-                if nk is None:
-                    continue
-                new_pts[nk] = v
-                if nk != k:
-                    changed_local = True
-            conf["points"] = new_pts
-        # rects
-        rmap = {"价格区域": "price_region"}
-        rects = conf.get("rects")
-        if isinstance(rects, dict):
-            new_rects: Dict[str, Any] = {}
-            for k, v in rects.items():
-                nk = rmap.get(str(k)) or (str(k) if str(k).isascii() else None)
-                if nk is None:
-                    continue
-                new_rects[nk] = v
-                if nk != k:
-                    changed_local = True
-            conf["rects"] = new_rects
         return changed_local
 
     if normalize_keys and _normalize_ascii_keys(cfg):
