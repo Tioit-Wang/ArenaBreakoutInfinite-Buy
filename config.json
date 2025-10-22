@@ -1,6 +1,6 @@
 {
     "game": {
-        "exe_path": "D:/WeGameApps/rail_apps/暗区突围无限(2001688)/WeGameLauncher/launcher.exe",
+        "exe_path": "C:/WeGameApps/rail_apps/暗区突围无限(2001688)/WeGameLauncher/launcher.exe",
         "launch_args": "",
         "startup_timeout_sec": 120
     },
@@ -58,11 +58,31 @@
         },
         "btn_back": {
             "path": "images\\btn_back.png",
-            "confidence": 0.85
+            "confidence": 0.84
         },
         "btn_max": {
             "path": "images\\btn_max.png",
-            "confidence": 0.81
+            "confidence": 0.83
+        },
+        "qty_minus": {
+            "path": "images\\qty_minus.png",
+            "confidence": 0.85
+        },
+        "qty_plus": {
+            "path": "images\\qty_plus.png",
+            "confidence": 0.85
+        },
+        "btn_settings": {
+            "path": "images\\btn_settings.png",
+            "confidence": 0.85
+        },
+        "btn_exit": {
+            "path": "images\\btn_exit.png",
+            "confidence": 0.85
+        },
+        "btn_exit_confirm": {
+            "path": "images\\btn_exit_confirm.png",
+            "confidence": 0.85
         }
     },
     "points": {
@@ -145,17 +165,17 @@
     },
     "currency_area": {
         "template": "images\\currency.png",
-        "threshold": 0.8,
+        "threshold": 0.9,
         "price_width": 63,
-        "ocr_engine": "",
-        "scale": 1.4
+        "ocr_engine": "umi",
+        "scale": 2.1
     },
     "avg_price_area": {
         "distance_from_buy_top": 5,
         "height": 45,
         "ocr_allowlist": "0123456789K",
         "ocr_engine": "umi",
-        "scale": 1.5
+        "scale": 1.6
     },
     "ocrlite": {
         "exe_path": "bli\\win-BIN-x64\\OcrLiteOnnx.exe",

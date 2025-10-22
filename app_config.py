@@ -41,6 +41,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "btn_refresh": {"path": os.path.join("images", "btn_refresh.png"), "confidence": 0.85},
         "btn_back": {"path": os.path.join("images", "btn_back.png"), "confidence": 0.85},
         "btn_max": {"path": os.path.join("images", "btn_max.png"), "confidence": 0.85},
+        # Quantity input bounding templates (horizontal pair: minus on the left, plus on the right)
+        "qty_minus": {"path": os.path.join("images", "qty_minus.png"), "confidence": 0.85},
+        "qty_plus": {"path": os.path.join("images", "qty_plus.png"), "confidence": 0.85},
     },
     "points": {
         # 单点坐标 (ASCII keys)
@@ -223,6 +226,9 @@ def load_config(
             "数量最大按钮": "btn_max",
             "商品关闭位置": "btn_close",
             "刷新按钮": "btn_refresh",
+            # quantity pair
+            "数量+": "qty_plus",
+            "数量-": "qty_minus",
         }
         tpl = conf.get("templates")
         if isinstance(tpl, dict):

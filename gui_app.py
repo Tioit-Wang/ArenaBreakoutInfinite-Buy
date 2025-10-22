@@ -15,6 +15,7 @@ try:
 except Exception:
     pass
 from autobuyer import MultiBuyer
+from task_runner import TaskRunner
 
 
 class _RegionSelector:
@@ -412,10 +413,14 @@ class App(tk.Tk):
         # New: 购买任务配置（仅配置，不含启动）
         self.tab_tasks = ttk.Frame(nb)
         nb.add(self.tab_tasks, text="购买任务配置")
+        # New: 执行日志（独立任务执行/调度）
+        self.tab_exec = ttk.Frame(nb)
+        nb.add(self.tab_exec, text="执行日志")
 
         self._build_tab1()
         self._build_tab2()
         self._build_tab_tasks()
+        self._build_tab_exec()
         try:
             nb2 = self.tab1.nametowidget(self.tab1.winfo_parent())
             self.tab_goods = ttk.Frame(nb2)
@@ -433,11 +438,16 @@ class App(tk.Tk):
         # State
         # 单商品模式已移除
         self._log_lock = threading.Lock()
-        # Test launch running flag
+        self._exec_log_lock = threading.Lock()
+        # Test launch/exit running flags
         self._test_launch_running = False
+        self._test_exit_running = False
         self._tpl_slug_map = {
             # Chinese labels
             "启动按钮": "btn_launch",
+            "设置按钮": "btn_settings",
+            "退出按钮": "btn_exit",
+            "退出确认按钮": "btn_exit_confirm",
             "首页按钮": "btn_home",
             "市场按钮": "btn_market",
             "市场搜索栏": "input_search",
@@ -446,11 +456,16 @@ class App(tk.Tk):
             "购买成功": "buy_ok",
             "购买失败": "buy_fail",
             "数量最大按钮": "btn_max",
+            "数量+": "qty_plus",
+            "数量-": "qty_minus",
             "商品关闭位置": "btn_close",
             "刷新按钮": "btn_refresh",
             "返回按钮": "btn_back",
             # ASCII keys map to themselves
             "btn_launch": "btn_launch",
+            "btn_settings": "btn_settings",
+            "btn_exit": "btn_exit",
+            "btn_exit_confirm": "btn_exit_confirm",
             "btn_home": "btn_home",
             "btn_market": "btn_market",
             "input_search": "input_search",
@@ -459,6 +474,8 @@ class App(tk.Tk):
             "buy_ok": "buy_ok",
             "buy_fail": "buy_fail",
             "btn_max": "btn_max",
+            "qty_plus": "qty_plus",
+            "qty_minus": "qty_minus",
             "btn_close": "btn_close",
             "btn_refresh": "btn_refresh",
             "btn_back": "btn_back",
@@ -475,6 +492,10 @@ class App(tk.Tk):
 
         # Timer for reflecting run state in UI
         self._run_state_after_id: str | None = None
+        # Runner state poll id
+        self._exec_state_after_id: str | None = None
+        # Background runner instance (独立新逻辑)
+        self._runner: TaskRunner | None = None
 
     # ---------- Mouse wheel binding helper ----------
     def _bind_mousewheel(self, area, target=None) -> None:
@@ -1118,7 +1139,8 @@ class App(tk.Tk):
         # Use IntVar with explicit on/off to ensure check mark renders reliably
         var_enabled = tk.IntVar(value=1 if bool(it.get("enabled", True)) else 0)
         var_item_name = tk.StringVar(value=str(it.get("item_name", "")))
-        var_item_id = tk.StringVar(value=str(it.get("id", "")))
+        # Link to goods.json entry via item_id (used to resolve search_name)
+        var_item_id = tk.StringVar(value=str(it.get("item_id", "")))
         var_thr = tk.IntVar(value=int(it.get("price_threshold", 0) or 0))
         var_prem = tk.DoubleVar(value=float(it.get("price_premium_pct", 0) or 0))
         var_restock = tk.IntVar(value=int(it.get("restock_price", 0) or 0))
@@ -1240,12 +1262,16 @@ class App(tk.Tk):
             rec: Dict[str, Any] = {
                 "enabled": bool(int(var_enabled.get()) != 0),
                 "item_name": name,
+                "item_id": (var_item_id.get() or ""),
                 "price_threshold": int(var_thr.get() or 0),
                 "price_premium_pct": float(var_prem.get() or 0),
                 "restock_price": int(var_restock.get() or 0),
                 "target_total": int(var_target.get() or 0),
                 "duration_min": int(var_duration.get() or 10),
             }
+            if not rec["item_id"]:
+                messagebox.showwarning("保存", "必须通过‘选择…’绑定 goods.json 的物品（缺少 item_id）。")
+                return
             # Validation depends on task mode
             mode_now = str(self.tasks_data.get("task_mode", "time"))
             if mode_now == "time":
@@ -1270,14 +1296,58 @@ class App(tk.Tk):
                 if ts == te:
                     messagebox.showwarning("保存", "按时间区间执行：开始时间与结束时间不能相同。")
                     return
-                # Disallow duplicate time windows
+                # Parse HH:MM to minutes [0, 1440)
+                def _to_min(hhmm: str) -> int | None:
+                    try:
+                        hh, mm = hhmm.split(":")
+                        h = int(hh); m = int(mm)
+                        if 0 <= h <= 23 and 0 <= m <= 59:
+                            return h*60 + m
+                    except Exception:
+                        return None
+                    return None
+                new_s = _to_min(ts); new_e = _to_min(te)
+                if new_s is None or new_e is None:
+                    messagebox.showwarning("保存", "时间格式无效，请使用 HH:MM。")
+                    return
+                # Represent possibly-wrapping interval as 1 or 2 non-wrapping segments (half-open)
+                def _segments(s: int, e: int) -> list[tuple[int, int]]:
+                    if s < e:
+                        return [(s, e)]
+                    else:
+                        # Wrap across midnight: [s, 1440) U [0, e)
+                        return [(s, 1440), (0, e)]
+                def _overlap(a: tuple[int, int], b: tuple[int, int]) -> bool:
+                    a1, a2 = a; b1, b2 = b
+                    # Half-open intervals: [x1, x2) overlaps if max(starts) < min(ends)
+                    return max(a1, b1) < min(a2, b2)
+                new_segs = _segments(new_s, new_e)
+                # Disallow duplicate or overlapping time windows (including cross-midnight)
                 items_all = self.tasks_data.setdefault("tasks", [])
                 for j, other in enumerate(items_all):
                     if idx is not None and j == idx:
                         continue
                     try:
-                        if str(other.get("time_start")) == ts and str(other.get("time_end")) == te:
+                        o_ts = str(other.get("time_start", "")).strip()
+                        o_te = str(other.get("time_end", "")).strip()
+                        if not o_ts or not o_te:
+                            continue
+                        # Duplicate exact window
+                        if o_ts == ts and o_te == te:
                             messagebox.showwarning("保存", "存在相同的时间区间任务，请调整后再保存。")
+                            return
+                        os = _to_min(o_ts); oe = _to_min(o_te)
+                        if os is None or oe is None:
+                            continue
+                        other_segs = _segments(os, oe)
+                        if any(_overlap(a, b) for a in new_segs for b in other_segs):
+                            try:
+                                messagebox.showwarning(
+                                    "保存",
+                                    f"时间区间不能重叠：与已有任务 [{o_ts} - {o_te}] 存在重叠。请调整后再保存。",
+                                )
+                            except Exception:
+                                pass
                             return
                     except Exception:
                         pass
@@ -1658,9 +1728,11 @@ class App(tk.Tk):
         except Exception:
             sp_to = tk.Spinbox(box_game, from_=10, to=600, increment=10, textvariable=self.var_game_timeout, width=10)
         sp_to.grid(row=2, column=1, sticky="w", padx=4, pady=(0,6))
-        # Test launch button
+        # Test buttons
         self.btn_test_launch = ttk.Button(box_game, text="预览启动", command=self._test_game_launch)
         self.btn_test_launch.grid(row=2, column=2, padx=6, pady=(0,6))
+        self.btn_test_exit = ttk.Button(box_game, text="预览退出", command=self._test_game_exit)
+        self.btn_test_exit.grid(row=2, column=3, padx=6, pady=(0,6))
         # Layout: make entry column flexible
         try:
             box_game.columnconfigure(1, weight=1)
@@ -1728,7 +1800,7 @@ class App(tk.Tk):
 
             self._select_region(_after)
 
-        # 在“游戏启动”分组放置【启动按钮】模板配置行
+        # 在“游戏启动”分组放置【启动按钮】【设置按钮】【退出按钮】【退出确认按钮】模板配置行
         try:
             launch_data = (self.cfg.get("templates", {}) or {}).get("btn_launch", {})
             r_launch = TemplateRow(
@@ -1742,6 +1814,45 @@ class App(tk.Tk):
             )
             r_launch.grid(row=3, column=0, columnspan=4, sticky="we", padx=6, pady=(4, 6))
             self.template_rows["btn_launch"] = r_launch
+
+            settings_data = (self.cfg.get("templates", {}) or {}).get("btn_settings", {})
+            r_settings = TemplateRow(
+                _game_box_container,
+                "设置按钮",
+                settings_data if isinstance(settings_data, dict) else {},
+                on_test=test_match,
+                on_capture=capture_into_row,
+                on_preview=self._preview_image,
+                on_change=self._schedule_autosave,
+            )
+            r_settings.grid(row=4, column=0, columnspan=4, sticky="we", padx=6, pady=(0, 6))
+            self.template_rows["btn_settings"] = r_settings
+
+            exit_data = (self.cfg.get("templates", {}) or {}).get("btn_exit", {})
+            r_exit = TemplateRow(
+                _game_box_container,
+                "退出按钮",
+                exit_data if isinstance(exit_data, dict) else {},
+                on_test=test_match,
+                on_capture=capture_into_row,
+                on_preview=self._preview_image,
+                on_change=self._schedule_autosave,
+            )
+            r_exit.grid(row=5, column=0, columnspan=4, sticky="we", padx=6, pady=(0, 6))
+            self.template_rows["btn_exit"] = r_exit
+
+            exit_cfm_data = (self.cfg.get("templates", {}) or {}).get("btn_exit_confirm", {})
+            r_exit_cfm = TemplateRow(
+                _game_box_container,
+                "退出确认按钮",
+                exit_cfm_data if isinstance(exit_cfm_data, dict) else {},
+                on_test=test_match,
+                on_capture=capture_into_row,
+                on_preview=self._preview_image,
+                on_change=self._schedule_autosave,
+            )
+            r_exit_cfm.grid(row=6, column=0, columnspan=4, sticky="we", padx=6, pady=(0, 6))
+            self.template_rows["btn_exit_confirm"] = r_exit_cfm
         except Exception:
             pass
 
@@ -1749,6 +1860,9 @@ class App(tk.Tk):
         rowc = 0
         DISPLAY_NAME = {
             "btn_launch": "启动按钮",
+            "btn_settings": "设置按钮",
+            "btn_exit": "退出按钮",
+            "btn_exit_confirm": "退出确认按钮",
             "btn_home": "首页按钮",
             "btn_market": "市场按钮",
             "input_search": "市场搜索栏",
@@ -1757,12 +1871,15 @@ class App(tk.Tk):
             "buy_ok": "购买成功",
             "buy_fail": "购买失败",
             "btn_max": "数量最大按钮",
+            "qty_minus": "数量-",
+            "qty_plus": "数量+",
             "btn_close": "商品关闭位置",
             "btn_refresh": "刷新按钮",
             "btn_back": "返回按钮",
         }
+        _skip_in_general = {"btn_launch", "btn_settings", "btn_exit", "btn_exit_confirm", "qty_minus", "qty_plus"}
         for key, data in self.cfg.get("templates", {}).items():
-            if str(key) == "btn_launch":
+            if str(key) in _skip_in_general:
                 # 已在“游戏启动”分组渲染
                 continue
             disp = DISPLAY_NAME.get(key, key)
@@ -1957,6 +2074,44 @@ class App(tk.Tk):
 
         for i in range(0, 8):
             box_roi.columnconfigure(i, weight=0)
+
+        # 数量输入区域（模板对）
+        box_qty = ttk.LabelFrame(outer, text="数量输入区域（模板对）")
+        box_qty.pack(fill=tk.X, padx=8, pady=8)
+        try:
+            minus_data = (self.cfg.get("templates", {}) or {}).get("qty_minus", {})
+            r_minus = TemplateRow(
+                box_qty,
+                "数量-",
+                minus_data if isinstance(minus_data, dict) else {},
+                on_test=test_match,
+                on_capture=capture_into_row,
+                on_preview=self._preview_image,
+                on_change=self._schedule_autosave,
+            )
+            r_minus.grid(row=0, column=0, columnspan=4, sticky="we", padx=6, pady=(4, 6))
+            self.template_rows["qty_minus"] = r_minus
+
+            plus_data = (self.cfg.get("templates", {}) or {}).get("qty_plus", {})
+            r_plus = TemplateRow(
+                box_qty,
+                "数量+",
+                plus_data if isinstance(plus_data, dict) else {},
+                on_test=test_match,
+                on_capture=capture_into_row,
+                on_preview=self._preview_image,
+                on_change=self._schedule_autosave,
+            )
+            r_plus.grid(row=1, column=0, columnspan=4, sticky="we", padx=6, pady=(0, 6))
+            self.template_rows["qty_plus"] = r_plus
+
+            # 操作按钮：点击输入区域 / 预览输入区域截图
+            btns = ttk.Frame(box_qty)
+            btns.grid(row=2, column=0, sticky="w", padx=6, pady=(2, 6))
+            ttk.Button(btns, text="点击输入区域", command=self._qty_click_input_region).pack(side=tk.LEFT, padx=(0, 8))
+            ttk.Button(btns, text="预览输入区域", command=self._qty_preview_input_region).pack(side=tk.LEFT)
+        except Exception:
+            pass
 
         # 平均单价区域设置（使用“购买按钮”宽度，上方固定距离 + 固定高度）
         box_avg = ttk.LabelFrame(outer, text="平均单价区域设置")
@@ -2569,6 +2724,132 @@ class App(tk.Tk):
         except Exception as e:
             messagebox.showerror("预览", f"识别失败: {e}")
 
+    # ---------- 数量输入区域（基于数量-/数量+ 模板的水平ROI） ----------
+    def _qty__locate_boxes(self):
+        """Locate minus/plus template boxes on the current screen.
+
+        Returns (m_box, p_box) where each is a tuple (left, top, width, height), or (None, None) on failure.
+        """
+        try:
+            r_minus = self.template_rows.get("qty_minus")
+            r_plus = self.template_rows.get("qty_plus")
+        except Exception:
+            r_minus = None
+            r_plus = None
+        if r_minus is None or r_plus is None:
+            messagebox.showwarning("数量输入区域", "未找到‘数量-’或‘数量+’模板行，请先在模板管理中配置。")
+            return None, None
+        p_m = (r_minus.get_path() or "").strip()
+        p_p = (r_plus.get_path() or "").strip()
+        if not p_m or not os.path.exists(p_m):
+            messagebox.showwarning("数量输入区域", "‘数量-’模板路径为空或文件不存在。")
+            return None, None
+        if not p_p or not os.path.exists(p_p):
+            messagebox.showwarning("数量输入区域", "‘数量+’模板路径为空或文件不存在。")
+            return None, None
+        try:
+            import pyautogui  # type: ignore
+            m_box = pyautogui.locateOnScreen(p_m, confidence=float(r_minus.get_confidence() or 0.85))
+            p_box = pyautogui.locateOnScreen(p_p, confidence=float(r_plus.get_confidence() or 0.85))
+        except Exception as e:
+            messagebox.showerror("数量输入区域", f"匹配失败: {e}")
+            return None, None
+        if not m_box or not p_box:
+            messagebox.showwarning("数量输入区域", "未匹配到‘数量-’或‘数量+’，请降低阈值或重截清晰模板。")
+            return None, None
+        # Convert to simple tuples
+        try:
+            m = (int(getattr(m_box, "left", 0)), int(getattr(m_box, "top", 0)), int(getattr(m_box, "width", 0)), int(getattr(m_box, "height", 0)))
+            p = (int(getattr(p_box, "left", 0)), int(getattr(p_box, "top", 0)), int(getattr(p_box, "width", 0)), int(getattr(p_box, "height", 0)))
+        except Exception:
+            messagebox.showwarning("数量输入区域", "匹配到的框读取失败。")
+            return None, None
+        return m, p
+
+    def _qty__compute_roi(self):
+        """Compute the quantity input ROI between ‘数量-’ and ‘数量+’ boxes.
+
+        Returns (x1, y1, x2, y2) or None on failure.
+        """
+        mp = self._qty__locate_boxes()
+        if not isinstance(mp, tuple) or len(mp) != 2:
+            return None
+        m, p = mp
+        if m is None or p is None:
+            return None
+        ml, mt, mw, mh = m
+        pl, pt, pw, ph = p
+        # Ensure minus is on the left of plus; swap if needed
+        if ml > pl:
+            ml, mt, mw, mh, pl, pt, pw, ph = pl, pt, pw, ph, ml, mt, mw, mh
+        m_r = ml + max(1, mw)
+        p_l = pl
+        # Compute vertical band as intersection; fallback to union if tiny
+        y1 = max(mt, pt)
+        y2 = min(mt + max(1, mh), pt + max(1, ph))
+        if y2 - y1 < 6:
+            y1 = min(mt, pt)
+            y2 = max(mt + max(1, mh), pt + max(1, ph))
+        # Horizontal gap between minus-right and plus-left
+        x1 = m_r
+        x2 = p_l
+        if x2 - x1 < 4:
+            messagebox.showwarning("数量输入区域", "两个模板间距过小或位置异常，无法确定输入区域。")
+            return None
+        # Small inner padding to avoid borders
+        pad = 2
+        x1 += pad
+        x2 -= pad
+        if x2 <= x1:
+            messagebox.showwarning("数量输入区域", "输入区域宽度不足。")
+            return None
+        return int(x1), int(y1), int(x2), int(y2)
+
+    def _qty_preview_input_region(self) -> None:
+        roi = self._qty__compute_roi()
+        if not roi:
+            return
+        x1, y1, x2, y2 = roi
+        w = max(1, x2 - x1)
+        h = max(1, y2 - y1)
+        try:
+            import pyautogui  # type: ignore
+            img = pyautogui.screenshot(region=(x1, y1, w, h))
+        except Exception as e:
+            messagebox.showerror("预览", f"截屏失败: {e}")
+            return
+        os.makedirs("images", exist_ok=True)
+        path = os.path.join("images", "_qty_input_roi.png")
+        try:
+            img.save(path)
+        except Exception as e:
+            messagebox.showerror("预览", f"保存失败: {e}")
+            return
+        try:
+            self._append_log(f"[数量输入区域] 截取: ({x1},{y1},{x2},{y2}) -> {path}")
+        except Exception:
+            pass
+        self._preview_image(path, "预览 - 数量输入区域")
+
+    def _qty_click_input_region(self) -> None:
+        roi = self._qty__compute_roi()
+        if not roi:
+            return
+        x1, y1, x2, y2 = roi
+        cx = int((x1 + x2) / 2)
+        cy = int((y1 + y2) / 2)
+        try:
+            import pyautogui  # type: ignore
+            pyautogui.moveTo(cx, cy, duration=0.1)
+            pyautogui.click(cx, cy)
+        except Exception as e:
+            messagebox.showerror("点击", f"点击失败: {e}")
+            return
+        try:
+            self._append_log(f"[数量输入区域] 点击中心: ({cx},{cy})，区域=({x1},{y1},{x2},{y2})")
+        except Exception:
+            pass
+
     def _ocr_text_parse_km(self, bin_img, *, fallback_img=None):
         # 使用 avg_price_area.ocr_engine 以与平均单价预览保持一致
         try:
@@ -2723,6 +3004,80 @@ class App(tk.Tk):
         except Exception:
             pass
 
+    # ---------- Template helpers (shared by preview launch/exit) ----------
+    def _get_tpl_path_conf(self, key: str) -> tuple[str, float]:
+        """Return (path, confidence) for template key, with images/<key>.png fallback."""
+        try:
+            tpls = self.cfg.get("templates", {}) if isinstance(self.cfg.get("templates"), dict) else {}
+            d = tpls.get(key, {}) if isinstance(tpls, dict) else {}
+            p = str((d or {}).get("path", ""))
+            if not p:
+                p = os.path.join("images", f"{key}.png")
+            try:
+                conf = float((d or {}).get("confidence", 0.85))
+            except Exception:
+                conf = 0.85
+            return p, conf
+        except Exception:
+            return os.path.join("images", f"{key}.png"), 0.85
+
+    def _wait_template(self, key: str, timeout_sec: int) -> bool:
+        """Wait until a template appears on screen within timeout (no click)."""
+        path, conf = self._get_tpl_path_conf(key)
+        try:
+            import pyautogui  # type: ignore
+        except Exception:
+            return False
+        if not os.path.exists(path):
+            return False
+        end = time.time() + max(0, int(timeout_sec))
+        while time.time() < end:
+            try:
+                if pyautogui.locateOnScreen(path, confidence=float(conf)):
+                    return True
+            except Exception:
+                pass
+            time.sleep(1.0)
+        return False
+
+    def _wait_click_template(self, key: str, timeout_sec: int) -> bool:
+        """Wait for a template and click its center once found."""
+        path, conf = self._get_tpl_path_conf(key)
+        try:
+            import pyautogui  # type: ignore
+        except Exception:
+            return False
+        if not os.path.exists(path):
+            return False
+        end = time.time() + max(0, int(timeout_sec))
+        while time.time() < end:
+            center = None
+            try:
+                center = pyautogui.locateCenterOnScreen(path, confidence=float(conf))
+            except Exception:
+                center = None
+            if center is None:
+                try:
+                    box = pyautogui.locateOnScreen(path, confidence=float(conf))
+                except Exception:
+                    box = None
+                if box:
+                    try:
+                        x = int(getattr(box, 'left', 0) + getattr(box, 'width', 0) // 2)
+                        y = int(getattr(box, 'top', 0) + getattr(box, 'height', 0) // 2)
+                        pyautogui.click(x, y)
+                        return True
+                    except Exception:
+                        pass
+            else:
+                try:
+                    pyautogui.click(int(getattr(center, 'x', 0)), int(getattr(center, 'y', 0)))
+                    return True
+                except Exception:
+                    pass
+            time.sleep(1.0)
+        return False
+
     # ---------- Game launch test ----------
     def _test_game_launch(self) -> None:
         # Avoid concurrent test
@@ -2732,6 +3087,8 @@ class App(tk.Tk):
         self._test_launch_running = True
         try:
             self.btn_test_launch.configure(state=tk.DISABLED)
+            # Disable exit preview during launch preview
+            self.btn_test_exit.configure(state=tk.DISABLED)
         except Exception:
             pass
         # Save current config first
@@ -2776,6 +3133,7 @@ class App(tk.Tk):
                     finally:
                         try:
                             self.btn_test_launch.configure(state=tk.NORMAL)
+                            self.btn_test_exit.configure(state=tk.NORMAL)
                         except Exception:
                             pass
                         self._test_launch_running = False
@@ -2819,6 +3177,7 @@ class App(tk.Tk):
                     finally:
                         try:
                             self.btn_test_launch.configure(state=tk.NORMAL)
+                            self.btn_test_exit.configure(state=tk.NORMAL)
                         except Exception:
                             pass
                         self._test_launch_running = False
@@ -2907,6 +3266,7 @@ class App(tk.Tk):
                 finally:
                     try:
                         self.btn_test_launch.configure(state=tk.NORMAL)
+                        self.btn_test_exit.configure(state=tk.NORMAL)
                     except Exception:
                         pass
                     self._test_launch_running = False
@@ -2924,6 +3284,94 @@ class App(tk.Tk):
                 self.btn_test_launch.configure(state=tk.NORMAL)
             except Exception:
                 pass
+
+    # ---------- Game exit test ----------
+    def _test_game_exit(self) -> None:
+        # Avoid concurrent test
+        if getattr(self, "_test_launch_running", False) or getattr(self, "_test_exit_running", False):
+            messagebox.showinfo("预览退出", "已有测试在进行中，请稍候…")
+            return
+        self._test_exit_running = True
+        try:
+            self.btn_test_exit.configure(state=tk.DISABLED)
+            self.btn_test_launch.configure(state=tk.DISABLED)
+        except Exception:
+            pass
+        # Save current config first
+        try:
+            self._save_and_sync(silent=True)
+        except Exception:
+            pass
+
+        def _run():
+            try:
+                self._append_log("[预览退出] 尝试依次点击：设置按钮 → 退出按钮 → 退出确认按钮…")
+            except Exception:
+                pass
+            # 1) Optional: click settings to open menu (up to 30s)
+            s_path, _ = self._get_tpl_path_conf("btn_settings")
+            if os.path.exists(s_path):
+                if self._wait_click_template("btn_settings", 30):
+                    try:
+                        self._append_log("[预览退出] 已点击设置按钮。")
+                    except Exception:
+                        pass
+                    time.sleep(1.0)
+
+            # 2) Click exit (up to 60s)
+            e_path, _ = self._get_tpl_path_conf("btn_exit")
+            clicked_exit = False
+            if os.path.exists(e_path):
+                clicked_exit = self._wait_click_template("btn_exit", 60)
+                if clicked_exit:
+                    try:
+                        self._append_log("[预览退出] 已点击退出按钮。")
+                    except Exception:
+                        pass
+                    time.sleep(0.8)
+
+            # 3) Optional: click exit confirm (up to 30s)
+            c_path, _ = self._get_tpl_path_conf("btn_exit_confirm")
+            clicked_confirm = False
+            if os.path.exists(c_path):
+                clicked_confirm = self._wait_click_template("btn_exit_confirm", 30)
+                if clicked_confirm:
+                    try:
+                        self._append_log("[预览退出] 已点击退出确认按钮。")
+                    except Exception:
+                        pass
+
+            ok = bool(clicked_exit or clicked_confirm)
+            def _finish_done():
+                try:
+                    if ok:
+                        messagebox.showinfo("预览退出", "已尝试点击退出/确认按钮，请在游戏内确认是否生效。")
+                    else:
+                        tips = []
+                        if not os.path.exists(e_path):
+                            tips.append("请在‘游戏启动’中设置‘退出按钮’模板")
+                        if not os.path.exists(c_path):
+                            tips.append("请在‘游戏启动’中设置‘退出确认按钮’模板")
+                        if not os.path.exists(s_path):
+                            tips.append("如需先打开菜单，请设置‘设置按钮’模板")
+                        tip_text = ("；".join(tips)) if tips else "请检查模板/路径/超时设置"
+                        messagebox.showwarning("预览退出", f"未检测到退出相关按钮。{tip_text}")
+                finally:
+                    try:
+                        self.btn_test_exit.configure(state=tk.NORMAL)
+                        self.btn_test_launch.configure(state=tk.NORMAL)
+                    except Exception:
+                        pass
+                    self._test_exit_running = False
+            try:
+                self.after(0, _finish_done)
+            except Exception:
+                _finish_done()
+
+        try:
+            threading.Thread(target=_run, name="test-exit", daemon=True).start()
+        except Exception:
+            _run()
 
     @staticmethod
     def _roi_match_template(gray, tmpl_gray, search_roi=None, method=0):
@@ -3384,7 +3832,20 @@ class App(tk.Tk):
         except Exception as e:
             messagebox.showerror("预览", f"截图失败: {e}")
             return
-        # Apply scale and binarize
+        # Split ROI into two halves: top (平均价), bottom (合计)
+        try:
+            w, h = img.size
+        except Exception:
+            messagebox.showerror("预览", "ROI 尺寸无效")
+            return
+        if h < 2:
+            messagebox.showwarning("预览", "ROI 高度过小，无法二分")
+            return
+        mid = h // 2
+        img_top = img.crop((0, 0, w, mid))
+        img_bot = img.crop((0, mid, w, h))
+
+        # Apply scale
         try:
             sc = float(self.var_avg_scale.get() or 1.0)
         except Exception:
@@ -3393,93 +3854,84 @@ class App(tk.Tk):
             sc = 0.6
         if sc > 2.5:
             sc = 2.5
-        if abs(sc - 1.0) > 1e-3:
-            try:
-                from PIL import Image as _Image  # type: ignore
-                w, h = img.size
-                img = img.resize((max(1, int(w * sc)), max(1, int(h * sc))), resample=getattr(_Image, 'LANCZOS', 1))
-            except Exception:
-                pass
-        # Binarize for better contrast (single, minimal preprocessing)
         try:
-            import cv2 as _cv2  # type: ignore
-            import numpy as _np  # type: ignore
-            arr = _np.array(img)
-            bgr = _cv2.cvtColor(arr, _cv2.COLOR_RGB2BGR)
-            gray = _cv2.cvtColor(bgr, _cv2.COLOR_BGR2GRAY)
-            _thr, th = _cv2.threshold(gray, 0, 255, _cv2.THRESH_BINARY + _cv2.THRESH_OTSU)
             from PIL import Image as _Image  # type: ignore
-            bin_img = _Image.fromarray(th)
+            if abs(sc - 1.0) > 1e-3:
+                img_top = img_top.resize((max(1, int(img_top.width * sc)), max(1, int(img_top.height * sc))), resample=getattr(_Image, 'LANCZOS', 1))
+                img_bot = img_bot.resize((max(1, int(img_bot.width * sc)), max(1, int(img_bot.height * sc))), resample=getattr(_Image, 'LANCZOS', 1))
         except Exception:
+            pass
+
+        # Binarize both
+        def _bin(pil_img):
             try:
-                bin_img = img.convert("L").point(lambda p: 255 if p > 128 else 0)
+                import cv2 as _cv2, numpy as _np  # type: ignore
+                arr = _np.array(pil_img)
+                bgr = _cv2.cvtColor(arr, _cv2.COLOR_RGB2BGR)
+                gray = _cv2.cvtColor(bgr, _cv2.COLOR_BGR2GRAY)
+                _thr, th = _cv2.threshold(gray, 0, 255, _cv2.THRESH_BINARY + _cv2.THRESH_OTSU)
+                from PIL import Image as _Image  # type: ignore
+                return _Image.fromarray(th)
             except Exception:
-                bin_img = img
+                try:
+                    return pil_img.convert("L").point(lambda p: 255 if p > 128 else 0)
+                except Exception:
+                    return pil_img
+
+        bin_top = _bin(img_top)
+        bin_bot = _bin(img_bot)
+
+        # Save both images
         os.makedirs("images", exist_ok=True)
-        crop_path = os.path.join("images", "_avg_price_roi.png")
+        path_top = os.path.join("images", "_avg_price_roi_top.png")
+        path_bot = os.path.join("images", "_avg_price_roi_bottom.png")
         try:
-            bin_img.save(crop_path)
+            bin_top.save(path_top)
+            bin_bot.save(path_bot)
         except Exception as e:
             messagebox.showerror("预览", f"保存截图失败: {e}")
             return
 
-        raw_text = ""
-        cleaned = ""
-        parsed_val = None
-        elapsed_ms = -1.0
+        # OCR both halves
+        import time as _time
+        import pytesseract  # type: ignore
         try:
-            import time as _time
-            import pytesseract  # type: ignore
-            try:
-                from price_reader import _maybe_init_tesseract  # type: ignore
-                _maybe_init_tesseract()
-            except Exception:
-                pass
-            eng = str(self.var_avg_engine.get() or "umi").lower()
+            from price_reader import _maybe_init_tesseract  # type: ignore
+            _maybe_init_tesseract()
+        except Exception:
+            pass
+        eng = str(self.var_avg_engine.get() or "umi").lower()
+        def _ocr(pil_img):
+            raw = ""; ms = -1.0
             t0 = _time.perf_counter()
             if eng in ("umi", "umi-ocr", "umiocr"):
                 try:
-                    o_texts, o_ms = self._run_umi_ocr(pil_image=bin_img or img)
-                    raw_text = "\n".join(map(str, o_texts or []))
-                    elapsed_ms = float(o_ms)
+                    texts, o_ms = self._run_umi_ocr(pil_image=pil_img)
+                    raw = "\n".join(map(str, texts or [])); ms = float(o_ms)
                 except Exception as _e:
-                    raw_text = f"[umi失败] {_e}"
-            if not raw_text:
+                    raw = f"[umi失败] {_e}"
+            if not raw:
                 allow = str(self.cfg.get("avg_price_area", {}).get("ocr_allowlist", "0123456789KM"))
-                need = "KMkm"
-                allow_ex = allow + "".join(ch for ch in need if ch not in allow)
+                need = "KMkm"; allow_ex = allow + "".join(ch for ch in need if ch not in allow)
                 cfg = f"--oem 3 --psm 6 -c tessedit_char_whitelist={allow_ex}"
-                raw_text = pytesseract.image_to_string(bin_img or img, config=cfg) or ""
-            elapsed_ms = (_time.perf_counter() - t0) * 1000.0
-            try:
-                self._append_log(f"[平均单价预览] OCR耗时={int(elapsed_ms)}ms 原始='{(raw_text or '').strip()}'")
-            except Exception:
-                pass
-            up = (raw_text or "").upper()
-            cleaned = "".join(ch for ch in up if ch in "0123456789KM")
-            t = cleaned.strip().upper()
-            mult = 1
-            if t.endswith("M"):
-                mult = 1_000_000
-                t = t[:-1]
-            elif t.endswith("K"):
-                mult = 1_000
-                t = t[:-1]
+                raw = pytesseract.image_to_string(pil_img, config=cfg) or ""
+            if ms < 0: ms = (_time.perf_counter() - t0) * 1000.0
+            up = (raw or "").upper(); cleaned = "".join(ch for ch in up if ch in "0123456789KM")
+            t = cleaned.strip().upper(); mult = 1
+            if t.endswith("M"): mult = 1_000_000; t = t[:-1]
+            elif t.endswith("K"): mult = 1_000; t = t[:-1]
             digits = "".join(ch for ch in t if ch.isdigit())
-            if digits:
-                parsed_val = int(digits) * mult
-            try:
-                self._append_log(f"[平均单价预览] 清洗='{cleaned}' 数值={parsed_val if parsed_val is not None else '-'}")
-            except Exception:
-                pass
-        except Exception as e:
-            raw_text = f"[OCR] 失败: {e}"
-            cleaned = ""
-            parsed_val = None
+            parsed = int(digits) * mult if digits else None
+            return raw, cleaned, parsed, ms
 
+        raw_t, clean_t, parsed_t, ms_t = _ocr(bin_top)
+        raw_b, clean_b, parsed_b, ms_b = _ocr(bin_bot)
+
+        # Show dual preview window
         try:
-            self._preview_avg_price_window(crop_path, raw_text, cleaned, parsed_val, elapsed_ms,
-                                           engine=str(self.var_avg_engine.get() or "umi").lower())
+            self._preview_avg_price_window_dual(path_top, raw_t, clean_t, parsed_t, ms_t,
+                                                path_bot, raw_b, clean_b, parsed_b, ms_b,
+                                                engine=eng)
         except Exception as e:
             messagebox.showerror("预览", f"显示失败: {e}")
 
@@ -3501,105 +3953,62 @@ class App(tk.Tk):
         except Exception:
             pass
 
-        margin = 12
-        img_w, img_h = 520, 560
-        gap = 12
-        pane_w = 460
-        total_w = margin + img_w + gap + pane_w + margin
-        total_h = margin + img_h + 70 + margin
+    def _preview_avg_price_window_dual(self, path_top: str, raw_t: str, clean_t: str, parsed_t, ms_t: float,
+                                        path_bot: str, raw_b: str, clean_b: str, parsed_b, ms_b: float,
+                                        *, engine: str = "umi") -> None:
+        for p in (path_top, path_bot):
+            if not os.path.exists(p):
+                messagebox.showwarning("预览", f"ROI 截图不存在: {p}")
+                return
+        from PIL import Image, ImageTk  # type: ignore
+        win = tk.Toplevel(self)
+        win.title(f"预览 - 平均单价区域（上下分割，{engine}）")
         try:
-            top.geometry(f"{total_w}x{total_h}")
-            top.resizable(False, False)
+            win.geometry("960x720")
+        except Exception:
+            pass
+        win.transient(self)
+        try:
+            win.grab_set()
         except Exception:
             pass
 
-        frm = ttk.Frame(top)
-        frm.pack(fill=tk.BOTH, expand=True)
-
-        header = ttk.Frame(frm)
-        header.pack(fill=tk.X, padx=margin, pady=(margin, 4))
-        ttk.Label(header, text="ROI 截图").pack(side=tk.LEFT)
-        lab_time = ttk.Label(header, text=(f"OCR耗时: {int(elapsed_ms)} ms" if elapsed_ms >= 0 else "OCR耗时: -"))
-        lab_time.pack(side=tk.RIGHT)
-
-        body = ttk.Frame(frm)
-        body.pack(fill=tk.BOTH, expand=True, padx=margin)
-
-        cv = tk.Canvas(body, width=img_w, height=img_h, highlightthickness=1, highlightbackground="#888")
-        cv.pack(side=tk.LEFT)
-
-        right = ttk.Frame(body, width=pane_w)
-        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=False, padx=(gap, 0))
-        ttk.Label(right, text="OCR结果（原始 与 预览）").pack(anchor="w")
-        txt = tk.Text(right, height=28, wrap="word")
-        txt.pack(fill=tk.BOTH, expand=True)
-
-        try:
-            from PIL import Image, ImageTk  # type: ignore
-            crop = Image.open(crop_path).convert("RGB")
-            w0, h0 = crop.size
-            sc = min(img_w / max(1.0, float(w0)), img_h / max(1.0, float(h0)))
-            nw, nh = max(1, int(w0 * sc)), max(1, int(h0 * sc))
-            crop_fit = crop.resize((nw, nh), Image.LANCZOS)
-            tk_crop = ImageTk.PhotoImage(crop_fit)
-            x = (img_w - tk_crop.width()) // 2
-            y = (img_h - tk_crop.height()) // 2
-            cv.create_image(x, y, image=tk_crop, anchor=tk.NW)
-            cv.image = tk_crop
-        except Exception as e:
+        def _section(parent, label, img_path, raw, clean, parsed, ms):
+            frm = ttk.LabelFrame(parent, text=label)
+            frm.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+            left = ttk.Frame(frm)
+            left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            right = ttk.Frame(frm, width=320)
+            right.pack(side=tk.RIGHT, fill=tk.Y)
             try:
-                cv.create_text(10, 10, anchor=tk.NW, text=f"加载截图失败: {e}")
-            except Exception:
-                pass
-
-        # Build preview as: 清洗前: <unit> <total>  清洗后: {json}
-        raw_disp = raw_text.strip() if isinstance(raw_text, str) else raw_text
-        try:
-            lines_raw = [ln.strip() for ln in (raw_text or "").splitlines() if ln.strip()]
-        except Exception:
-            lines_raw = []
-        raw_unit = lines_raw[0] if len(lines_raw) >= 1 else ""
-        raw_total = lines_raw[1] if len(lines_raw) >= 2 else ""
-
-        def _parse_val(s: str):
+                img = Image.open(img_path)
+                maxw, maxh = 560, 260
+                w, h = img.size
+                scale = min(maxw / max(1, w), maxh / max(1, h), 1.0)
+                disp = img.resize((max(1, int(w*scale)), max(1, int(h*scale))), Image.LANCZOS)
+                tkimg = ImageTk.PhotoImage(disp)
+                lbl = ttk.Label(left, image=tkimg)
+                lbl.image = tkimg
+                lbl.pack(padx=6, pady=6)
+            except Exception as e:
+                ttk.Label(left, text=f"加载图片失败: {e}").pack()
+            # OCR details
+            ttk.Label(right, text="OCR结果（原始 与 预览）").pack(anchor="w", padx=6, pady=(6,2))
+            txt = tk.Text(right, height=8, wrap="word")
+            txt.pack(fill=tk.BOTH, expand=True, padx=6, pady=(0,6))
             try:
-                up = str(s).upper()
-                mult = 1_000_000 if ("M" in up) else (1000 if ("K" in up) else 1)
-                digits = "".join(ch for ch in up if ch.isdigit())
-                return (int(digits) * mult) if digits else None
+                txt.insert("1.0", f"引擎: {engine}\n耗时: {int(ms)}ms\n原始: {(raw or '').strip()}\n清洗: {clean}\n数值: {parsed if parsed is not None else '-'}")
             except Exception:
-                return None
-
-        val_unit = _parse_val(raw_unit)
-        val_total = _parse_val(raw_total)
-        try:
-            import json as _json
-            json_str = _json.dumps({
-                "unit_price_raw": raw_unit,
-                "total_price_raw": raw_total,
-                "unit_price": val_unit,
-                "total_price": val_total,
-            }, ensure_ascii=False)
-        except Exception:
-            json_str = f"{{'unit_price_raw': '{raw_unit}', 'total_price_raw': '{raw_total}', 'unit_price': {val_unit}, 'total_price': {val_total}}}"
-
-        pre_clean_str = f"{raw_unit} {raw_total}".strip()
-        lines = [
-            f"文件: {crop_path}",
-            f"原始:",
-            f"{raw_disp}",
-            f"清洗前: {pre_clean_str if pre_clean_str else '-'}",
-            f"清洗后: {json_str}",
-        ]
-        try:
-            txt.insert("1.0", "\n".join(lines))
+                txt.insert("1.0", "无法显示OCR详情")
             txt.configure(state=tk.DISABLED)
-        except Exception:
-            pass
 
-        footer = ttk.Frame(frm)
-        footer.pack(fill=tk.X, padx=margin, pady=(8, margin))
-        ttk.Button(footer, text="关闭", command=top.destroy).pack(side=tk.RIGHT)
+        _section(win, "上半（平均价）", path_top, raw_t, clean_t, parsed_t, ms_t)
+        _section(win, "下半（合计价）", path_bot, raw_b, clean_b, parsed_b, ms_b)
+
+        # Footer with close button
+        footer = ttk.Frame(win)
+        footer.pack(fill=tk.X, padx=8, pady=8)
+        ttk.Button(footer, text="关闭", command=win.destroy).pack(side=tk.RIGHT)
 
     # ---------- Tab2 ----------
     def _build_tab2(self) -> None:
@@ -3736,6 +4145,154 @@ class App(tk.Tk):
         self.cmb_variant.bind("<<ComboboxSelected>>", lambda _e: self._lab_render())
         ttk.Button(p3, text="重新计算", command=self._lab_compute_variants).pack(side=tk.LEFT)
         ttk.Button(p3, text="导出当前标注图", command=self._lab_save_annotated).pack(side=tk.LEFT, padx=6)
+
+    # ---------- 执行日志（新逻辑） ----------
+    def _build_tab_exec(self) -> None:
+        outer = self.tab_exec
+        frm = ttk.Frame(outer)
+        frm.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+
+        # Controls row
+        ctrl = ttk.Frame(frm)
+        ctrl.pack(fill=tk.X)
+        self.btn_exec_start = ttk.Button(ctrl, text="开始", command=self._exec_start)
+        self.btn_exec_start.pack(side=tk.LEFT)
+        self.btn_exec_pause = ttk.Button(ctrl, text="暂停", command=self._exec_toggle_pause)
+        self.btn_exec_pause.pack(side=tk.LEFT, padx=6)
+        self.btn_exec_stop = ttk.Button(ctrl, text="终止", command=self._exec_stop)
+        self.btn_exec_stop.pack(side=tk.LEFT)
+        self.lab_exec_status = ttk.Label(ctrl, text="idle", foreground="#666")
+        self.lab_exec_status.pack(side=tk.RIGHT)
+
+        # Log area
+        logf = ttk.LabelFrame(frm, text="执行日志")
+        logf.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
+        self.exec_txt = tk.Text(logf, height=18, wrap="word")
+        self.exec_txt.pack(fill=tk.BOTH, expand=True)
+        self.exec_txt.configure(state=tk.DISABLED)
+        # Initialize buttons state
+        self._update_exec_controls()
+
+    def _append_exec_log(self, s: str) -> None:
+        try:
+            import threading as _th
+            if _th.current_thread() is not _th.main_thread():
+                self.after(0, self._append_exec_log, s)
+                return
+        except Exception:
+            pass
+        with self._exec_log_lock:
+            try:
+                self.exec_txt.configure(state=tk.NORMAL)
+                self.exec_txt.insert(tk.END, s + "\n")
+                self.exec_txt.see(tk.END)
+            finally:
+                self.exec_txt.configure(state=tk.DISABLED)
+
+    def _exec_is_running(self) -> bool:
+        r = getattr(self, "_runner", None)
+        try:
+            t = getattr(r, "_thread", None)
+            return bool(r and t and t.is_alive())
+        except Exception:
+            return False
+
+    def _update_exec_controls(self) -> None:
+        running = self._exec_is_running()
+        try:
+            self.btn_exec_start.configure(state=(tk.DISABLED if running else tk.NORMAL))
+            self.btn_exec_stop.configure(state=(tk.NORMAL if running else tk.DISABLED))
+            # Pause button toggles between 暂停/继续
+            paused = bool(getattr(self._runner, "_pause", None) and self._runner._pause.is_set()) if self._runner else False
+            self.btn_exec_pause.configure(state=(tk.NORMAL if running else tk.DISABLED), text=("继续" if paused else "暂停"))
+            # Status label
+            self.lab_exec_status.configure(text=("running" if running else "idle"))
+        except Exception:
+            pass
+
+    def _schedule_exec_state_poll(self) -> None:
+        self._cancel_exec_state_poll()
+        try:
+            self._exec_state_after_id = self.after(500, self._on_exec_state_tick)
+        except Exception:
+            pass
+
+    def _cancel_exec_state_poll(self) -> None:
+        aid = getattr(self, "_exec_state_after_id", None)
+        if aid:
+            try:
+                self.after_cancel(aid)
+            except Exception:
+                pass
+        self._exec_state_after_id = None
+
+    def _on_exec_state_tick(self) -> None:
+        self._update_exec_controls()
+        # keep polling while runner exists
+        if self._runner is not None:
+            try:
+                self._exec_state_after_id = self.after(500, self._on_exec_state_tick)
+            except Exception:
+                pass
+
+    def _exec_start(self) -> None:
+        # Persist any in-memory task edits
+        try:
+            self._save_tasks_data()
+        except Exception:
+            pass
+        # Reset log
+        try:
+            self.exec_txt.configure(state=tk.NORMAL)
+            self.exec_txt.delete("1.0", tk.END)
+            self.exec_txt.configure(state=tk.DISABLED)
+        except Exception:
+            pass
+        # Instantiate runner with current tasks_data snapshot
+        self._runner = TaskRunner(
+            tasks_data=dict(self.tasks_data),
+            cfg_path="config.json",
+            goods_path="goods.json",
+            on_log=self._append_exec_log,
+            on_task_update=self._on_task_exec_update,
+        )
+        self._append_exec_log("【%s】【全局】【-】：开始执行" % time.strftime("%H:%M:%S"))
+        self._runner.start()
+        self._update_exec_controls()
+        self._schedule_exec_state_poll()
+
+    def _exec_toggle_pause(self) -> None:
+        r = getattr(self, "_runner", None)
+        if not r:
+            return
+        try:
+            if r._pause.is_set():
+                r.resume()
+            else:
+                r.pause()
+        except Exception:
+            pass
+        self._update_exec_controls()
+
+    def _exec_stop(self) -> None:
+        r = getattr(self, "_runner", None)
+        if r:
+            try:
+                r.stop()
+            except Exception:
+                pass
+        self._update_exec_controls()
+
+    def _on_task_exec_update(self, idx: int, t: Dict[str, Any]) -> None:
+        # Update in-memory tasks_data purchased and persist to buy_tasks.json
+        try:
+            items = self.tasks_data.get("tasks", []) or []
+            if 0 <= idx < len(items):
+                items[idx]["purchased"] = int(t.get("purchased", 0) or 0)
+                # Persist light-weight
+                self._save_tasks_data()
+        except Exception:
+            pass
         # Auto split & refine options
         self.var_lab_auto_split = tk.BooleanVar(value=True)
         ttk.Checkbutton(p3, text="自动分割", variable=self.var_lab_auto_split, command=self._lab_render).pack(side=tk.LEFT, padx=(12, 0))

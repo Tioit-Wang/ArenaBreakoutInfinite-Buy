@@ -39,4 +39,5 @@ py-modules = [
   "price_reader",
   "ocr_reader",
   "history_store",
+  "task_runner",
 ]
