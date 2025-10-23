@@ -226,6 +226,7 @@ def run_launch_flow(
     """Unified launcher flow used by both preview and task execution.
 
     Steps:
+    0) Fast-path: if 'home' or 'market' indicator already present on screen, skip launch
     1) Validate config + template files (exe_path, templates.home_indicator, templates.btn_launch)
     2) Start launcher process, catching errors
     3) Wait up to launcher_timeout_sec for 'btn_launch'
@@ -264,6 +265,39 @@ def run_launch_flow(
     home_key = "home_indicator"
     home_path = _tpl_path(home_key)
     launch_path = _tpl_path("btn_launch")
+    market_key = "market_indicator"
+    market_path = _tpl_path(market_key)
+    # If only market template is configured, alias it to satisfy legacy validation
+    try:
+        if (not home_path or not os.path.exists(home_path)) and (market_path and os.path.exists(market_path)):
+            home_path = market_path
+    except Exception:
+        pass
+    market_key = "market_indicator"
+    market_path = _tpl_path(market_key)
+
+    # Create screen ops early for fast-path check
+    screen = ScreenOps(cfg, step_delay=0.05)
+
+    # 0a) Extended fast-path: treat Home or Market as launched
+    try:
+        if (home_path and os.path.exists(home_path)) or (market_path and os.path.exists(market_path)):
+            if (home_path and os.path.exists(home_path) and screen.locate(home_key, timeout=0.4) is not None) or \
+               (market_path and os.path.exists(market_path) and screen.locate(market_key, timeout=0.4) is not None):
+                _log("[启动流程] 已检测到首页/市场标识，跳过启动。")
+                return LaunchResult(True, code="ok", details={"skipped": True, "reason": "home_or_market_present"})
+    except Exception:
+        pass
+
+    # 0) Fast-path: if home indicator is already visible, skip launching
+    try:
+        if home_path and os.path.exists(home_path):
+            if screen.locate(home_key, timeout=0.8) is not None:
+                _log("[启动流程] 已检测到首页标识，跳过启动。")
+                return LaunchResult(True, code="ok", details={"skipped": True, "reason": "home_present"})
+    except Exception:
+        # Ignore fast-path errors and continue with normal validation/launch
+        pass
 
     if not exe:
         return LaunchResult(False, code="missing_config", error="未配置启动器路径")
@@ -321,7 +355,7 @@ def run_launch_flow(
     # Wait for 'home_indicator'
     end_home = time.time() + max(1.0, float(startup_to))
     while time.time() < end_home:
-        if screen.locate(home_key, timeout=0.5) is not None:
+        if (screen.locate(home_key, timeout=0.3) is not None) or (screen.locate(market_key, timeout=0.3) is not None):
             return LaunchResult(True, code="ok")
         _sleep(0.3)
     return LaunchResult(False, code="home_timeout", error="等待首页标识超时")
@@ -342,6 +376,8 @@ class Buyer:
         self.on_log = on_log
         # Cache of list-item bounding boxes per goods.id to avoid repeated template matching
         self._pos_cache: Dict[str, Tuple[int, int, int, int]] = {}
+        # Consecutive open failures per goods to trigger recovery
+        self._open_fail_counts: Dict[str, int] = {}
 
         ca = cfg.get("currency_area") or {}
         self._cur_tpl = str(ca.get("template", ""))
@@ -365,6 +401,43 @@ class Buyer:
     # ----- helpers -----
     def _log(self, item_disp: str, purchased: str, msg: str) -> None:
         self.on_log(f"【{_now_label()}】【{item_disp}】【{purchased}】：{msg}")
+
+    def _move_cursor_top_right(self) -> None:
+        """Move cursor to a safe top-right area to avoid covering UI."""
+        try:
+            pg = self.screen._pg  # type: ignore[attr-defined]
+            sw, sh = pg.size()
+            x = max(0, int(sw) - 5)
+            y = max(0, 5)
+            try:
+                pg.moveTo(x, y)
+            except Exception:
+                try:
+                    pg.moveRel(10, -10)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _click_center_screen_once(self) -> None:
+        """Best-effort single click at screen center."""
+        try:
+            pg = self.screen._pg  # type: ignore[attr-defined]
+            sw, sh = pg.size()
+            pg.click(int(sw // 2), int(sh // 2))
+        except Exception:
+            pass
+        _sleep(0.02)
+
+    def _dismiss_success_overlay(self) -> None:
+        """Dismiss success popup: move away, click center, move away again."""
+        try:
+            self._move_cursor_top_right()
+            self._click_center_screen_once()
+            self._move_cursor_top_right()
+        except Exception:
+            # Fallback best-effort
+            self._click_center_screen_once()
 
     def _ensure_ready(self, startup_timeout_sec: float) -> bool:
         # If market present -> ready
@@ -420,17 +493,24 @@ class Buyer:
 
     # ----- navigation/search -----
     def _nav_to_search(self) -> bool:
-        # Try clicking Market (if visible)
+        # Already in Market view? Focus the search box directly
+        sbox = self.screen.locate("input_search", timeout=0.5)
+        if sbox is not None:
+            self.screen.click_center(sbox)
+            _sleep(0.03)
+            return True
+        # Otherwise click Market to enter
         box = self.screen.locate("btn_market", timeout=2.0)
         if box is None:
             return False
         self.screen.click_center(box)
-        _sleep(0.1)
+        _sleep(0.03)
         # Focus search box
         sbox = self.screen.locate("input_search", timeout=2.0)
         if sbox is None:
             return False
         self.screen.click_center(sbox)
+        _sleep(0.03)
         return True
 
     def _search(self, text: str) -> bool:
@@ -439,8 +519,78 @@ class Buyer:
         if btn is None:
             return False
         self.screen.click_center(btn)
-        # Explicit settle time for results rendering
-        _sleep(2.0)
+        # Clamp settle time to <= 30ms per requirement
+        _sleep(0.03)
+        return True
+
+    # Strict navigation: Home -> Market -> focus search -> type -> Search
+    def _nav_home_market_search(self, item_disp: str, purchased_str: str, query: str) -> bool:
+        # Step A: If detail page visible (btn_close), close it and wait 50ms
+        t0 = time.perf_counter()
+        closed_once = False
+        c = self.screen.locate("btn_close", timeout=0.2)
+        if c is not None:
+            self.screen.click_center(c)
+            _sleep(0.05)
+            closed_once = True
+        ms = int((time.perf_counter() - t0) * 1000.0)
+        if closed_once:
+            self._log(item_disp, purchased_str, f"检测到详情页，执行关闭 cost={ms}ms")
+
+        # Step B: proactively click Home if present
+        t1 = time.perf_counter()
+        h = self.screen.locate("btn_home", timeout=0.3)
+        if h is not None:
+            self.screen.click_center(h)
+            _sleep(0.03)
+            ms = int((time.perf_counter() - t1) * 1000.0)
+            self._log(item_disp, purchased_str, f"点击首页按钮 cost={ms}ms")
+        else:
+            ms = int((time.perf_counter() - t1) * 1000.0)
+            self._log(item_disp, purchased_str, f"未找到首页按钮，跳过(click) cost={ms}ms")
+
+        # Step C: click Market
+        t2 = time.perf_counter()
+        m = self.screen.locate("btn_market", timeout=1.0)
+        if m is None:
+            ms = int((time.perf_counter() - t2) * 1000.0)
+            self._log(item_disp, purchased_str, f"未找到市场按钮 cost={ms}ms")
+            return False
+        self.screen.click_center(m)
+        _sleep(0.03)
+        ms = int((time.perf_counter() - t2) * 1000.0)
+        self._log(item_disp, purchased_str, f"点击市场按钮 cost={ms}ms")
+
+        # Step D: focus search input
+        t3 = time.perf_counter()
+        sbox = self.screen.locate("input_search", timeout=1.0)
+        if sbox is None:
+            ms = int((time.perf_counter() - t3) * 1000.0)
+            self._log(item_disp, purchased_str, f"未找到搜索框 cost={ms}ms")
+            return False
+        self.screen.click_center(sbox)
+        _sleep(0.03)
+        ms = int((time.perf_counter() - t3) * 1000.0)
+        self._log(item_disp, purchased_str, f"聚焦搜索框 cost={ms}ms")
+
+        # Step E: type query
+        t4 = time.perf_counter()
+        self.screen.type_text(query or "", clear_first=True)
+        _sleep(0.03)
+        ms = int((time.perf_counter() - t4) * 1000.0)
+        self._log(item_disp, purchased_str, f"输入搜索内容 cost={ms}ms")
+
+        # Step F: click Search
+        t5 = time.perf_counter()
+        btn = self.screen.locate("btn_search", timeout=1.0)
+        if btn is None:
+            ms = int((time.perf_counter() - t5) * 1000.0)
+            self._log(item_disp, purchased_str, f"未找到搜索按钮 cost={ms}ms")
+            return False
+        self.screen.click_center(btn)
+        _sleep(0.03)
+        ms = int((time.perf_counter() - t5) * 1000.0)
+        self._log(item_disp, purchased_str, f"点击搜索 cost={ms}ms")
         return True
 
     def clear_pos(self, goods_id: Optional[str] = None) -> None:
@@ -952,7 +1102,217 @@ class Buyer:
         )
         return int(val)
 
+    def _continue_from_detail(
+        self,
+        goods: Goods,
+        task: Dict[str, Any],
+        purchased_so_far: int,
+        item_disp: str,
+        purchased_str: str,
+    ) -> Tuple[int, bool]:
+        # Read price from currency area
+        unit_price = self._read_avg_unit_price(goods, item_disp, purchased_str)
+        if unit_price is None or unit_price <= 0:
+            # Close detail if possible
+            c = self._detail_ui_cache.get("btn_close") or self.screen.locate(
+                "btn_close", timeout=0.3
+            )
+            if c is not None:
+                self.screen.click_center(c)
+            try:
+                self._detail_ui_cache.clear()
+            except Exception:
+                self._detail_ui_cache = {}
+            try:
+                self._detail_ui_cache.clear()
+            except Exception:
+                self._detail_ui_cache = {}
+            try:
+                self._detail_ui_cache.clear()
+            except Exception:
+                self._detail_ui_cache = {}
+                try:
+                    self._detail_ui_cache.clear()
+                except Exception:
+                    self._detail_ui_cache = {}
+                try:
+                    self._detail_ui_cache.clear()
+                except Exception:
+                    self._detail_ui_cache = {}
+            self._log(item_disp, purchased_str, "ƽ������ʶ��ʧ�ܣ��ѹر�����")
+            return 0, True
+
+        thr = int(task.get("price_threshold", 0) or 0)
+        prem = float(task.get("price_premium_pct", 0.0) or 0.0)
+        limit = thr + int(round(thr * max(0.0, prem) / 100.0)) if thr > 0 else 0
+        restock = int(task.get("restock_price", 0) or 0)
+        # Log price and thresholds
+        self._log(
+            item_disp,
+            purchased_str,
+            f"ƽ������={unit_price}����ֵ��{limit}(+{int(prem)}%)",
+        )
+        # Determine quantity
+        target_total = int(task.get("target_total", 0) or 0)
+        max_per_order = max(1, int(task.get("max_per_order", 120) or 120))
+        remain = (
+            max(0, target_total - purchased_so_far)
+            if target_total > 0
+            else max_per_order
+        )
+
+        # Base quantity rules
+        q = 1
+        # Restock path
+        if restock > 0 and unit_price <= restock:
+            if (goods.big_category or "").strip() == "��ҩ":
+                # Use Max button if present
+                b = self._detail_ui_cache.get("btn_max") or self.screen.locate(
+                    "btn_max", timeout=0.3
+                )
+                if b is not None:
+                    self.screen.click_center(b)
+                    q = min(120, max_per_order, max(1, remain))
+                else:
+                    q = min(120, max_per_order, max(1, remain))
+            else:
+                # Non-ammo: set 5 via quantity input if configured
+                pt = (self.cfg.get("points") or {}).get("quantity_input") or {}
+                try:
+                    x, y = int(pt.get("x", 0)), int(pt.get("y", 0))
+                    if x > 0 and y > 0:
+                        self._pg.click(x, y)  # type: ignore[attr-defined]
+                        _sleep(0.02)
+                        self.screen.type_text("5", clear_first=True)
+                        q = min(5, max_per_order, max(1, remain))
+                except Exception:
+                    q = min(5, max_per_order, max(1, remain))
+        else:
+            # Use default or 1 (we don't change quantity by default)
+            q = min(1, max_per_order, max(1, remain))
+
+        # Threshold check (if thr=0 -> always buy)
+        ok_to_buy = (limit <= 0) or (unit_price <= limit)
+        if not ok_to_buy:
+            # Close detail and retry later
+            c = self._detail_ui_cache.get("btn_close") or self.screen.locate(
+                "btn_close", timeout=0.3
+            )
+            if c is not None:
+                self.screen.click_center(c)
+                try:
+                    self._detail_ui_cache.clear()
+                except Exception:
+                    self._detail_ui_cache = {}
+            return 0, True
+
+        # Submit
+        # Halve wait here as well to reduce intermediate delays
+        b = self._detail_ui_cache.get("btn_buy") or self.screen.locate(
+            "btn_buy", timeout=0.3
+        )
+        if b is None:
+            c = self._detail_ui_cache.get("btn_close") or self.screen.locate(
+                "btn_close", timeout=0.3
+            )
+            if c is not None:
+                self.screen.click_center(c)
+            self._log(item_disp, purchased_str, "δ�ҵ��������ύ��ť")
+            return 0, True
+        self.screen.click_center(b)
+
+        # Result polling (300–600ms loop, up to ~1.2s)
+        t_end = time.time() + 1.2
+        got_ok = False
+        found_fail = False
+        while time.time() < t_end:
+            if self.screen.locate("buy_ok", timeout=0.0) is not None:
+                got_ok = True
+                break
+            if self.screen.locate("buy_fail", timeout=0.0) is not None:
+                found_fail = True
+            _sleep(0.1)
+
+        if got_ok:
+            # Dismiss success popup first (required before close)
+            self._dismiss_success_overlay()
+            if restock > 0 and unit_price <= restock:
+                self._log(
+                    item_disp,
+                    f"{purchased_so_far + q}/{target_total}",
+                    f"购买成功(+{q})，补货模式：保留详情，继续",
+                )
+                return q, True
+            # Close detail
+            c = self._detail_ui_cache.get("btn_close") or self.screen.locate(
+                "btn_close", timeout=0.5
+            )
+            if c is not None:
+                self.screen.click_center(c)
+            self._log(
+                item_disp,
+                f"{purchased_so_far + q}/{target_total}",
+                f"����ɹ�(+{q})���ѹر�����",
+            )
+            return q, True
+        elif found_fail:
+            c = self._detail_ui_cache.get("btn_close") or self.screen.locate(
+                "btn_close", timeout=0.3
+            )
+            if c is not None:
+                self.screen.click_center(c)
+            self._log(item_disp, purchased_str, "����ʧ�ܣ��ѹر�����")
+            return 0, True
+        else:
+            # Unknown: close and continue
+            c = self._detail_ui_cache.get("btn_close") or self.screen.locate(
+                "btn_close", timeout=0.3
+            )
+            if c is not None:
+                self.screen.click_center(c)
+            self._log(item_disp, purchased_str, "���δ֪���ѹر�����")
+            return 0, True
+
     # ----- buy flow -----
+
+    def _open_detail_with_recovery(
+        self,
+        goods: Goods,
+        *,
+        skip_search: bool,
+        item_disp: str,
+        purchased_str: str,
+    ) -> Tuple[bool, int, str]:
+        # If already in detail, fast-path (require fresh detection of both)
+        b0 = self.screen.locate("btn_buy", timeout=0.2)
+        c0 = self.screen.locate("btn_close", timeout=0.2)
+        if (b0 is not None) and (c0 is not None):
+            try:
+                self._detail_ui_cache["btn_buy"] = b0  # type: ignore[index]
+            except Exception:
+                pass
+            try:
+                self._detail_ui_cache["btn_close"] = c0  # type: ignore[index]
+            except Exception:
+                pass
+            return True, 0, "resume"
+
+        ok_open, cost_ms, src = self._open_goods_detail(
+            goods, prefer_cached=bool(skip_search)
+        )
+        if ok_open:
+            return ok_open, cost_ms, src
+        # Try one recovery search when image matching fails
+        query = (goods.search_name or "").strip()
+        try:
+            if query and self._nav_to_search() and self._search(query):
+                ok2, cost_ms2, src2 = self._open_goods_detail(
+                    goods, prefer_cached=False
+                )
+                return ok2, cost_ms2, src2
+        except Exception:
+            pass
+        return ok_open, cost_ms, src
     def execute_once(
         self,
         goods: Goods,
@@ -969,6 +1329,27 @@ class Buyer:
         item_disp = goods.name or goods.search_name or str(task.get("item_name", ""))
         target_total = int(task.get("target_total", 0) or 0)
         purchased_str = f"{purchased_so_far}/{target_total}"
+        # Recovery-fast path: 若仍停留在详情页，则直接从详情页继续
+        try:
+            # Require fresh detection of BOTH buy and close to avoid false positives
+            b0 = self.screen.locate("btn_buy", timeout=0.2)
+            c0 = self.screen.locate("btn_close", timeout=0.2)
+            if (b0 is not None) and (c0 is not None):
+                # Warm up cache (buy/close) for downstream steps
+                try:
+                    self._detail_ui_cache["btn_buy"] = b0  # type: ignore[index]
+                except Exception:
+                    pass
+                try:
+                    self._detail_ui_cache["btn_close"] = c0  # type: ignore[index]
+                except Exception:
+                    pass
+                self._log(item_disp, purchased_str, "检测到仍在详情页，直接继续")
+                return self._continue_from_detail(
+                    goods, task, purchased_so_far, item_disp, purchased_str
+                )
+        except Exception:
+            pass
         # Optionally perform navigation + search if requested
         if not skip_search:
             if not self._nav_to_search():
@@ -986,9 +1367,9 @@ class Buyer:
                 purchased_str,
                 f"匹配 btn_market → input_search({query}) → btn_search 成功",
             )
-        # Open detail by goods image (prefer cached pos when skipping search)
-        ok_open, cost_ms, src = self._open_goods_detail(
-            goods, prefer_cached=bool(skip_search)
+        # Open detail with recovery (resume/detail, or re-search once on failure)
+        ok_open, cost_ms, src = self._open_detail_with_recovery(
+            goods, skip_search=bool(skip_search), item_disp=item_disp, purchased_str=purchased_str
         )
         if not ok_open:
             if src == "cached":
@@ -1128,17 +1509,26 @@ class Buyer:
 
         # Result polling (300–600ms loop, up to ~1.2s)
         t_end = time.time() + 1.2
-        got = "unknown"
+        got_ok = False
+        found_fail = False
         while time.time() < t_end:
             if self.screen.locate("buy_ok", timeout=0.0) is not None:
-                got = "ok"
+                got_ok = True
                 break
             if self.screen.locate("buy_fail", timeout=0.0) is not None:
-                got = "fail"
-                break
+                found_fail = True
             _sleep(0.1)
 
-        if got == "ok":
+        if got_ok:
+            # Dismiss success popup first (required before close)
+            self._dismiss_success_overlay()
+            if restock > 0 and unit_price <= restock:
+                self._log(
+                    item_disp,
+                    f"{purchased_so_far + q}/{target_total}",
+                    f"购买成功(+{q})，补货模式：保留详情，继续",
+                )
+                return q, True
             # Close detail
             c = self._detail_ui_cache.get("btn_close") or self.screen.locate(
                 "btn_close", timeout=0.5
@@ -1151,7 +1541,7 @@ class Buyer:
                 f"购买成功(+{q})，已关闭详情",
             )
             return q, True
-        elif got == "fail":
+        elif found_fail:
             c = self._detail_ui_cache.get("btn_close") or self.screen.locate(
                 "btn_close", timeout=0.3
             )
