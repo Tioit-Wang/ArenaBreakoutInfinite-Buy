@@ -14,7 +14,7 @@ try:
     ensure_pyautogui_confidence_compat()
 except Exception:
     pass
-from task_runner import TaskRunner
+from task_runner import TaskRunner, run_launch_flow
 
 
 class _RegionSelector:
@@ -442,6 +442,9 @@ class App(tk.Tk):
             "退出确认按钮": "btn_exit_confirm",
             "首页按钮": "btn_home",
             "市场按钮": "btn_market",
+            # 新增：标识模板（用于页面就绪/所在页判断）
+            "首页标识模板": "home_indicator",
+            "市场标识模板": "market_indicator",
             "市场搜索栏": "input_search",
             "市场搜索按钮": "btn_search",
             "购买按钮": "btn_buy",
@@ -458,6 +461,8 @@ class App(tk.Tk):
             "btn_settings": "btn_settings",
             "btn_exit": "btn_exit",
             "btn_exit_confirm": "btn_exit_confirm",
+            "home_indicator": "home_indicator",
+            "market_indicator": "market_indicator",
             "btn_home": "btn_home",
             "btn_market": "btn_market",
             "input_search": "input_search",
@@ -1665,10 +1670,19 @@ class App(tk.Tk):
         game_cfg = self.cfg.get("game", {}) if isinstance(self.cfg.get("game"), dict) else {}
         self.var_game_path = tk.StringVar(value=str(game_cfg.get("exe_path", "")))
         self.var_game_args = tk.StringVar(value=str(game_cfg.get("launch_args", "")))
+        # New tolerant-launch variables
         try:
-            self.var_game_timeout = tk.IntVar(value=int(game_cfg.get("startup_timeout_sec", 120)))
+            self.var_game_launcher_to = tk.IntVar(value=int(game_cfg.get("launcher_timeout_sec", 60)))
         except Exception:
-            self.var_game_timeout = tk.IntVar(value=120)
+            self.var_game_launcher_to = tk.IntVar(value=60)
+        try:
+            self.var_game_launch_delay = tk.IntVar(value=int(game_cfg.get("launch_click_delay_sec", 20)))
+        except Exception:
+            self.var_game_launch_delay = tk.IntVar(value=20)
+        try:
+            self.var_game_timeout = tk.IntVar(value=int(game_cfg.get("startup_timeout_sec", 180)))
+        except Exception:
+            self.var_game_timeout = tk.IntVar(value=180)
         box_game = ttk.LabelFrame(outer, text="游戏启动")
         box_game.pack(fill=tk.X, padx=8, pady=(8, 0))
         ttk.Label(box_game, text="启动路径").grid(row=0, column=0, sticky="e", padx=4, pady=6)
@@ -1703,24 +1717,63 @@ class App(tk.Tk):
             self.var_game_args.trace_add("write", lambda *_: self._schedule_autosave())
         except Exception:
             pass
-        ttk.Label(box_game, text="启动检测超时(秒)").grid(row=2, column=0, sticky="e", padx=4, pady=(0,6))
+        # Horizontal layout row for 3 timing fields
+        frm_timing = ttk.Frame(box_game)
+        frm_timing.grid(row=2, column=0, columnspan=4, sticky="we", padx=2, pady=(0, 6))
+        # 启动检测超时(秒)
+        ttk.Label(frm_timing, text="启动检测超时(秒)").grid(row=0, column=0, sticky="e", padx=(0,4))
         try:
-            sp_to = ttk.Spinbox(box_game, from_=10, to=600, increment=10, textvariable=self.var_game_timeout, width=10)
+            sp_to = ttk.Spinbox(frm_timing, from_=10, to=600, increment=10, textvariable=self.var_game_timeout, width=10)
         except Exception:
-            sp_to = tk.Spinbox(box_game, from_=10, to=600, increment=10, textvariable=self.var_game_timeout, width=10)
-        sp_to.grid(row=2, column=1, sticky="w", padx=4, pady=(0,6))
-        # Test buttons
-        self.btn_test_launch = ttk.Button(box_game, text="预览启动", command=self._test_game_launch)
-        self.btn_test_launch.grid(row=2, column=2, padx=6, pady=(0,6))
-        self.btn_test_exit = ttk.Button(box_game, text="预览退出", command=self._test_game_exit)
-        self.btn_test_exit.grid(row=2, column=3, padx=6, pady=(0,6))
+            sp_to = tk.Spinbox(frm_timing, from_=10, to=600, increment=10, textvariable=self.var_game_timeout, width=10)
+        sp_to.grid(row=0, column=1, sticky="w", padx=(0,10))
+        # 启动器检测超时(秒)
+        ttk.Label(frm_timing, text="启动器检测超时(秒)").grid(row=0, column=2, sticky="e", padx=(0,4))
+        try:
+            sp_launcher = ttk.Spinbox(frm_timing, from_=10, to=600, increment=10, textvariable=self.var_game_launcher_to, width=10)
+        except Exception:
+            sp_launcher = tk.Spinbox(frm_timing, from_=10, to=600, increment=10, textvariable=self.var_game_launcher_to, width=10)
+        sp_launcher.grid(row=0, column=3, sticky="w", padx=(0,10))
+        # 启动点击延时(秒)
+        ttk.Label(frm_timing, text="启动点击延时(秒)").grid(row=0, column=4, sticky="e", padx=(0,4))
+        try:
+            sp_delay = ttk.Spinbox(frm_timing, from_=0, to=120, increment=5, textvariable=self.var_game_launch_delay, width=10)
+        except Exception:
+            sp_delay = tk.Spinbox(frm_timing, from_=0, to=120, increment=5, textvariable=self.var_game_launch_delay, width=10)
+        sp_delay.grid(row=0, column=5, sticky="w", padx=(0,0))
+        # Autosave on value change
+        try:
+            self.var_game_timeout.trace_add("write", lambda *_: self._schedule_autosave())
+            self.var_game_launcher_to.trace_add("write", lambda *_: self._schedule_autosave())
+            self.var_game_launch_delay.trace_add("write", lambda *_: self._schedule_autosave())
+        except Exception:
+            pass
+        for c in range(0, 6):
+            try:
+                frm_timing.columnconfigure(c, weight=0)
+            except Exception:
+                pass
+        # Test buttons bar (full-width row to avoid being clipped/overlapped)
+        btn_bar = ttk.Frame(box_game)
+        # Place after template rows (which occupy rows 3..6). Use row=7 to avoid overlap.
+        btn_bar.grid(row=7, column=0, columnspan=4, sticky="we", padx=4, pady=(6, 8))
+        try:
+            btn_bar.columnconfigure(0, weight=0)
+            btn_bar.columnconfigure(1, weight=0)
+            btn_bar.columnconfigure(2, weight=1)  # spacer for right-side additions if needed
+        except Exception:
+            pass
+        self.btn_test_launch = ttk.Button(btn_bar, text="预览启动", command=self._test_game_launch)
+        self.btn_test_launch.pack(side=tk.LEFT, padx=(0, 8))
+        self.btn_test_exit = ttk.Button(btn_bar, text="预览退出", command=self._test_game_exit)
+        self.btn_test_exit.pack(side=tk.LEFT)
         # Layout: make entry column flexible
         try:
             box_game.columnconfigure(1, weight=1)
         except Exception:
             pass
 
-        # Template manager
+        # Template manager（新增二级分组：标识模板）
         box_tpl = ttk.LabelFrame(outer, text="模板管理")
         box_tpl.pack(fill=tk.X, padx=8, pady=8)
 
@@ -1837,6 +1890,61 @@ class App(tk.Tk):
         except Exception:
             pass
 
+        # 二级分组 A：标识模板
+        box_ident = ttk.LabelFrame(box_tpl, text="标识模板")
+        try:
+            box_ident.grid(row=0, column=0, sticky="we", padx=6, pady=(6, 4))
+        except Exception:
+            # Fallback to pack if grid not available (shouldn't happen here)
+            box_ident.pack(fill=tk.X, padx=6, pady=(6, 4))
+
+        # 渲染【首页标识模板】【市场标识模板】（底层键：home_indicator / market_indicator）
+        try:
+            _tpls = self.cfg.get("templates", {}) if isinstance(self.cfg.get("templates"), dict) else {}
+        except Exception:
+            _tpls = {}
+        try:
+            home_data = (_tpls.get("home_indicator", {}) if isinstance(_tpls, dict) else {}) or {}
+        except Exception:
+            home_data = {}
+        try:
+            market_data = (
+                (_tpls.get("market_indicator", {}) if isinstance(_tpls, dict) else {})
+            ) or {}
+        except Exception:
+            market_data = {}
+
+        r_id_home = TemplateRow(
+            box_ident,
+            "首页标识模板",
+            home_data,
+            on_test=test_match,
+            on_capture=capture_into_row,
+            on_preview=self._preview_image,
+            on_change=self._schedule_autosave,
+        )
+        r_id_home.grid(row=0, column=0, sticky="we", padx=6, pady=2)
+        self.template_rows["home_indicator"] = r_id_home
+
+        r_id_market = TemplateRow(
+            box_ident,
+            "市场标识模板",
+            market_data,
+            on_test=test_match,
+            on_capture=capture_into_row,
+            on_preview=self._preview_image,
+            on_change=self._schedule_autosave,
+        )
+        r_id_market.grid(row=1, column=0, sticky="we", padx=6, pady=2)
+        self.template_rows["market_indicator"] = r_id_market
+
+        # 二级分组 B：其他模板（原通用列表）
+        box_tpl_general = ttk.LabelFrame(box_tpl, text="其他模板")
+        try:
+            box_tpl_general.grid(row=1, column=0, sticky="we", padx=6, pady=(4, 6))
+        except Exception:
+            box_tpl_general.pack(fill=tk.X, padx=6, pady=(4, 6))
+
         # render rows (display Chinese name for known ASCII keys)
         rowc = 0
         DISPLAY_NAME = {
@@ -1844,6 +1952,8 @@ class App(tk.Tk):
             "btn_settings": "设置按钮",
             "btn_exit": "退出按钮",
             "btn_exit_confirm": "退出确认按钮",
+            "home_indicator": "首页标识模板",
+            "market_indicator": "市场标识模板",
             "btn_home": "首页按钮",
             "btn_market": "市场按钮",
             "input_search": "市场搜索栏",
@@ -1858,14 +1968,20 @@ class App(tk.Tk):
             "btn_refresh": "刷新按钮",
             "btn_back": "返回按钮",
         }
-        _skip_in_general = {"btn_launch", "btn_settings", "btn_exit", "btn_exit_confirm", "qty_minus", "qty_plus"}
+        # 从“其他模板”列表中排除：已在其他分组中出现的键
+        _skip_in_general = {
+            "btn_launch", "btn_settings", "btn_exit", "btn_exit_confirm",
+            "qty_minus", "qty_plus",
+            # 新增：标识模板在单独分组中维护
+            "home_indicator", "market_indicator",
+        }
         for key, data in self.cfg.get("templates", {}).items():
             if str(key) in _skip_in_general:
                 # 已在“游戏启动”分组渲染
                 continue
             disp = DISPLAY_NAME.get(key, key)
             r = TemplateRow(
-                box_tpl,
+                box_tpl_general,
                 disp,
                 data,
                 on_test=test_match,
@@ -2175,9 +2291,24 @@ class App(tk.Tk):
         self.cfg["game"]["exe_path"] = (self.var_game_path.get() or "").strip()
         self.cfg["game"]["launch_args"] = (self.var_game_args.get() or "").strip()
         try:
-            self.cfg["game"]["startup_timeout_sec"] = int(self.var_game_timeout.get() or 120)
+            ready_to = int(self.var_game_timeout.get() or 180)
         except Exception:
-            self.cfg["game"]["startup_timeout_sec"] = 120
+            ready_to = 180
+        self.cfg["game"]["startup_timeout_sec"] = ready_to
+        # New tolerant-launch fields
+        try:
+            self.cfg["game"]["launcher_timeout_sec"] = int(self.var_game_launcher_to.get() or 60)
+        except Exception:
+            self.cfg["game"]["launcher_timeout_sec"] = 60
+        try:
+            self.cfg["game"]["launch_click_delay_sec"] = int(self.var_game_launch_delay.get() or 20)
+        except Exception:
+            self.cfg["game"]["launch_click_delay_sec"] = 20
+        # 移除 game_ready_timeout_sec（不再使用）
+        try:
+            self.cfg["game"].pop("game_ready_timeout_sec", None)
+        except Exception:
+            pass
 
         # Flush ROI config
         self.cfg.setdefault("price_roi", {})
@@ -2743,7 +2874,6 @@ class App(tk.Tk):
         self._test_launch_running = True
         try:
             self.btn_test_launch.configure(state=tk.DISABLED)
-            # Disable exit preview during launch preview
             self.btn_test_exit.configure(state=tk.DISABLED)
         except Exception:
             pass
@@ -2753,172 +2883,19 @@ class App(tk.Tk):
         except Exception:
             pass
 
-        def _tpl_path_conf(key: str) -> tuple[str, float]:
-            try:
-                tpls = self.cfg.get("templates", {}) if isinstance(self.cfg.get("templates"), dict) else {}
-                d = tpls.get(key, {}) if isinstance(tpls, dict) else {}
-                p = str((d or {}).get("path", ""))
-                if not p:
-                    p = os.path.join("images", f"{key}.png")
-                try:
-                    conf = float((d or {}).get("confidence", 0.85))
-                except Exception:
-                    conf = 0.85
-                return p, conf
-            except Exception:
-                return os.path.join("images", f"{key}.png"), 0.85
-
         def _run():
-            ok = False
-            try:
-                self._append_log("[预览启动] 依靠启动路径启动 → 180s内识别‘启动按钮’并点击 → 再等180s识别‘市场按钮’…")
-            except Exception:
-                pass
-            # 1) 通过启动路径启动
-            try:
-                import subprocess, shlex  # type: ignore
-            except Exception:
-                subprocess = None  # type: ignore
-            game = self.cfg.get("game", {}) if isinstance(self.cfg.get("game"), dict) else {}
-            exe_path = str((game.get("exe_path", "") or "").strip())
-            args = str((game.get("launch_args", "") or "").strip())
-            if not exe_path or not os.path.exists(exe_path):
-                def _finish_noexe():
-                    try:
-                        messagebox.showwarning("预览启动", "未配置有效的启动路径，无法执行预览启动。")
-                    finally:
-                        try:
-                            self.btn_test_launch.configure(state=tk.NORMAL)
-                            self.btn_test_exit.configure(state=tk.NORMAL)
-                        except Exception:
-                            pass
-                        self._test_launch_running = False
+            def _on_log(s: str) -> None:
                 try:
-                    self.after(0, _finish_noexe)
-                except Exception:
-                    _finish_noexe()
-                return
-            try:
-                cmd: list[str]
-                if args:
-                    try:
-                        cmd = [exe_path] + shlex.split(args, posix=False)
-                    except Exception:
-                        cmd = [exe_path] + args.split()
-                else:
-                    cmd = [exe_path]
-                cwd = os.path.dirname(exe_path) or None
-                creationflags = 0
-                if os.name == "nt":
-                    try:
-                        import subprocess as _sp  # type: ignore
-                        creationflags = getattr(_sp, "DETACHED_PROCESS", 0) | getattr(_sp, "CREATE_NEW_PROCESS_GROUP", 0)
-                    except Exception:
-                        creationflags = 0
-                if subprocess is not None:
-                    subprocess.Popen(cmd, cwd=cwd, creationflags=creationflags)  # noqa: S603,S607
-                try:
-                    self._append_log(f"[预览启动] 已执行: {exe_path} {' '+args if args else ''}")
+                    self._append_log(s)
                 except Exception:
                     pass
-            except Exception as e:
+            res = run_launch_flow(self.cfg, on_log=_on_log)
+            def _finish():
                 try:
-                    self._append_log(f"[预览启动] 启动失败: {e}")
-                except Exception:
-                    pass
-                err_msg = str(e)
-                def _finish_fail(msg=err_msg):
-                    try:
-                        messagebox.showerror("预览启动", f"启动失败: {msg}")
-                    finally:
-                        try:
-                            self.btn_test_launch.configure(state=tk.NORMAL)
-                            self.btn_test_exit.configure(state=tk.NORMAL)
-                        except Exception:
-                            pass
-                        self._test_launch_running = False
-                try:
-                    self.after(0, _finish_fail)
-                except Exception:
-                    _finish_fail(err_msg)
-                return
-
-            # 2) 180s内识别‘启动按钮’并点击一次（若出现）
-            clicked_launch = False
-            try:
-                import pyautogui  # type: ignore
-            except Exception:
-                pyautogui = None  # type: ignore
-            l_path, l_conf = _tpl_path_conf("btn_launch")
-            end1 = time.time() + 180
-            while time.time() < end1 and not clicked_launch:
-                if pyautogui is None or not os.path.exists(l_path):
-                    break
-                center = None
-                try:
-                    center = pyautogui.locateCenterOnScreen(l_path, confidence=float(l_conf))
-                except Exception:
-                    center = None
-                if center is None:
-                    try:
-                        box = pyautogui.locateOnScreen(l_path, confidence=float(l_conf))
-                    except Exception:
-                        box = None
-                    if box:
-                        try:
-                            x = int(getattr(box, 'left', 0) + getattr(box, 'width', 0) // 2)
-                            y = int(getattr(box, 'top', 0) + getattr(box, 'height', 0) // 2)
-                            pyautogui.click(x, y)
-                            clicked_launch = True
-                            try:
-                                self._append_log("[预览启动] 已点击启动按钮。")
-                            except Exception:
-                                pass
-                            break
-                        except Exception:
-                            pass
-                else:
-                    try:
-                        pyautogui.click(int(getattr(center, 'x', 0)), int(getattr(center, 'y', 0)))
-                        clicked_launch = True
-                        try:
-                            self._append_log("[预览启动] 已点击启动按钮。")
-                        except Exception:
-                            pass
-                        break
-                    except Exception:
-                        pass
-                time.sleep(1.0)
-
-            # 3) 再等待180s，识别‘市场按钮’
-            m_path, m_conf = _tpl_path_conf("btn_market")
-            found_market = False
-            end2 = time.time() + 180
-            while time.time() < end2:
-                if pyautogui is None or not os.path.exists(m_path):
-                    break
-                try:
-                    if pyautogui.locateOnScreen(m_path, confidence=float(m_conf)):
-                        found_market = True
-                        break
-                except Exception:
-                    pass
-                time.sleep(1.0)
-
-            ok = bool(found_market)
-            def _finish_done():
-                try:
-                    if ok:
-                        messagebox.showinfo("预览启动", "已检测到市场按钮，启动流程验证成功。")
+                    if res.ok:
+                        messagebox.showinfo("预览启动", "已检测到首页标识，启动流程验证成功。")
                     else:
-                        # 明确指明可能需要配置启动按钮模板或市场按钮模板
-                        tips = []
-                        if not os.path.exists(m_path):
-                            tips.append("请在模板管理中设置‘市场按钮’模板")
-                        if not clicked_launch and not os.path.exists(l_path):
-                            tips.append("请在‘游戏启动’中设置‘启动按钮’模板")
-                        tip_text = ("；".join(tips)) if tips else "请检查模板/路径/超时设置"
-                        messagebox.showwarning("预览启动", f"未检测到市场按钮，启动流程未完成。{tip_text}")
+                        messagebox.showwarning("预览启动", f"启动失败：{res.error or res.code}")
                 finally:
                     try:
                         self.btn_test_launch.configure(state=tk.NORMAL)
@@ -2927,9 +2904,9 @@ class App(tk.Tk):
                         pass
                     self._test_launch_running = False
             try:
-                self.after(0, _finish_done)
+                self.after(0, _finish)
             except Exception:
-                _finish_done()
+                _finish()
 
         try:
             t = threading.Thread(target=_run, name="test-launch", daemon=True)

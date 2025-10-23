@@ -9,8 +9,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "exe_path": "",
         # 启动参数（可选），留空则不传
         "launch_args": "",
-        # 启动后等待“市场按钮”模板出现的超时（秒）
-        "startup_timeout_sec": 120,
+        # 启动后等待“首页标识”出现的超时（秒）
+        "startup_timeout_sec": 180,
     },
     # Umi-OCR HTTP 服务 (可选)
     "umi_ocr": {
@@ -30,8 +30,12 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "templates": {
         # template-key -> { path, confidence }
         "btn_launch": {"path": os.path.join("images", "btn_launch.png"), "confidence": 0.85},
-        "btn_home": {"path": os.path.join("images", "btn_home.png"), "confidence": 0.85},
+        # 首页标识模板（用于状态判定，不用于点击）
+        "home_indicator": {"path": os.path.join("images", "home_indicator.png"), "confidence": 0.85},
+        # 市场标识模板（用于状态判定，不用于点击）
+        "market_indicator": {"path": os.path.join("images", "market_indicator.png"), "confidence": 0.85},
         "btn_market": {"path": os.path.join("images", "btn_market.png"), "confidence": 0.85},
+        "btn_home": {"path": os.path.join("images", "btn_home.png"), "confidence": 0.85},
         "input_search": {"path": os.path.join("images", "input_search.png"), "confidence": 0.85},
         "btn_search": {"path": os.path.join("images", "btn_search.png"), "confidence": 0.85},
         "btn_buy": {"path": os.path.join("images", "btn_buy.png"), "confidence": 0.88},
@@ -196,6 +200,10 @@ def load_config(
         # templates
         tmap = {
             "启动按钮": "btn_launch",
+            # 标识模板（新的规范键）：
+            "首页标识模板": "home_indicator",
+            "市场标识模板": "market_indicator",
+            # 按钮：
             "首页按钮": "btn_home",
             "市场按钮": "btn_market",
             "市场搜索栏": "input_search",
@@ -208,6 +216,10 @@ def load_config(
             # quantity pair
             "数量+": "qty_plus",
             "数量-": "qty_minus",
+            # ASCII keys (ensure remain stable)
+            "btn_home": "btn_home",
+            "home_indicator": "home_indicator",
+            "market_indicator": "market_indicator",
         }
         tpl = conf.get("templates")
         if isinstance(tpl, dict):
@@ -229,6 +241,22 @@ def load_config(
 
     if normalize_keys and _normalize_ascii_keys(cfg):
         changed = True
+    # Ensure new tolerant-launch defaults are present even for older config files
+    try:
+        g = cfg.setdefault("game", {}) if isinstance(cfg.get("game"), dict) else {}
+        if isinstance(g, dict):
+            g.setdefault("launcher_timeout_sec", 60)
+            g.setdefault("launch_click_delay_sec", 20)
+    except Exception:
+        pass
+    # Remove deprecated field 'game_ready_timeout_sec'
+    try:
+        g = cfg.get("game") or {}
+        if isinstance(g, dict) and "game_ready_timeout_sec" in g:
+            g.pop("game_ready_timeout_sec", None)
+            changed = True
+    except Exception:
+        pass
     if changed:
         try:
             save_config(cfg, path)
