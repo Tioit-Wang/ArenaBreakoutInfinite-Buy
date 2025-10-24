@@ -3709,6 +3709,13 @@ class App(tk.Tk):
         # Log
         logf = ttk.LabelFrame(outer, text="运行日志")
         logf.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        # 日志等级选择
+        topbar = ttk.Frame(logf)
+        topbar.pack(fill=tk.X, padx=6, pady=(6, 0))
+        ttk.Label(topbar, text="日志等级").pack(side=tk.LEFT)
+        self.run_log_level_var = tk.StringVar(value="info")
+        run_level = ttk.Combobox(topbar, width=8, state="readonly", values=["debug", "info", "error"], textvariable=self.run_log_level_var)
+        run_level.pack(side=tk.LEFT, padx=6)
         self.txt = tk.Text(logf, height=12, wrap="word")
         self.txt.pack(fill=tk.BOTH, expand=True)
         self.txt.configure(state=tk.DISABLED)
@@ -3800,6 +3807,20 @@ class App(tk.Tk):
         # Log area
         logf = ttk.LabelFrame(frm, text="执行日志")
         logf.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
+        # 日志等级选择（执行日志）
+        topbar = ttk.Frame(logf)
+        topbar.pack(fill=tk.X, padx=6, pady=(6, 0))
+        ttk.Label(topbar, text="日志等级").pack(side=tk.LEFT)
+        self.exec_log_level_var = tk.StringVar(value="info")
+        exec_level = ttk.Combobox(topbar, width=8, state="readonly", values=["debug", "info", "error"], textvariable=self.exec_log_level_var)
+        exec_level.pack(side=tk.LEFT, padx=6)
+        try:
+            exec_level.bind(
+                "<<ComboboxSelected>>",
+                lambda e: (getattr(self, "_runner", None) and self._runner.set_log_level(self.exec_log_level_var.get())),
+            )
+        except Exception:
+            pass
         self.exec_txt = tk.Text(logf, height=18, wrap="word")
         self.exec_txt.pack(fill=tk.BOTH, expand=True)
         self.exec_txt.configure(state=tk.DISABLED)
@@ -3811,6 +3832,13 @@ class App(tk.Tk):
             import threading as _th
             if _th.current_thread() is not _th.main_thread():
                 self.after(0, self._append_exec_log, s)
+                return
+        except Exception:
+            pass
+        # 过滤：根据当前选择的日志等级
+        try:
+            lvl = self._parse_log_level(s)
+            if self._level_value(lvl) < self._level_value(self.exec_log_level_var.get() if hasattr(self, 'exec_log_level_var') else 'info'):
                 return
         except Exception:
             pass
@@ -3889,6 +3917,11 @@ class App(tk.Tk):
             on_log=self._append_exec_log,
             on_task_update=self._on_task_exec_update,
         )
+        # 同步日志等级到运行器（用于运行器侧过滤）
+        try:
+            self._runner.set_log_level(self.exec_log_level_var.get())
+        except Exception:
+            pass
         self._append_exec_log("【%s】【全局】【-】：开始执行" % time.strftime("%H:%M:%S"))
         self._runner.start()
         self._update_exec_controls()
@@ -5378,11 +5411,35 @@ class App(tk.Tk):
             # 回退：继续尝试直接写入（不推荐，但避免静默失败）
             pass
 
+        # 过滤：根据“运行日志”选择的等级
+        try:
+            lvl = self._parse_log_level(s)
+            if self._level_value(lvl) < self._level_value(self.run_log_level_var.get() if hasattr(self, 'run_log_level_var') else 'info'):
+                return
+        except Exception:
+            pass
         with self._log_lock:
             self.txt.configure(state=tk.NORMAL)
             self.txt.insert(tk.END, time.strftime("[%H:%M:%S] ") + s + "\n")
             self.txt.see(tk.END)
             self.txt.configure(state=tk.DISABLED)
+
+    # 日志等级解析与比较
+    def _parse_log_level(self, s: str) -> str:
+        try:
+            if "【ERROR】" in s:
+                return "error"
+            if "【DEBUG】" in s:
+                return "debug"
+            if "【INFO】" in s:
+                return "info"
+        except Exception:
+            pass
+        return "info"
+
+    def _level_value(self, name: str) -> int:
+        m = {"debug": 10, "info": 20, "error": 40}
+        return m.get(str(name or '').lower(), 20)
 
     # 旧自动购买相关方法已移除
 

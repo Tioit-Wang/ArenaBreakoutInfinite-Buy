@@ -1,36 +1,24 @@
-# Repository Guidelines
+# 仓库指南
 
-## Project Structure & Module Organization
-- `gui_app.py`: Tkinter GUI entry; also exposed as script `wg1-gui`.
-- `autobuyer.py`, `auto_clicker.py`, `price_reader.py`: automation, input, and OCR logic.
-- `app_config.py`: load/save config and key mappings.
-- `images/`: template and debug screenshots; `config.json`, `key_mapping.json`: runtime settings.
-- `notebooks/`: exploratory work; keep out of core logic.
+## 项目结构与模块组织
 
-## Setup, Build, and Run
-- Python: `3.13` (see `.python-version`).
-- Install deps: `uv sync` (uses `pyproject.toml`/`uv.lock`).
-- Run GUI: `uv run wg1-gui` or `uv run python gui_app.py`.
-- Add a dependency: `uv add <pkg>` (dev only: `uv add --dev <pkg>`).
+- `gui_app.py`：Tkinter 图形界面入口
+- `task_runner.py`：任务运行器
+- `app_config.py`：配置相关
+- `images/`：点击模板及商品模板图片
+  - `goods/`：商品图片
+  - `templates/`：点击模板图片
 
-## Coding Style & Naming Conventions
-- Follow PEP 8 with 4‑space indents; prefer type hints and docstrings (see existing modules).
-- Naming: modules/files `snake_case.py`, functions/vars `snake_case`, classes `PascalCase`.
-- Keep UI strings user‑facing; avoid mixing Chinese/English within the same message when possible.
-- No formatter is enforced; if used, prefer Black (88 cols) and Ruff. Example: `uv run black . && uv run ruff check .`.
+## 构建、测试与开发命令
 
-## Testing Guidelines
-- No test suite yet. Prefer `pytest` with tests under `tests/` using `test_*.py` naming.
-- Install dev tools: `uv add --dev pytest pytest-cov`.
-- Run tests: `uv run pytest -q` (coverage: `uv run pytest --cov=.`).
+- Python 版本：`3.13`（见 `.python-version`）。
+- 安装依赖：`uv sync`（基于 `pyproject.toml`/`uv.lock`）。
+- 运行 GUI：`uv python gui_app.py`。
+- 添加依赖：`uv add <pkg>`。
 
-## Commit & Pull Request Guidelines
-- Messages: short, imperative, and scoped. Prefer Conventional Commits (`feat:`, `fix:`, `refactor:`). Example: `feat(gui): add ROI selector overlay`.
-- Reference issues with `#<id>` when applicable.
-- PRs include: clear description, rationale, before/after screenshots for GUI changes, repro steps, and any config/image updates.
-- Keep changes minimal; update `README.md` and sample configs if behavior or paths change.
+## 编码风格与命名约定
 
-## Security & Configuration Tips
-- Do not commit secrets or personal data in `config.json`, screenshots under `images/`, or notebooks.
-- Windows: running as Administrator may be required for input automation; DPI scaling affects coordinates—standardize at 100% when capturing templates.
-
+- 遵循 PEP 8，4 空格缩进；优先使用类型注解与 docstring。
+- 命名：模块/文件 `snake_case.py`；函数/变量 `snake_case`；类 `PascalCase`。
+- UI 文案保持用户可读；同一条消息尽量避免中英文混用，默认采用中文。
+- 变更尽量小且与现有风格一致。
