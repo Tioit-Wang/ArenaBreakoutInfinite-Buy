@@ -4,7 +4,7 @@
             "enabled": true,
             "item_name": "5.8×42毫米 DVC12子弹",
             "item_id": "55cc44bb33aa22ff11ee00ddccbbaa99",
-            "price_threshold": 3800,
+            "price_threshold": 3600,
             "price_premium_pct": 0.0,
             "restock_price": 0,
             "target_total": 1000,
@@ -12,11 +12,11 @@
             "time_start": "",
             "time_end": "",
             "id": "974c0cc5-bcb8-407f-8c8d-6e40e84e7500",
-            "purchased": 130,
+            "purchased": 20,
             "order": 0
         },
         {
-            "enabled": true,
+            "enabled": false,
             "item_name": "5.56×45毫米 M995子弹",
             "item_id": "39b551965cef4b76a894f0c78de8ca1f",
             "price_threshold": 5900,
@@ -27,7 +27,8 @@
             "time_start": "",
             "time_end": "",
             "id": "185cc6ea-b060-4c7b-aeeb-4505ec035f60",
-            "order": 1
+            "order": 1,
+            "purchased": 3
         }
     ],
     "step_delays": {

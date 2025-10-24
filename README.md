@@ -47,8 +47,7 @@ uv run python gui_app.py
 wg1/
 ├─ images/                  # 模板与调试截图
 ├─ app_config.py            # 配置加载/保存
-├─ autobuyer.py             # 单/多商品自动购买逻辑
-├─ auto_clicker.py          # 坐标/模板点击封装（AHK+pyautogui）
+├─ task_runner.py           # 任务运行器（模块化：启动/导航/购买/重启）
 ├─ price_reader.py          # ROI 价格 OCR
 ├─ gui_app.py               # 主 GUI 程序
 ├─ config.json              # GUI 配置（模板/坐标/任务）

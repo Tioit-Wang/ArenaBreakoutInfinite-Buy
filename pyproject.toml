@@ -9,7 +9,6 @@ dependencies = [
     "pillow>=11.3.0",
     "pyautogui>=0.9.54",
     "pyscreeze>=1.0.1",
-    "ahk[binary]",
     "pytesseract>=0.3.13",
     # easyocr removed; python-bidi removed
     "matplotlib>=3.9.0",
@@ -34,8 +33,6 @@ build-backend = "setuptools.build_meta"
 py-modules = [
   "gui_app",
   "app_config",
-  "autobuyer",
-  "auto_clicker",
   "price_reader",
   "ocr_reader",
   "history_store",

@@ -1172,6 +1172,18 @@ class App(tk.Tk):
             chk.pack(side=tk.LEFT)
         except Exception:
             pass
+        # 当非编辑模式下，勾选/取消“启用”时立刻持久化，避免状态在刷新或重启后丢失
+        if not editable:
+            def _on_toggle_enable_immediate() -> None:
+                try:
+                    it["enabled"] = bool(int(var_enabled.get()) != 0)
+                    self._save_tasks_data()
+                except Exception:
+                    pass
+            try:
+                chk.configure(command=_on_toggle_enable_immediate)
+            except Exception:
+                pass
         # Show order if available
         try:
             order_num = (int(it.get("order", idx if idx is not None else 0)) if isinstance(it, dict) else (idx or 0)) + 1
@@ -1243,7 +1255,50 @@ class App(tk.Tk):
         # Apply responsive flow layout
         self._flow_layout(row, widgets, padx=4, pady=2)
 
-        # Removed tips line about step delay per requirement
+        # 进度行：展示 purchased/target，并提供清空按钮
+        # 对草稿（idx 为 None）不显示
+        if idx is not None:
+            try:
+                row_prog = ttk.Frame(card)
+                row_prog.pack(fill=tk.X, padx=8, pady=(0, 2))
+                # 使用变量以便目标变更时可更新显示
+                try:
+                    cur_pur = int(it.get("purchased", 0) or 0)
+                except Exception:
+                    cur_pur = 0
+                def _fmt_prog() -> str:
+                    try:
+                        return f"进度：{cur_pur}/{int(var_target.get() or 0)}"
+                    except Exception:
+                        return f"进度：{cur_pur}/0"
+                var_prog = tk.StringVar(value=_fmt_prog())
+                try:
+                    var_target.trace_add("write", lambda *_: var_prog.set(_fmt_prog()))
+                except Exception:
+                    pass
+                ttk.Label(row_prog, textvariable=var_prog).pack(side=tk.LEFT)
+                # 购买历史入口（在进度旁）
+                def _open_hist():
+                    try:
+                        self._open_purchase_history_for_item(str(var_item_id.get() or ""), str(var_item_name.get() or ""))
+                    except Exception:
+                        pass
+                ttk.Button(row_prog, text="购买记录", width=10, command=_open_hist).pack(side=tk.RIGHT, padx=(0, 4))
+                def _clear_progress() -> None:
+                    try:
+                        items = self.tasks_data.get("tasks", [])
+                        if 0 <= int(idx) < len(items):
+                            items[int(idx)]["purchased"] = 0
+                            self._save_tasks_data()
+                            # 更新本地显示并重渲染以同步
+                            var_prog.set(f"进度：0/{int(var_target.get() or 0)}")
+                            self._render_task_cards()
+                    except Exception:
+                        pass
+                btn_clear = ttk.Button(row_prog, text="清空进度", width=10, command=_clear_progress)
+                btn_clear.pack(side=tk.RIGHT)
+            except Exception:
+                pass
 
         # Buttons
         btns = ttk.Frame(card)
@@ -3957,6 +4012,12 @@ class App(tk.Tk):
                 items[idx]["purchased"] = int(t.get("purchased", 0) or 0)
                 # Persist light-weight
                 self._save_tasks_data()
+                # 若当前未在编辑/新增草稿，刷新卡片以实时更新进度显示
+                try:
+                    if (getattr(self, "_editing_task_index", None) is None) and (not bool(getattr(self, "_task_draft_alive", False))):
+                        self.after(0, self._render_task_cards)
+                except Exception:
+                    pass
         except Exception:
             pass
         # Auto split & refine options
@@ -5912,7 +5973,7 @@ class App(tk.Tk):
         if not it:
             return
         try:
-            from history_store import query_price  # type: ignore
+            from history_store import query_price, query_price_minutely  # type: ignore
         except Exception:
             messagebox.showwarning("历史价格", "历史模块不可用。")
             return
@@ -5973,22 +6034,55 @@ class App(tk.Tk):
 
             sec = _sec_for_label(rng_var.get())
             since = time.time() - sec
-            recs = query_price(item_id, since)
-            x: List[Any] = []
-            y: List[int] = []
-            for r in recs:
-                try:
-                    ts = float(r.get("ts", 0.0))
-                    pr = int(r.get("price", 0))
-                except Exception:
-                    continue
-                x.append(datetime.fromtimestamp(ts))
-                y.append(pr)
+            # Prefer minutely aggregate; fallback to raw ticks if aggregator unavailable
+            x: List[Any] = []  # datetime for minutes
+            y_avg: List[int] = []
+            y_min: List[int] = []
+            y_max: List[int] = []
+            try:
+                recs_m = query_price_minutely(item_id, since)
+            except Exception:
+                recs_m = []
+            if recs_m:
+                for r in recs_m:
+                    try:
+                        ts = float(r.get("ts_min", 0.0))
+                        vmin = int(r.get("min", 0))
+                        vmax = int(r.get("max", 0))
+                        vavg = int(r.get("avg", 0))
+                    except Exception:
+                        continue
+                    x.append(datetime.fromtimestamp(ts))
+                    y_min.append(vmin)
+                    y_max.append(vmax)
+                    y_avg.append(vavg)
+            else:
+                recs = query_price(item_id, since)
+                for r in recs:
+                    try:
+                        ts = float(r.get("ts", 0.0))
+                        pr = int(r.get("price", 0))
+                    except Exception:
+                        continue
+                    x.append(datetime.fromtimestamp(ts))
+                    y_avg.append(pr)
+                    y_min.append(pr)
+                    y_max.append(pr)
 
             fig = plt.Figure(figsize=(6.4, 3.4), dpi=100)
             ax = fig.add_subplot(111)
-            if x and y:
-                ax.plot_date(x, y, "-", linewidth=1.5)
+            if x and y_avg:
+                # Draw avg line and min-max band
+                try:
+                    import numpy as _np  # type: ignore
+                    _has_np = True
+                except Exception:
+                    _has_np = False
+                ax.plot_date(x, y_avg, "-", linewidth=1.5, label="平均价")
+                try:
+                    ax.fill_between(x, y_min, y_max, color="#90CAF9", alpha=0.25, label="区间[最低,最高]")
+                except Exception:
+                    pass
                 ax.set_title(name)
                 ax.set_ylabel("价格")
                 ax.grid(True, linestyle=":", alpha=0.4)
@@ -6009,14 +6103,9 @@ class App(tk.Tk):
                         return str(v)
                 ax.yaxis.set_major_formatter(mtick.FuncFormatter(_fmt_tick))
                 fig.autofmt_xdate()
-                mn, mx = min(y), max(y)
-                # 平均价水平线
-                try:
-                    avg = sum(y) / max(1, len(y))
-                    ax.axhline(avg, color="#FF9800", linestyle="--", linewidth=1.2, label="平均价")
-                    ax.legend(loc="upper right")
-                except Exception:
-                    pass
+                mn = min(y_min) if y_min else 0
+                mx = max(y_max) if y_max else 0
+                ax.legend(loc="upper right")
                 # 文本显示千分位
                 try:
                     lbl_stats.configure(text=f"最高价: {mx:,}    最低价: {mn:,}")
@@ -6073,97 +6162,69 @@ class App(tk.Tk):
         except Exception:
             pass
 
-        # Top filters + metrics
-        ctrl = ttk.Frame(top)
-        ctrl.pack(fill=tk.X, padx=8, pady=6)
-        ttk.Label(ctrl, text="时间范围").pack(side=tk.LEFT)
-        rng_var = tk.StringVar(value="近7天")
-        cmb = ttk.Combobox(ctrl, textvariable=rng_var, state="readonly",
-                           values=["近1小时", "近1天", "近7天", "近1月"], width=10)
-        cmb.pack(side=tk.LEFT, padx=6)
-        ttk.Label(ctrl, text="价格筛选").pack(side=tk.LEFT, padx=(12, 0))
-        v_min = tk.StringVar(value="")
-        v_max = tk.StringVar(value="")
-        ttk.Entry(ctrl, textvariable=v_min, width=8).pack(side=tk.LEFT)
-        ttk.Label(ctrl, text="~").pack(side=tk.LEFT)
-        ttk.Entry(ctrl, textvariable=v_max, width=8).pack(side=tk.LEFT)
-        btn_apply = ttk.Button(ctrl, text="应用筛选")
-        btn_apply.pack(side=tk.LEFT, padx=6)
-
-        # Metrics row
+        # Metrics row（无筛选：展示总购买量、均价、最高/最低购买价）
         met = ttk.Frame(top)
         met.pack(fill=tk.X, padx=8, pady=(0, 6))
-        lab_orders = ttk.Label(met, text="订单数: 0")
         lab_qty = ttk.Label(met, text="购买量: 0")
-        lab_amount = ttk.Label(met, text="总花费: 0")
         lab_avg = ttk.Label(met, text="均价: 0")
-        for w in (lab_orders, lab_qty, lab_amount, lab_avg):
+        lab_max = ttk.Label(met, text="最高价: 0")
+        lab_min = ttk.Label(met, text="最低价: 0")
+        for w in (lab_qty, lab_avg, lab_max, lab_min):
             w.pack(side=tk.LEFT, padx=12)
 
         # Table
-        cols = ("time", "price", "qty", "amount")
+        cols = ("time", "task", "price", "qty", "amount")
         tree = ttk.Treeview(top, columns=cols, show="headings")
         tree.heading("time", text="时间")
+        tree.heading("task", text="任务")
         tree.heading("price", text="单价")
         tree.heading("qty", text="数量")
         tree.heading("amount", text="总价")
         tree.column("time", width=160)
+        tree.column("task", width=160)
         tree.column("price", width=80, anchor="e")
         tree.column("qty", width=80, anchor="e")
         tree.column("amount", width=100, anchor="e")
         tree.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
 
-        def _sec_for_label(s: str) -> int:
-            return {
-                "近1小时": 3600,
-                "近1天": 86400,
-                "近7天": 7 * 86400,
-                "近1月": 30 * 86400,
-            }.get(s, 7 * 86400)
-
-        def _to_int(s: str) -> Optional[int]:
-            s2 = (s or "").strip()
-            if not s2:
-                return None
-            try:
-                return int(s2)
-            except Exception:
-                return None
-
         def _reload():
-            sec = _sec_for_label(rng_var.get())
-            since = time.time() - sec
-            pmin = _to_int(v_min.get())
-            pmax = _to_int(v_max.get())
-            recs = query_purchase(item_id, since, price_min=pmin, price_max=pmax)
+            # 无筛选：读取所有记录
+            recs = query_purchase(item_id, 0)
             # Fill table
             for r in tree.get_children():
                 tree.delete(r)
             for i, r in enumerate(recs):
                 iso = str(r.get("iso", ""))
+                task_name = str(r.get("task_name", "") or "-")
                 price = int(r.get("price", 0))
                 qty = int(r.get("qty", 0))
                 amount = int(r.get("amount", price * qty))
                 # 显示千分位
                 try:
-                    vs = (iso, f"{price:,}", f"{qty:,}", f"{amount:,}")
+                    vs = (iso, task_name, f"{price:,}", f"{qty:,}", f"{amount:,}")
                 except Exception:
-                    vs = (iso, str(price), str(qty), str(amount))
+                    vs = (iso, task_name, str(price), str(qty), str(amount))
                 tree.insert("", tk.END, iid=str(i), values=vs)
-            # Metrics
+            # Metrics（数量、均价、最高、最低）
             m = summarize_purchases(recs)
+            # 最高/最低购买价按单价统计
+            try:
+                prices = [int(r.get("price", 0)) for r in recs]
+                p_max = max(prices) if prices else 0
+                p_min = min(prices) if prices else 0
+            except Exception:
+                p_max = 0
+                p_min = 0
             def fmt(n):
                 try:
                     return f"{int(n):,}"
                 except Exception:
                     return str(n)
-            lab_orders.configure(text=f"订单数: {fmt(m.get('orders', 0))}")
             lab_qty.configure(text=f"购买量: {fmt(m.get('quantity', 0))}")
-            lab_amount.configure(text=f"总花费: {fmt(m.get('amount', 0))}")
             lab_avg.configure(text=f"均价: {fmt(m.get('avg_price', 0))}")
+            lab_max.configure(text=f"最高价: {fmt(p_max)}")
+            lab_min.configure(text=f"最低价: {fmt(p_min)}")
 
-        btn_apply.configure(command=_reload)
-        cmb.bind("<<ComboboxSelected>>", lambda _e: _reload())
         _reload()
 
         btnf = ttk.Frame(top)
@@ -6181,20 +6242,17 @@ class App(tk.Tk):
                 return
             try:
                 import csv
-                sec = _sec_for_label(rng_var.get())
-                since = time.time() - sec
-                pmin = _to_int(v_min.get())
-                pmax = _to_int(v_max.get())
-                recs = query_purchase(item_id, since, price_min=pmin, price_max=pmax)
+                recs = query_purchase(item_id, 0)
                 with open(path, "w", encoding="utf-8-sig", newline="") as f:
                     w = csv.writer(f)
-                    w.writerow(["时间", "单价", "数量", "总价"]) 
+                    w.writerow(["时间", "任务", "单价", "数量", "总价"]) 
                     for r in recs:
                         iso = str(r.get("iso", ""))
+                        task_name = str(r.get("task_name", "") or "-")
                         price = int(r.get("price", 0))
                         qty = int(r.get("qty", 0))
                         amount = int(r.get("amount", price * qty))
-                        w.writerow([iso, price, qty, amount])
+                        w.writerow([iso, task_name, price, qty, amount])
                 messagebox.showinfo("导出CSV", f"已导出到: {path}")
             except Exception as e:
                 messagebox.showerror("导出CSV", f"导出失败: {e}")
@@ -6215,6 +6273,82 @@ class App(tk.Tk):
             _reload()
         ttk.Button(btnf, text="导出CSV", command=_export_csv).pack(side=tk.RIGHT, padx=6)
         ttk.Button(btnf, text="清空记录", command=_clear_purchase).pack(side=tk.RIGHT, padx=6)
+
+    def _open_purchase_history_for_item(self, item_id: str, name: str) -> None:
+        try:
+            from history_store import query_purchase, summarize_purchases  # type: ignore
+        except Exception:
+            messagebox.showwarning("购买记录", "历史模块不可用。")
+            return
+        if not item_id:
+            return
+        top = tk.Toplevel(self)
+        top.title(f"购买记录 - {name}")
+        top.geometry("780x520")
+        top.transient(self)
+        try:
+            top.grab_set()
+        except Exception:
+            pass
+        # Metrics row
+        met = ttk.Frame(top)
+        met.pack(fill=tk.X, padx=8, pady=(8, 6))
+        lab_qty = ttk.Label(met, text="购买量: 0")
+        lab_avg = ttk.Label(met, text="均价: 0")
+        lab_max = ttk.Label(met, text="最高价: 0")
+        lab_min = ttk.Label(met, text="最低价: 0")
+        for w in (lab_qty, lab_avg, lab_max, lab_min):
+            w.pack(side=tk.LEFT, padx=12)
+        # Table
+        cols = ("time", "task", "price", "qty", "amount")
+        tree = ttk.Treeview(top, columns=cols, show="headings")
+        tree.heading("time", text="时间")
+        tree.heading("task", text="任务")
+        tree.heading("price", text="单价")
+        tree.heading("qty", text="数量")
+        tree.heading("amount", text="总价")
+        tree.column("time", width=160)
+        tree.column("task", width=160)
+        tree.column("price", width=80, anchor="e")
+        tree.column("qty", width=80, anchor="e")
+        tree.column("amount", width=100, anchor="e")
+        tree.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        def _reload():
+            recs = query_purchase(item_id, 0)
+            for r in tree.get_children():
+                tree.delete(r)
+            for i, r in enumerate(recs):
+                iso = str(r.get("iso", ""))
+                task_name = str(r.get("task_name", "") or "-")
+                price = int(r.get("price", 0))
+                qty = int(r.get("qty", 0))
+                amount = int(r.get("amount", price * qty))
+                try:
+                    vs = (iso, task_name, f"{price:,}", f"{qty:,}", f"{amount:,}")
+                except Exception:
+                    vs = (iso, task_name, str(price), str(qty), str(amount))
+                tree.insert("", tk.END, iid=str(i), values=vs)
+            m = summarize_purchases(recs)
+            try:
+                prices = [int(r.get("price", 0)) for r in recs]
+                p_max = max(prices) if prices else 0
+                p_min = min(prices) if prices else 0
+            except Exception:
+                p_max = 0
+                p_min = 0
+            def fmt(n):
+                try:
+                    return f"{int(n):,}"
+                except Exception:
+                    return str(n)
+            lab_qty.configure(text=f"购买量: {fmt(m.get('quantity', 0))}")
+            lab_avg.configure(text=f"均价: {fmt(m.get('avg_price', 0))}")
+            lab_max.configure(text=f"最高价: {fmt(p_max)}")
+            lab_min.configure(text=f"最低价: {fmt(p_min)}")
+        _reload()
+        btnf = ttk.Frame(top)
+        btnf.pack(fill=tk.X, padx=8, pady=(0, 8))
+        ttk.Button(btnf, text="关闭", command=top.destroy).pack(side=tk.RIGHT)
 
 
 class GoodsMarketUI(ttk.Frame):
@@ -6657,6 +6791,11 @@ class GoodsMarketUI(ttk.Frame):
                 command=lambda it_=dict(it): self._quick_capture_item_image(it_),
             )
             btn_cap.pack(side=tk.RIGHT, padx=(2, 2), pady=2)
+        # 历史价格入口（右上角）
+        try:
+            ttk.Button(head, text="📈", width=2, command=lambda it_=dict(it): self._open_price_history_for_goods(it_)).pack(side=tk.RIGHT, padx=(2, 2), pady=2)
+        except Exception:
+            pass
         btn_edit = ttk.Button(head, text="✎", width=2,
                               command=lambda it_=it: self._open_item_modal(dict(it_)))
         btn_edit.pack(side=tk.RIGHT, padx=(2, 2), pady=2)
@@ -6684,6 +6823,148 @@ class GoodsMarketUI(ttk.Frame):
         ttk.Label(footer, text=stats).pack(side=tk.LEFT, padx=8)
         
         return frm
+
+    def _open_price_history_for_goods(self, it: dict) -> None:
+        try:
+            from history_store import query_price, query_price_minutely  # type: ignore
+        except Exception:
+            messagebox.showwarning("历史价格", "历史模块不可用。")
+            return
+        name = str(it.get("name", ""))
+        item_id = str(it.get("id", ""))
+        if not item_id:
+            return
+        top = tk.Toplevel(self)
+        top.title(f"历史价格 - {name}")
+        top.geometry("720x420")
+        top.transient(self)
+        try:
+            top.grab_set()
+        except Exception:
+            pass
+        # Controls
+        ctrl = ttk.Frame(top)
+        ctrl.pack(fill=tk.X, padx=8, pady=6)
+        ttk.Label(ctrl, text="时间范围").pack(side=tk.LEFT)
+        rng_var = tk.StringVar(value="近1天")
+        cmb = ttk.Combobox(ctrl, textvariable=rng_var, state="readonly",
+                           values=["近1小时", "近1天", "近7天", "近1月"], width=10)
+        cmb.pack(side=tk.LEFT, padx=6)
+        lbl_stats = ttk.Label(ctrl, text="")
+        lbl_stats.pack(side=tk.RIGHT)
+        # Figure area
+        figf = ttk.Frame(top)
+        figf.pack(fill=tk.BOTH, expand=True, padx=8, pady=6)
+        def _sec_for_label(s: str) -> int:
+            return {
+                "近1小时": 3600,
+                "近1天": 86400,
+                "近7天": 7 * 86400,
+                "近1月": 30 * 86400,
+            }.get(s, 86400)
+        def _render():
+            # Lazy import
+            try:
+                import matplotlib
+                matplotlib.use("TkAgg")
+                import matplotlib.pyplot as plt  # type: ignore
+                from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg  # type: ignore
+                import matplotlib.dates as mdates  # type: ignore
+                import matplotlib.ticker as mtick  # type: ignore
+                from datetime import datetime
+                import time as _time
+            except Exception as e:
+                messagebox.showerror("历史价格", f"缺少 matplotlib 或后端不可用: {e}")
+                return
+            for w in figf.winfo_children():
+                try:
+                    w.destroy()
+                except Exception:
+                    pass
+            sec = _sec_for_label(rng_var.get())
+            since = _time.time() - sec
+            # Prefer minutely aggregate
+            x = []
+            y_avg = []
+            y_min = []
+            y_max = []
+            try:
+                recs_m = query_price_minutely(item_id, since)
+            except Exception:
+                recs_m = []
+            if recs_m:
+                for r in recs_m:
+                    try:
+                        ts = float(r.get("ts_min", 0.0))
+                        vmin = int(r.get("min", 0))
+                        vmax = int(r.get("max", 0))
+                        vavg = int(r.get("avg", 0))
+                    except Exception:
+                        continue
+                    x.append(datetime.fromtimestamp(ts))
+                    y_min.append(vmin)
+                    y_max.append(vmax)
+                    y_avg.append(vavg)
+            else:
+                recs = query_price(item_id, since)
+                for r in recs:
+                    try:
+                        ts = float(r.get("ts", 0.0))
+                        pr = int(r.get("price", 0))
+                    except Exception:
+                        continue
+                    x.append(datetime.fromtimestamp(ts))
+                    y_avg.append(pr)
+                    y_min.append(pr)
+                    y_max.append(pr)
+            fig = plt.Figure(figsize=(6.4, 3.4), dpi=100)
+            ax = fig.add_subplot(111)
+            if x and y_avg:
+                ax.plot_date(x, y_avg, "-", linewidth=1.5, label="平均价")
+                try:
+                    ax.fill_between(x, y_min, y_max, color="#90CAF9", alpha=0.25, label="区间[最低,最高]")
+                except Exception:
+                    pass
+                ax.set_title(name)
+                ax.set_ylabel("价格")
+                ax.grid(True, linestyle=":", alpha=0.4)
+                ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M"))
+                def _fmt_tick(v, _p):
+                    try:
+                        v = float(v)
+                    except Exception:
+                        return str(v)
+                    if abs(v) >= 1_000_000:
+                        return f"{v/1_000_000:.1f}M"
+                    if abs(v) >= 1_000:
+                        return f"{v/1_000:.1f}K"
+                    try:
+                        return f"{int(v):,}"
+                    except Exception:
+                        return str(v)
+                ax.yaxis.set_major_formatter(mtick.FuncFormatter(_fmt_tick))
+                fig.autofmt_xdate()
+                mn = min(y_min) if y_min else 0
+                mx = max(y_max) if y_max else 0
+                try:
+                    lbl_stats.configure(text=f"最高价: {mx:,}    最低价: {mn:,}")
+                except Exception:
+                    lbl_stats.configure(text=f"最高价: {mx}    最低价: {mn}")
+                try:
+                    ax.legend(loc="upper right")
+                except Exception:
+                    pass
+            else:
+                ax.set_title("暂无数据")
+                lbl_stats.configure(text="")
+            canvas = FigureCanvasTkAgg(fig, master=figf)
+            canvas.draw()
+            canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        cmb.bind("<<ComboboxSelected>>", lambda _e: _render())
+        _render()
+        btnf = ttk.Frame(top)
+        btnf.pack(fill=tk.X, padx=8, pady=(0, 8))
+        ttk.Button(btnf, text="关闭", command=top.destroy).pack(side=tk.RIGHT)
 
     def _thumb_for_item(self, it: dict) -> Optional[tk.PhotoImage]:
         iid = str(it.get("id", ""))

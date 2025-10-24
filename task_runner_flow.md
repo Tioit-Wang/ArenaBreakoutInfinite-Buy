@@ -14,7 +14,7 @@
 
    - 清理暂停/终止标志，启动后台线程执行 `_run()`。
 
-3. 统一启动流程（Buyer.\_ensure_ready_v2 → run_launch_flow）
+3. 统一启动流程（Buyer._ensure_ready_v2 → run_launch_flow）
 
    - 快速路径：若屏幕已存在首页/市场标识，直接视为已就绪。
    - 配置校验：校验 `exe_path`、`templates.btn_launch`、`templates.home_indicator`（或 `market_indicator`）。
@@ -32,47 +32,29 @@
        - 按顺序挑选“启用+有效+未达标”的任务进入一个“片段（duration_min 分钟）”。
        - 片段开始：记录时间窗口与日志；建立搜索上下文：
          - 清理位置缓存 `buyer.clear_pos(goods.id)`；
-         - 预热一次 `buyer.execute_once(skip_search=False)`（进入市场 → 搜索）。
+         - 调用 `buyer.ensure_search_context(goods, ...)` 进入市场并搜索，匹配商品图并缓存坐标。
        - 片段循环（直到片段结束或终止）：
          - 处理暂停/终止。
          - 重启检查：若到期执行 `_do_soft_restart()` 并标记需重建搜索上下文。
-         - 若需重建搜索上下文：执行一次 `execute_once(skip_search=False)`。
-         - 单次尝试：`execute_once(skip_search=True)`（不重复搜索，直接尝试购买）。
+         - 若需重建搜索上下文：再次调用 `ensure_search_context(...)`。
+         - 单次尝试：调用 `purchase_cycle(goods, task, purchased)`（不重复搜索，直接在详情内循环购买）。
          - 成功则累加 `purchased` 并回调 `on_task_update`；若返回不可继续则提前结束片段。
        - 片段收尾：累计 `executed_ms`，状态置 `idle`、输出日志。
      - 时间窗口模式（\_run_time_window）
        - 在所有“启用+有效”的任务中，选择第一个当前时间命中其 `[time_start, time_end]` 窗口的任务执行。
-       - 进入窗口时建立搜索上下文：`execute_once(skip_search=False)`。
-       - 窗口循环（直到窗口结束或终止）：含暂停/终止处理、周期性软重启检查、必要时重建搜索上下文；单次尝试使用 `execute_once(skip_search=True)`；成功则更新 `purchased` 与回调。
+       - 进入窗口时建立搜索上下文：`ensure_search_context(...)`。
+       - 窗口循环（直到窗口结束或终止）：含暂停/终止处理、周期性软重启检查、必要时重建搜索上下文；单次尝试使用 `purchase_cycle(...)`；成功则更新 `purchased` 与回调。
        - 窗口退出时记录日志后继续择任务。
 
-5. 单次购买（Buyer.execute_once）
+5. 模块接口（Buyer）
 
-   - 详情页恢复（优化）：若同时检测到 `btn_buy` 与 `btn_close`（仍在详情页），先点击 `btn_close` 关闭详情；随后尝试匹配 `goods.image_path` 商品图片以重建商品坐标；若无法匹配，认为搜索上下文已偏离，立即重新执行“进入市场并搜索”。
-   - 搜索阶段（仅当 `skip_search=False`）：
-     - 导航市场并聚焦搜索框：匹配 `btn_market` → `input_search`。
-     - 输入关键词：`goods.search_name`，点击 `btn_search`。
-     - 稳定性调整：搜索阶段的每一步操作之间增加约 1 秒等待时间（点击首页/市场、聚焦搜索框、输入内容、点击搜索等）。
-   - 打开详情（带恢复）：
-     - 优先使用缓存坐标（若 `skip_search=True` 更倾向缓存）尝试点击并验证详情是否打开；
-     - 若失败，进行模板匹配（`goods.image_path`）；
-     - 若仍失败，尝试“重新搜索一次”后再匹配。
-   - 读取平均单价（\_read_avg_unit_price）：
-     - 以 `btn_buy` 位置为锚点推导 ROI（平均单价区域）。
-     - 按配置调用 OCR（优先 `umi`，可选 `tesseract`）。
-     - 若使用 `umi` 且出现致命错误则抛 `FatalOcrError`，由上层终止任务。
-   - 价格决策与数量：
-     - 阈值计算：`limit = threshold + premium_pct%`；
-     - `restock_price` 补货策略：
-       - 类别为“弹药” → 尝试 `btn_max` 选择最大数量；
-       - 其他 → 尝试点击数量输入并输入 `5`；
-       - 否则默认数量为 `1`，均受 `max_per_order` 与剩余目标量约束。
-     - 若 `unit_price > limit`（且 `limit>0`）则关闭详情并跳过。
-   - 提交与结果：
-     - 点击 `btn_buy` 提交；在 ~1.2s 内轮询 `buy_ok/buy_fail`。
-     - 成功：先关闭成功遮罩；若是“补货价”则保留详情继续，否则关闭详情；返回本次购买数量。
-     - 失败/未知：关闭详情，返回 `0`。
-   - 返回值：`(purchased_in_this_attempt, should_continue_loop)`。
+   - ensure_search_context(goods, ...)：
+     - 处理阻碍性事件：详情未关闭（btn_close+btn_buy）→ 关闭；购买成功弹层（buy_ok）→ 任意点击后关闭详情；
+     - 首页分支：市场→搜索框→输入→搜索→匹配商品图并缓存临时坐标；
+     - 市场分支（重置）：首页→市场→搜索框→输入→搜索→匹配并缓存临时坐标。
+   - purchase_cycle(goods, task, purchased)：
+     - 首次进入详情缓存按钮（购买/关闭/最大）；
+     - 在同一详情内循环：读取平均价→判断补货/普通→提交→识别结果（成功则保留详情继续，直至价格不合适，最后关闭）。
 
 6. 控制与重启
 
@@ -101,14 +83,14 @@ flowchart TD
     R0 --> R1[选择 启用+有效+未达标 任务]
     R1 -->|无任务| R1
     R1 -->|有任务| R2[片段开始: duration_min 分钟]
-    R2 --> R3[建立搜索上下文\nexecute_once(skip_search=false)]
+    R2 --> R3[建立搜索上下文\nensure_search_context]
     R3 --> R4{片段循环}
     R4 --> RS{到达重启点?}
     RS -- 是 --> RS1[软重启并重建搜索上下文]
     RS1 --> R5
     RS -- 否 --> R5{已建立搜索上下文?}
     R5 -- 否 --> R3
-    R5 -- 是 --> R6[单次尝试\nexecute_once(skip_search=true)]
+    R5 -- 是 --> R6[单次尝试\npurchase_cycle]
     R6 --> R7[累加 purchased & 通知 UI]
     R7 --> R8{should_continue?}
     R8 -- 否 --> R9[片段收尾: 更新 executed_ms/status]
@@ -126,7 +108,7 @@ flowchart TD
     TS1 --> T4
     TS -- 否 --> T4{已建立搜索上下文?}
     T4 -- 否 --> T2
-    T4 -- 是 --> T5[单次尝试\nexecute_once(skip_search=true)]
+    T4 -- 是 --> T5[单次尝试\npurchase_cycle]
     T5 --> T6[累加 purchased & 通知 UI]
     T6 --> TW{仍在窗口内?}
     TW -- 否 --> T7[退出窗口日志]
@@ -135,7 +117,7 @@ flowchart TD
   end
 ```
 
-### 单次购买（Buyer.execute_once）
+### 购买接口（Buyer）
 
 ```mermaid
 flowchart TD
