@@ -110,7 +110,10 @@
             "target_total": 100,
             "max_per_order": 10,
             "purchased": 0,
-            "id": "4ff2c71b-3204-4afe-a7bc-4784560dd535"
+            "id": "4ff2c71b-3204-4afe-a7bc-4784560dd535",
+            "price_premium_pct": 0,
+            "restock_price": 0,
+            "restock_premium_pct": 0
         },
         {
             "enabled": false,
@@ -123,6 +126,7 @@
             "id": "21b25f7b-6e15-414b-b7e5-ecd97e8842d9",
             "price_premium_pct": 0,
             "restock_price": 0,
+            "restock_premium_pct": 0,
             "max_button_qty": 120
         },
         {
@@ -136,6 +140,7 @@
             "id": "695827ff-6fd5-4cfd-808d-7bd0665ef3ba",
             "price_premium_pct": 1,
             "restock_price": 5600,
+            "restock_premium_pct": 0,
             "max_button_qty": 120,
             "price_mode": "fixed",
             "avg_samples": 10,

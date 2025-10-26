@@ -139,9 +139,22 @@ def _parse_price_text(txt: str) -> Optional[int]:
 
 
 def _sleep(s: float) -> None:
+    """统一的安全休眠封装。
+
+    用途：
+    - 给 UI/动画/输入法 留出“沉淀时间”，避免连贯操作导致误判；
+    - 控制轮询频率，降低 CPU 占用，避免忙等；
+    - 规避负数/类型异常带来的随机错误。
+
+    调参建议：
+    - ≤0.03s：点击/键入后的微等待；
+    - 0.2~0.8s：轮询/暂停的节奏；
+    - ≥5s：页面/进程级切换（如重启/加载）。
+    """
     try:
         time.sleep(max(0.0, float(s)))
     except Exception:
+        # 休眠失败不致命：忽略异常以保证主流程连续
         pass
 
 
@@ -207,10 +220,11 @@ class ScreenOps:
                 pass
             if time.time() >= end:
                 return None
+            # 小步轮询：让屏幕刷新/模板匹配有时间完成，避免 CPU 忙等
             _sleep(self.step_delay)
 
     def click_center(
-        self, box: Tuple[int, int, int, int], clicks: int = 1, interval: float = 0.05
+        self, box: Tuple[int, int, int, int], clicks: int = 1, interval: float = 0.02
     ) -> None:
         l, t, w, h = box
         x = int(l + w / 2)
@@ -220,9 +234,11 @@ class ScreenOps:
             for i in range(max(1, int(clicks))):
                 self._pg.click(x, y)
                 if i + 1 < clicks:
+                    # 多击之间的间隔：避免系统将多次点击合并或丢失
                     _sleep(interval)
         except Exception:
             pass
+        # 点击后的小步沉淀：等待焦点/状态变化生效
         _sleep(self.step_delay)
 
     def type_text(self, s: str, clear_first: bool = True) -> None:
@@ -230,12 +246,16 @@ class ScreenOps:
             if clear_first:
                 # 全选后删除（Ctrl+A -> Backspace）
                 self._pg.hotkey("ctrl", "a")
+                # 让选择态更新到位
                 _sleep(0.02)
                 self._pg.press("backspace")
+                # 给删除动作一点处理时间
                 _sleep(0.02)
+            # 逐字输入，使用 step_delay 防止过快导致漏键
             self._pg.typewrite(str(s), interval=max(0.0, self.step_delay))
         except Exception:
             pass
+        # 输入结束后的沉淀：等待文本渲染/光标稳定
         _sleep(self.step_delay)
 
     def screenshot_region(self, region: Tuple[int, int, int, int]):
@@ -324,7 +344,7 @@ def run_launch_flow(
     launch_path = _tpl_path("btn_launch")
 
     # 提前创建 ScreenOps 以支持快速路径检测
-    screen = ScreenOps(cfg, step_delay=0.05)
+    screen = ScreenOps(cfg, step_delay=0.02)
 
     # 0）快速路径：检测到首页或市场即视为已启动
     try:
@@ -348,7 +368,7 @@ def run_launch_flow(
         return LaunchResult(False, code="missing_indicator_template", error="未配置首页/市场标识模板，无法判定启动完成")
 
     # 创建 ScreenOps 实例
-    screen = ScreenOps(cfg, step_delay=0.05)
+    screen = ScreenOps(cfg, step_delay=0.02)
 
     # 启动启动器进程
     try:
@@ -379,6 +399,7 @@ def run_launch_flow(
         if box is not None:
             launch_box = box
             break
+        # 以 200ms 节奏轮询，避免忙等并兼顾响应
         _sleep(0.2)
     if launch_box is None:
         return LaunchResult(False, code="launch_button_timeout", error="等待启动按钮超时")
@@ -387,6 +408,7 @@ def run_launch_flow(
     if float(click_delay) > 0:
         t_end_click = time.time() + float(click_delay)
         while time.time() < t_end_click:
+            # 按文档延迟点击“启动”，等待资源准备就绪
             _sleep(0.2)
     screen.click_center(launch_box)
     _log("[启动流程] 已点击启动按钮")
@@ -396,6 +418,7 @@ def run_launch_flow(
     while time.time() < end_home:
         if (screen.locate(home_key, timeout=0.3) is not None) or (screen.locate(market_key, timeout=0.3) is not None):
             return LaunchResult(True, code="ok")
+        # 进入游戏加载较慢：300ms 轮询，减少 CPU 占用
         _sleep(0.3)
     return LaunchResult(False, code="home_timeout", error="等待首页标识超时")
 
@@ -449,7 +472,8 @@ class Buyer:
             pg.click(int(sw // 2), int(sh // 2))
         except Exception:
             pass
-        _sleep(0.02)
+        # 任意点击后的短等待：给弹层/遮罩关闭动画一点时间
+        _sleep(0.01)
 
     def _dismiss_success_overlay(self) -> None:
         # 将鼠标移至安全区并任意点击以关闭“成功遮罩”
@@ -459,6 +483,40 @@ class Buyer:
             self._move_cursor_top_right()
         except Exception:
             self._click_center_screen_once()
+
+    # --- 详情按钮获取与关闭封装（缓存优先） ---
+    def _get_btn_box(
+        self, goods: Goods, key: str, timeout: float = 0.3
+    ) -> Optional[Tuple[int, int, int, int]]:
+        """获取详情页按钮的坐标框，优先使用缓存，其次回退到模板匹配。
+
+        依据 purchase_flow.md 的约定：首次进入详情已缓存【购买/关闭/最大】按钮，
+        后续点击应优先使用缓存坐标以提升稳定性与性能。
+        """
+        try:
+            # 1) 首次缓存（跨会话）
+            box = (self._first_detail_buttons.get(goods.id, {}) or {}).get(key)
+            if box is not None:
+                return box
+        except Exception:
+            pass
+        try:
+            # 2) 当前会话缓存
+            box = self._detail_ui_cache.get(key)
+            if box is not None:
+                return box
+        except Exception:
+            pass
+        # 3) 兜底：模板匹配
+        return self.screen.locate(key, timeout=timeout)
+
+    def _close_detail(self, goods: Goods, timeout: float = 0.3) -> bool:
+        """关闭详情页（缓存坐标优先，失败回退匹配）。返回是否执行了关闭点击。"""
+        c = self._get_btn_box(goods, "btn_close", timeout=timeout)
+        if c is not None:
+            self.screen.click_center(c)
+            return True
+        return False
 
     # 统一启动封装（供 TaskRunner 使用）
     def _ensure_ready_v2(self) -> bool:
@@ -482,7 +540,9 @@ class Buyer:
         c = self.screen.locate("btn_close", timeout=0.1)
         if (b is not None) and (c is not None):
             self.screen.click_center(c)
-            _sleep(0.05)
+            # 关闭详情后短等待，确保返回到列表层级
+            # 首页→市场：等待市场页加载到位，防止立即查找失败
+            _sleep(0.02)
             return
         # 2) 购买成功弹层：存在 buy_ok → 任意点击 → 点击关闭
         ok = self.screen.locate("buy_ok", timeout=0.1)
@@ -491,21 +551,25 @@ class Buyer:
             c2 = self.screen.locate("btn_close", timeout=0.5)
             if c2 is not None:
                 self.screen.click_center(c2)
-                _sleep(0.05)
+                # 关闭“购买成功”弹层后的沉淀，避免后续误触
+                _sleep(0.02)
 
     def _type_and_search(self, query: str) -> bool:
         sbox = self.screen.locate("input_search", timeout=2.0)
         if sbox is None:
             return False
         self.screen.click_center(sbox)
+        # 获取输入焦点的小步等待
         _sleep(0.03)
         self.screen.type_text(query or "", clear_first=True)
+        # 等待输入法/联想稳定
         _sleep(0.03)
         btn = self.screen.locate("btn_search", timeout=1.0)
         if btn is None:
             return False
         self.screen.click_center(btn)
-        _sleep(0.05)
+        # 触发搜索后留出最短渲染时间
+        _sleep(0.02)
         return True
 
     def _match_and_cache_goods(self, goods: Goods) -> bool:
@@ -534,7 +598,8 @@ class Buyer:
                 self._log(item_disp, purchased_str, "未找到市场按钮")
                 return False
             self.screen.click_center(m)
-            _sleep(0.05)
+            # 市场→首页（重置）：等待主页稳定，清理状态残留
+            _sleep(0.02)
             if not self._type_and_search(query):
                 self._log(item_disp, purchased_str, "未能输入并点击搜索")
                 return False
@@ -551,13 +616,14 @@ class Buyer:
                 self._log(item_disp, purchased_str, "未找到首页按钮用于重置")
                 return False
             self.screen.click_center(h)
-            _sleep(0.05)
+            # 首页→市场（重置）：等待市场页稳定
+            _sleep(0.02)
             m = self.screen.locate("btn_market", timeout=2.0)
             if m is None:
                 self._log(item_disp, purchased_str, "未找到市场按钮（重置阶段）")
                 return False
             self.screen.click_center(m)
-            _sleep(0.05)
+            _sleep(0.02)
             if not self._type_and_search(query):
                 self._log(item_disp, purchased_str, "未能输入并点击搜索（重置阶段）")
                 return False
@@ -575,9 +641,10 @@ class Buyer:
     def _open_detail_from_cache_or_match(self, goods: Goods) -> bool:
         # 优先使用缓存坐标
         if goods.id in self._pos_cache:
+            # 快速路径：使用缓存坐标直接点击打开详情；验证时缩短匹配超时，减少感知等待
             self.screen.click_center(self._pos_cache[goods.id])
-            b = self.screen.locate("btn_buy", timeout=0.5)
-            c = self.screen.locate("btn_close", timeout=0.5)
+            b = self.screen.locate("btn_buy", timeout=0.25)
+            c = self.screen.locate("btn_close", timeout=0.25)
             if (b is not None) and (c is not None):
                 return True
             # 缓存无效
@@ -588,8 +655,9 @@ class Buyer:
             if box is not None:
                 self._pos_cache[goods.id] = box
                 self.screen.click_center(box)
-                b = self.screen.locate("btn_buy", timeout=0.5)
-                c = self.screen.locate("btn_close", timeout=0.5)
+                # 回退路径验证也缩短匹配时间，优先提升响应
+                b = self.screen.locate("btn_buy", timeout=0.25)
+                c = self.screen.locate("btn_close", timeout=0.25)
                 if (b is not None) and (c is not None):
                     return True
         return False
@@ -639,7 +707,8 @@ class Buyer:
                 pass
             if time.time() >= end:
                 return None
-            _sleep(0.05)
+            # 模板匹配短轮询：等待屏幕刷新，降低 CPU 占用
+            _sleep(0.02)
 
     # ------------------------------ 价格读取 ------------------------------
 
@@ -851,10 +920,6 @@ class Buyer:
             pass
         return int(val)
 
-    # （已移除旧版 _continue_from_detail）
-
-    # ------------------------------ 购买流程（旧版接口已移除） ------------------------------
-
 
     # ------------------------------ 新版：一次完整购买循环（模块二） ------------------------------
     def purchase_cycle(
@@ -874,18 +939,16 @@ class Buyer:
         target_total = int(task.get("target_total", 0) or 0)
         purchased_str = f"{purchased_so_far}/{target_total}"
 
-        # 若已在详情页：直接继续；否则尝试打开
-        b0 = self.screen.locate("btn_buy", timeout=0.2)
-        c0 = self.screen.locate("btn_close", timeout=0.2)
-        in_detail = (b0 is not None) and (c0 is not None)
+        # 根据反馈优化：不要在每轮开始时先判定“是否已在详情页”（会引入不必要的等待与两次匹配）；
+        # 直接尝试使用缓存坐标/模板匹配打开详情；仅在 ROI 识别失败或错误时再处理关闭/恢复。
         used_cache = goods.id in self._pos_cache
-        if not in_detail:
-            if not self._open_detail_from_cache_or_match(goods):
-                if not used_cache:
-                    ok_ctx = self.ensure_search_context(goods, item_disp=item_disp, purchased_str=purchased_str)
-                    if ok_ctx and self._open_detail_from_cache_or_match(goods):
-                        in_detail = True
-                if not in_detail:
+        if not self._open_detail_from_cache_or_match(goods):
+            if not used_cache:
+                ok_ctx = self.ensure_search_context(goods, item_disp=item_disp, purchased_str=purchased_str)
+                if ok_ctx and self._open_detail_from_cache_or_match(goods):
+                    pass
+                else:
+                    # 打开详情失败：根据是否有缓存给出具体原因
                     if used_cache:
                         self._log(item_disp, purchased_str, "缓存坐标无效，打开详情失败，本轮结束")
                     else:
@@ -914,9 +977,8 @@ class Buyer:
                 expected_floor=_base if _base > 0 else None,
             )
             if unit_price is None or unit_price <= 0:
-                c = self.screen.locate("btn_close", timeout=0.4)
-                if c is not None:
-                    self.screen.click_center(c)
+                # 关闭详情（缓存优先）
+                _ = self._close_detail(goods, timeout=0.4)
                 self._log(item_disp, purchased_str, "平均单价识别失败，已关闭详情")
                 return bought, True
 
@@ -924,14 +986,24 @@ class Buyer:
             prem = float(task.get("price_premium_pct", 0.0) or 0.0)
             limit = thr + int(round(thr * max(0.0, prem) / 100.0)) if thr > 0 else 0
             restock = int(task.get("restock_price", 0) or 0)
-            ok_restock = (restock > 0) and (unit_price <= restock)
+            # 新增：补货模式允许浮动百分比（restock_premium_pct）。当 >0 时，提高补货上限。
+            r_prem = float(task.get("restock_premium_pct", 0.0) or 0.0)
+            restock_limit = restock + int(round(restock * max(0.0, r_prem) / 100.0)) if restock > 0 else 0
+            ok_restock = (restock > 0) and (unit_price <= restock_limit)
             ok_normal = (limit <= 0) or (unit_price <= limit)
-            self._log(item_disp, purchased_str, f"平均单价={unit_price}，阈值≤{limit}(+{int(prem)}%)")
+            # 输出同时包含两种模式的“预览线”信息，辅助界面与日志核对
+            if restock > 0:
+                self._log(
+                    item_disp,
+                    purchased_str,
+                    f"平均单价={unit_price}，阈值≤{limit}(+{int(prem)}%)，补货≤{restock_limit}(+{int(r_prem)}%)",
+                )
+            else:
+                self._log(item_disp, purchased_str, f"平均单价={unit_price}，阈值≤{limit}(+{int(prem)}%)")
 
             if not ok_restock and not ok_normal:
-                c = self.screen.locate("btn_close", timeout=0.4)
-                if c is not None:
-                    self.screen.click_center(c)
+                # 价格不满足：关闭详情（缓存优先）
+                _ = self._close_detail(goods, timeout=0.4)
                 return bought, True
 
             used_max = False
@@ -939,19 +1011,18 @@ class Buyer:
                 mx = self._first_detail_buttons.get(goods.id, {}).get("btn_max") or self.screen.locate("btn_max", timeout=0.3)
                 if mx is not None:
                     self.screen.click_center(mx)
-                    _sleep(0.05)
+                    _sleep(0.02)
                     used_max = True
 
             b = self._first_detail_buttons.get(goods.id, {}).get("btn_buy") or self.screen.locate("btn_buy", timeout=0.4)
             if b is None:
-                c = self.screen.locate("btn_close", timeout=0.3)
-                if c is not None:
-                    self.screen.click_center(c)
+                # 未找到“购买”按钮：关闭详情（缓存优先）
+                _ = self._close_detail(goods, timeout=0.3)
                 self._log(item_disp, purchased_str, "未找到“购买”按钮，已关闭详情")
                 return bought, True
             self.screen.click_center(b)
 
-            t_end = time.time() + 1.2
+            t_end = time.time() + 0.5
             got_ok = False
             found_fail = False
             while time.time() < t_end:
@@ -960,7 +1031,7 @@ class Buyer:
                     break
                 if self.screen.locate("buy_fail", timeout=0.0) is not None:
                     found_fail = True
-                _sleep(0.1)
+                _sleep(0.02)
 
             if got_ok:
                 # 根据商品类别与是否使用 Max 调整进度增量
@@ -991,14 +1062,12 @@ class Buyer:
                 self._dismiss_success_overlay()
                 continue
             if found_fail:
-                c = self.screen.locate("btn_close", timeout=0.3)
-                if c is not None:
-                    self.screen.click_center(c)
+                # 购买失败：关闭详情（缓存优先）
+                _ = self._close_detail(goods, timeout=0.3)
                 self._log(item_disp, purchased_str, "购买失败，已关闭详情")
                 return bought, True
-            c = self.screen.locate("btn_close", timeout=0.3)
-            if c is not None:
-                self.screen.click_center(c)
+            # 结果未知：关闭详情（缓存优先）
+            _ = self._close_detail(goods, timeout=0.3)
             self._log(item_disp, purchased_str, "结果未知，已关闭详情")
             return bought, True
 
@@ -1181,21 +1250,25 @@ class TaskRunner:
         h = self.screen.locate("btn_home", timeout=1.0)
         if h is not None:
             self.screen.click_center(h)
+        # 大步延迟：等待返回首页动画与资源回收（约 5s）
         _sleep(5.0)
         # 2) 设置 → 等待 ~5s
         s = self.screen.locate("btn_settings", timeout=1.0)
         if s is not None:
             self.screen.click_center(s)
+        # 大步延迟：设置页元素加载与状态持久化（约 5s）
         _sleep(5.0)
         # 3) 退出 → 等待 ~5s
         e = self.screen.locate("btn_exit", timeout=1.0)
         if e is not None:
             self.screen.click_center(e)
+        # 大步延迟：退出流程出现确认弹窗/黑场过渡（约 5s）
         _sleep(5.0)
         # 4) 退出确认 → 等待 ~30s
         ec = self.screen.locate("btn_exit_confirm", timeout=1.0)
         if ec is not None:
             self.screen.click_center(ec)
+        # 超大步延迟：完全退出到桌面并释放进程（约 30s）
         _sleep(30.0)
         # 5) 执行统一启动流程
         def _on_log(s: str) -> None:
@@ -1282,6 +1355,7 @@ class TaskRunner:
                         self._last_idle_log_ts = now
                 except Exception:
                     pass
+                # 空闲等待：列表为空时放慢轮询至 600ms，降低 CPU 与日志噪声
                 _sleep(0.6)
                 continue
             # 计算当前可执行的任务数量（启用+有效+未达目标）
@@ -1304,6 +1378,7 @@ class TaskRunner:
                         self._last_idle_log_ts = now
                 except Exception:
                     pass
+                # 无可执行任务：1s 节奏避免忙等
                 _sleep(1.0)
                 continue
             t = tasks[idx % n]
@@ -1354,6 +1429,7 @@ class TaskRunner:
             while not self._stop.is_set() and time.time() < seg_end:
                 # 暂停处理
                 while self._pause.is_set() and not self._stop.is_set():
+                    # 暂停中：200ms 轮询，保证响应并降低占用
                     _sleep(0.2)
                 if self._stop.is_set():
                     break
@@ -1392,7 +1468,8 @@ class TaskRunner:
                         pass
                 if not _cont:
                     break
-                _sleep(0.05)
+                # 每轮尝试之间的微等待：避免连击触发节流/误判
+                _sleep(0.02)
 
             # 片段收尾与统计
             elapsed = int((time.time() - seg_start - seg_paused_sec) * 1000)
@@ -1408,6 +1485,7 @@ class TaskRunner:
         while not self._stop.is_set():
             # （全局）暂停处理
             while self._pause.is_set() and not self._stop.is_set():
+                # 全局暂停：200ms 轮询等待恢复
                 _sleep(0.2)
             if self._stop.is_set():
                 break
@@ -1434,6 +1512,7 @@ class TaskRunner:
                         self._last_idle_log_ts = now
                 except Exception:
                     pass
+                # 无窗口命中：1.2s 轮询频率，兼顾响应与低占用
                 _sleep(1.2)
                 continue
 
@@ -1442,6 +1521,7 @@ class TaskRunner:
             target = int(t.get("target_total", 0) or 0)
             purchased = int(t.get("purchased", 0) or 0)
             if target > 0 and purchased >= target:
+                # 已达目标：短暂停顿 800ms，避免刷屏
                 _sleep(0.8)
                 continue
 
@@ -1456,11 +1536,13 @@ class TaskRunner:
             gid = str(t.get("item_id", ""))
             goods = self.goods_map.get(gid)
             if not goods:
+                # 缺少商品定义：1s 后重试
                 _sleep(1.0)
                 continue
             try:
                 item_disp = goods.name or goods.search_name or str(t.get("item_name", ""))
                 if not self.buyer.ensure_search_context(goods, item_disp=item_disp, purchased_str=f"{purchased}/{target}"):
+                    # 无法建立上下文：1s 后再尝试，等待页面稳定
                     _sleep(1.0)
                     continue
             except FatalOcrError as e:
@@ -1481,6 +1563,7 @@ class TaskRunner:
                 ):
                     break
                 while self._pause.is_set() and not self._stop.is_set():
+                    # 窗口内暂停：200ms 轮询等待恢复
                     _sleep(0.2)
                 if self._stop.is_set():
                     break
@@ -1514,7 +1597,8 @@ class TaskRunner:
                         pass
                 if not _cont:
                     break
-                _sleep(0.05)
+                # 窗口循环的微等待：20ms，减少 UI 抖动影响
+                _sleep(0.02)
 
             self._relay_log(
                 f"【{_now_label()}】【{t.get('item_name', '')}】【{purchased}/{target}】：退出时间窗口"
