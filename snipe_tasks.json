@@ -1,0 +1,30 @@
+{
+  "items": [
+    {
+      "id": "a291cba424bc4f4d822dafe231cf3b12",
+      "enabled": true,
+      "item_id": "39b551965cef4b76a894f0c78de8ca1f",
+      "name": "5.56×45毫米 M995子弹",
+      "image_path": "images\\goods\\ammo\\36aaa3c800e3476980ec63469a514ebf.png",
+      "big_category": "弹药",
+      "price": 5800,
+      "premium_pct": 0.0,
+      "purchase_mode": "restock",
+      "target_total": 10000,
+      "purchased": 0
+    },
+    {
+      "id": "616c6b2be1714066b6ed02737015be49",
+      "enabled": true,
+      "item_id": "b3c4d5e6f708192a3b4c5d6e7f809123",
+      "name": "二层台长办公室门禁卡",
+      "image_path": "images\\goods\\keys\\c5a043d2d212496faf1147fefa9c2649.png",
+      "big_category": "钥匙",
+      "price": 1700000,
+      "premium_pct": 0.0,
+      "purchase_mode": "normal",
+      "target_total": 2,
+      "purchased": 0
+    }
+  ]
+}

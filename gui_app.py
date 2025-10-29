@@ -14,7 +14,12 @@ try:
     ensure_pyautogui_confidence_compat()
 except Exception:
     pass
-from task_runner import TaskRunner, run_launch_flow
+from task_runner import TaskRunner, run_launch_flow, ScreenOps
+try:
+    from multi_snipe_runner import MultiSnipeRunner, SnipeItem  # type: ignore
+except Exception:
+    MultiSnipeRunner = None  # type: ignore
+    SnipeItem = None  # type: ignore
 
 
 class _RegionSelector:
@@ -203,28 +208,53 @@ class _FixedSizeSelector:
                 pass
         self.on_done(None)
 
-class _RegionSelector:
-    """Simple overlay to select a screen region by dragging.
 
-    Calls `on_done((x1,y1,x2,y2))` or `on_done(None)` on cancel.
+class _CardSelector:
+    """固定 165x212 的跟随定位选择器，按卡片样式渲染三段色块与图片区域虚线框。
+
+    - 顶部 20（蓝色）、底部 30（绿色）、中间剩余（黄色）。
+    - 图片区域：居中，左右与上下各缩进 30（如需仅左右缩进，可将 margin_tb 设为 0）。
+    - 左键确认；右键/ESC 取消。
+    - 回调 on_done((x1,y1,x2,y2)) 或 on_done(None)。
     """
 
-    def __init__(self, root: tk.Tk, on_done):
+    def __init__(
+        self,
+        root: tk.Tk,
+        on_done,
+        *,
+        w: int = 165,
+        h: int = 212,
+        top_h: int = 20,
+        bottom_h: int = 30,
+        margin_lr: int = 30,
+        margin_tb: int = 30,
+    ) -> None:
         self.root = root
         self.on_done = on_done
+        self.w = int(max(1, w))
+        self.h = int(max(1, h))
+        self.top_h = int(max(0, top_h))
+        self.bottom_h = int(max(0, bottom_h))
+        self.margin_lr = int(max(0, margin_lr))
+        self.margin_tb = int(max(0, margin_tb))
         self.top: tk.Toplevel | None = None
         self.canvas: tk.Canvas | None = None
-        self.rid = None
-        self.start: tuple[int, int] | None = None
-        self.rect = None
+        self._x = 0
+        self._y = 0
+        # Canvas item ids
+        self.item_top = None
+        self.item_mid = None
+        self.item_bot = None
+        self.item_outline = None
+        self.item_img_rect = None
 
     def show(self) -> None:
         top = tk.Toplevel(self.root)
         self.top = top
-        # Use fullscreen-like window sized to screen to reduce platform quirks
-        w = self.root.winfo_screenwidth()
-        h = self.root.winfo_screenheight()
-        top.geometry(f"{w}x{h}+0+0")
+        W = self.root.winfo_screenwidth()
+        H = self.root.winfo_screenheight()
+        top.geometry(f"{W}x{H}+0+0")
         try:
             top.attributes("-alpha", 0.25)
         except Exception:
@@ -238,73 +268,98 @@ class _RegionSelector:
         cv = tk.Canvas(top, bg="black", highlightthickness=0)
         cv.pack(fill=tk.BOTH, expand=True)
         self.canvas = cv
-        # Instructions
         try:
             cv.create_text(
-                w // 2,
+                W // 2,
                 30,
-                text="拖拽选择区域，Esc/右键 取消",
+                text=f"移动鼠标定位，左键确认（{self.w}x{self.h}），右键/ESC取消",
                 fill="white",
                 font=("Segoe UI", 12),
             )
         except Exception:
             pass
-        cv.bind("<ButtonPress-1>", self._on_press)
-        cv.bind("<B1-Motion>", self._on_drag)
-        cv.bind("<ButtonRelease-1>", self._on_release)
-        cv.bind("<ButtonPress-3>", self._on_right_cancel)
-        cv.bind("<Escape>", self._on_escape)
+        # Pre-create items for fast redraw
+        self.item_top = cv.create_rectangle(0, 0, 1, 1, fill="#2d7cff", outline="")
+        self.item_mid = cv.create_rectangle(0, 0, 1, 1, fill="#ffd84d", outline="")
+        self.item_bot = cv.create_rectangle(0, 0, 1, 1, fill="#2ea043", outline="")
+        # 外部浅灰色边框，宽度尽量接近 0.5px（Tk 允许小数宽度；若不支持则退化为 1px）
+        try:
+            self.item_outline = cv.create_rectangle(0, 0, 1, 1, outline="#cccccc", width=0.5)
+        except Exception:
+            self.item_outline = cv.create_rectangle(0, 0, 1, 1, outline="#cccccc", width=1)
+        self.item_img_rect = cv.create_rectangle(0, 0, 1, 1, outline="#333", dash=(4, 2))
+
+        cv.bind("<Motion>", self._on_motion)
+        cv.bind("<Button-1>", self._on_confirm)
+        cv.bind("<Button-3>", self._on_cancel)
+        cv.bind("<Escape>", self._on_cancel)
         try:
             cv.focus_force()
-        except Exception:
-            cv.focus_set()
-        # Grab input so events are guaranteed to reach the overlay
-        try:
             top.grab_set()
         except Exception:
             pass
 
-    def _on_press(self, e):
-        self.start = (e.x_root, e.y_root)
-        if self.canvas is not None and self.rect is None:
-            self.rect = self.canvas.create_rectangle(0, 0, 1, 1, outline="red", width=2)
+    def _on_motion(self, e) -> None:
+        self._x, self._y = int(e.x_root), int(e.y_root)
+        self._redraw()
 
-    def _on_drag(self, e):
-        if not self.start or self.canvas is None or self.rect is None:
+    def _redraw(self) -> None:
+        if not self.canvas:
             return
-        x0, y0 = self.start
-        x1, y1 = e.x_root, e.y_root
-        self.canvas.coords(self.rect, x0, y0, x1, y1)
+        x1 = self._x - self.w // 2
+        y1 = self._y - self.h // 2
+        x2 = x1 + self.w
+        y2 = y1 + self.h
+        # Sections
+        top_h = self.top_h
+        bot_h = self.bottom_h
+        mid_top = y1 + top_h
+        mid_btm = y2 - bot_h
+        # Update shapes
+        if self.item_top is not None:
+            self.canvas.coords(self.item_top, x1, y1, x2, y1 + top_h)
+        if self.item_mid is not None:
+            self.canvas.coords(self.item_mid, x1, mid_top, x2, mid_btm)
+        if self.item_bot is not None:
+            self.canvas.coords(self.item_bot, x1, y2 - bot_h, x2, y2)
+        if self.item_outline is not None:
+            self.canvas.coords(self.item_outline, x1 + 1, y1 + 1, x2 - 1, y2 - 1)
+        # Inner image rect inside middle area with margins
+        ix1 = x1 + self.margin_lr
+        ix2 = x2 - self.margin_lr
+        iy1 = mid_top + self.margin_tb
+        iy2 = mid_btm - self.margin_tb
+        if self.item_img_rect is not None:
+            self.canvas.coords(self.item_img_rect, ix1, iy1, ix2, iy2)
 
-    def _on_release(self, e):
-        if not self.start:
-            self._finish(None)
+    def _on_confirm(self, _e) -> None:
+        if self.top is None:
             return
-        x0, y0 = self.start
-        x1, y1 = e.x_root, e.y_root
-        if abs(x1 - x0) < 3 or abs(y1 - y0) < 3:
-            self._finish(None)
-            return
-        self._finish((min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)))
+        x1 = self._x - self.w // 2
+        y1 = self._y - self.h // 2
+        x2 = x1 + self.w
+        y2 = y1 + self.h
+        try:
+            self.top.grab_release()
+        except Exception:
+            pass
+        try:
+            self.top.destroy()
+        except Exception:
+            pass
+        self.on_done((x1, y1, x2, y2))
 
-    def _on_escape(self, _):
-        self._finish(None)
-
-    def _on_right_cancel(self, _):
-        self._finish(None)
-
-    def _finish(self, bounds):
+    def _on_cancel(self, _e) -> None:
         if self.top is not None:
             try:
-                try:
-                    self.top.grab_release()
-                except Exception:
-                    pass
+                self.top.grab_release()
+            except Exception:
+                pass
+            try:
                 self.top.destroy()
             except Exception:
                 pass
-        self.on_done(bounds)
-
+        self.on_done(None)
 
 class TemplateRow(ttk.Frame):
     def __init__(self, master, name: str, data: Dict[str, Any], on_test, on_capture, on_preview, on_change=None):
@@ -414,13 +469,32 @@ class App(tk.Tk):
         self.tab_exec = ttk.Frame(nb)
         nb.add(self.tab_exec, text="执行日志")
 
+        # 新增：测试
+        self.tab_test = ttk.Frame(nb)
+        nb.add(self.tab_test, text="测试")
+
+        # 新增：多商品抢购模式（独立于其他任务）
+        self.tab_multi = ttk.Frame(nb)
+        nb.add(self.tab_multi, text="多商品抢购模式")
+
         # New: 利润计算器
         self.tab_profit = ttk.Frame(nb)
         nb.add(self.tab_profit, text="利润计算")
 
+        # 初始化多商品抢购任务状态（需在构建多商品页前完成）
+        self.snipe_tasks_path = "snipe_tasks.json"
+        self.snipe_tasks_data: Dict[str, Any] = self._load_snipe_tasks_data(self.snipe_tasks_path)
+        self._snipe_thread = None
+        self._snipe_stop = threading.Event()
+        self._snipe_runner = None
+        self._snipe_log_lock = threading.Lock()
+        self._snipe_editing_index: int | None = None
+
         self._build_tab1()
         self._build_tab_tasks()
         self._build_tab_exec()
+        self._build_tab_test()
+        self._build_tab_multi()
         self._build_tab_profit()
         try:
             nb2 = self.tab1.nametowidget(self.tab1.winfo_parent())
@@ -481,6 +555,9 @@ class App(tk.Tk):
             "btn_close": "btn_close",
             "btn_refresh": "btn_refresh",
             "btn_back": "btn_back",
+            # 多商品抢购：标签模板
+            "最近购买模板": "recent_purchases_tab",
+            "我的收藏模板": "favorites_tab",
         }
 
         # OCR warm-up removed (PaddleOCR path removed)
@@ -498,6 +575,8 @@ class App(tk.Tk):
         self._exec_state_after_id: str | None = None
         # Background runner instance (独立新逻辑)
         self._runner: TaskRunner | None = None
+
+        # 多商品抢购：任务与运行状态已在构建标签页前初始化
 
     # ---------- Mouse wheel binding helper ----------
     def _bind_mousewheel(self, area, target=None) -> None:
@@ -882,6 +961,10 @@ class App(tk.Tk):
         var_q = tk.StringVar(value="")
         ent = ttk.Entry(ctrl, textvariable=var_q, width=24)
         ent.pack(side=tk.LEFT, padx=6)
+        try:
+            ent.focus_set()
+        except Exception:
+            pass
         var_big = tk.StringVar(value="全部")
         var_sub = tk.StringVar(value="全部")
         # derive categories from data
@@ -914,7 +997,11 @@ class App(tk.Tk):
         tree.column("name", width=280)
         tree.column("big", width=120)
         tree.column("sub", width=180)
-        tree.pack(fill=tk.BOTH, expand=True)
+        # Attach vertical scrollbar
+        sb = ttk.Scrollbar(body, orient=tk.VERTICAL, command=tree.yview)
+        tree.configure(yscrollcommand=sb.set)
+        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sb.pack(side=tk.LEFT, fill=tk.Y)
         # Mouse-wheel support for picker list
         try:
             self._bind_mousewheel(tree, tree)
@@ -6429,6 +6516,1141 @@ class App(tk.Tk):
         ttk.Button(btnf, text="关闭", command=top.destroy).pack(side=tk.RIGHT)
 
 
+    # ---------- Tab: 测试（模板选择） ----------
+    def _build_tab_test(self) -> None:
+        """构建“测试”标签页：提供模板图片的选择与预览。
+
+        参考物品市场的“选择图片”交互：按钮+文件对话框+预览画布。
+        """
+        outer = self.tab_test
+        frm = ttk.Frame(outer)
+        frm.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+
+        box = ttk.LabelFrame(frm, text="模板选择")
+        box.pack(fill=tk.X, padx=4, pady=4)
+
+        row = ttk.Frame(box)
+        row.pack(fill=tk.X, padx=8, pady=8)
+
+        ttk.Label(row, text="模板图片").pack(side=tk.LEFT)
+        self.var_test_tpl = tk.StringVar(value="")
+        ent = ttk.Entry(row, textvariable=self.var_test_tpl, width=60)
+        ent.pack(side=tk.LEFT, padx=6)
+
+        # 选择区域画布：165x212（外浅灰细框），顶部20（蓝），底部30（绿），中间剩余（黄）
+        selector = tk.Canvas(box, width=165, height=212, bg="#fafafa", highlightthickness=0)
+        selector.pack(side=tk.LEFT, padx=8, pady=(0, 8))
+
+        # 固定尺寸与内边距（左右 30；上下 20）
+        W, H = 165, 212
+        TOP_H, BTM_H = 20, 30
+        MID_TOP, MID_BTM = TOP_H, H - BTM_H
+        MID_H = MID_BTM - MID_TOP  # 162
+        MARG_LR = 30
+        MARG_TB = 20  # 若仅需左右留白，将其改为 0 即可
+
+        def _render_selector() -> None:
+            selector.delete("all")
+            # 填充三段颜色（上蓝、中黄、下绿）
+            selector.create_rectangle(0, 0, W, TOP_H, fill="#2d7cff", outline="")            # 顶部蓝
+            selector.create_rectangle(0, MID_TOP, W, MID_BTM, fill="#ffd84d", outline="")     # 中间黄
+            selector.create_rectangle(0, H - BTM_H, W, H, fill="#2ea043", outline="")         # 底部绿
+            # 外部浅灰边框，尽量接近 0.5px
+            try:
+                selector.create_rectangle(1, 1, W - 1, H - 1, outline="#cccccc", width=0.5)
+            except Exception:
+                selector.create_rectangle(1, 1, W - 1, H - 1, outline="#cccccc", width=1)
+
+            # 图片区域（在中间区域内，左右/上下各缩进 30；若仅左右，令 MARG_TB=0）
+            ix1 = MARG_LR
+            ix2 = W - MARG_LR
+            iy1 = MID_TOP + MARG_TB
+            iy2 = MID_BTM - MARG_TB
+            # 辅助虚线框，标出图片可绘制区域
+            selector.create_rectangle(ix1, iy1, ix2, iy2, outline="#333", dash=(4, 2))
+
+            # 绘制所选图片（等比缩放以适配图片区域并居中）
+            p = (self.var_test_tpl.get() or "").strip()
+            if not p or not os.path.exists(p):
+                return
+            try:
+                from PIL import Image, ImageTk  # type: ignore
+                im = Image.open(p)
+                max_w, max_h = max(1, int(ix2 - ix1)), max(1, int(iy2 - iy1))
+                im.thumbnail((max_w, max_h))
+                tkimg = ImageTk.PhotoImage(im)
+            except Exception:
+                return
+            # 居中放置
+            dx = (max(0, (ix2 - ix1) - tkimg.width())) // 2
+            dy = (max(0, (iy2 - iy1) - tkimg.height())) // 2
+            selector.image = tkimg  # 保持引用
+            selector.create_image(ix1 + dx, iy1 + dy, anchor=tk.NW, image=tkimg)
+
+        def _choose_tpl() -> None:
+            try:
+                initdir = os.path.join(os.getcwd(), "images")
+            except Exception:
+                initdir = None  # type: ignore
+            path = filedialog.askopenfilename(
+                title="选择图片",
+                filetypes=[("Image", ".png .jpg .jpeg .bmp"), ("All", "*.*")],
+                initialdir=(initdir if (initdir and os.path.exists(initdir)) else None),
+            )
+            if path:
+                self.var_test_tpl.set(path)
+                _render_selector()
+
+        ttk.Button(row, text="选择图片", command=_choose_tpl).pack(side=tk.LEFT, padx=6)
+
+        try:
+            # 跟随文本框变动进行重绘
+            self.var_test_tpl.trace_add("write", lambda *_: _render_selector())
+        except Exception:
+            pass
+
+        # 初始渲染
+        _render_selector()
+
+        # 截图 + OCR 识别（名称/价格）
+        box2 = ttk.LabelFrame(frm, text="截图识别（卡片样式 165×212）")
+        box2.pack(fill=tk.X, padx=4, pady=(4, 4))
+
+        row2 = ttk.Frame(box2)
+        row2.pack(fill=tk.X, padx=8, pady=8)
+
+        self.var_test_name = tk.StringVar(value="")
+        self.var_test_price = tk.StringVar(value="")
+
+        def _capture_and_ocr() -> None:
+            root = self.winfo_toplevel()
+            result_bounds: tuple[int, int, int, int] | None = None
+
+            def _done(bounds):
+                nonlocal result_bounds
+                result_bounds = bounds
+
+            sel = _CardSelector(root, _done, w=165, h=212, top_h=20, bottom_h=30, margin_lr=30, margin_tb=20)
+            try:
+                sel.show()
+            except Exception:
+                return
+            # Wait overlay closed
+            try:
+                root.wait_window(sel.top)
+            except Exception:
+                pass
+            if not result_bounds:
+                return
+            x1, y1, x2, y2 = result_bounds
+            W, H = root.winfo_screenwidth(), root.winfo_screenheight()
+            # Clamp to screen
+            def _clamp_rect(x: int, y: int, w: int, h: int) -> tuple[int, int, int, int]:
+                x = max(0, min(x, max(0, W - 1)))
+                y = max(0, min(y, max(0, H - 1)))
+                w = max(1, min(w, W - x))
+                h = max(1, min(h, H - y))
+                return x, y, w, h
+
+            card_w, card_h = 165, 212
+            top_h, btm_h = 20, 30
+            mid_h = card_h - top_h - btm_h  # 162
+            # Regions in screen coords
+            top_rect = _clamp_rect(x1, y1, card_w, top_h)
+            btm_rect = _clamp_rect(x1, y1 + card_h - btm_h, card_w, btm_h)
+            # Middle image region（左右 30；上下 20 → 高度更大）
+            ix = x1 + 30
+            iy = y1 + top_h + 20
+            iw = card_w - 60
+            ih = mid_h - 40
+            mid_rect = _clamp_rect(ix, iy, iw, ih)
+            card_rect = _clamp_rect(x1, y1, card_w, card_h)
+
+            try:
+                import pyautogui  # type: ignore
+                name_img = pyautogui.screenshot(region=top_rect)
+                price_img = pyautogui.screenshot(region=btm_rect)
+                mid_img = pyautogui.screenshot(region=mid_rect)
+                card_img = pyautogui.screenshot(region=card_rect)
+            except Exception as e:
+                messagebox.showerror("截图", f"截屏失败: {e}")
+                return
+
+            # 保存推断 ROI（名称/中间/价格/整卡）到独立目录，并记录坐标
+            try:
+                import json
+                ts = time.strftime("%Y%m%d_%H%M%S")
+                out_dir = os.path.join(os.getcwd(), "images", "test", f"roi_{ts}_{uuid.uuid4().hex[:6]}")
+                os.makedirs(out_dir, exist_ok=True)
+                p_name = os.path.join(out_dir, "name.png")
+                p_price = os.path.join(out_dir, "price.png")
+                p_mid = os.path.join(out_dir, "middle.png")
+                p_card = os.path.join(out_dir, "card.png")
+                name_img.save(p_name)
+                price_img.save(p_price)
+                mid_img.save(p_mid)
+                card_img.save(p_card)
+                def _to_dict(r):
+                    x, y, w, h = r
+                    return {"x": int(x), "y": int(y), "w": int(w), "h": int(h)}
+                meta = {
+                    "card": _to_dict(card_rect),
+                    "top_name": _to_dict(top_rect),
+                    "middle": _to_dict(mid_rect),
+                    "bottom_price": _to_dict(btm_rect),
+                    "margins": {"lr": 30, "tb": 20},
+                    "sections": {"top": 20, "bottom": 30},
+                }
+                with open(os.path.join(out_dir, "roi.json"), "w", encoding="utf-8") as f:
+                    json.dump(meta, f, ensure_ascii=False, indent=2)
+                # 更新模板路径为中间图便于预览
+                self.var_test_tpl.set(p_mid)
+                try:
+                    messagebox.showinfo("保存", f"ROI 已保存到:\n{out_dir}")
+                except Exception:
+                    pass
+            except Exception:
+                # 保存失败不影响后续 OCR
+                pass
+            # 重绘预览
+            try:
+                _render_selector()
+            except Exception:
+                pass
+
+            # OCR（Umi-OCR HTTP）
+            try:
+                from ocr_reader import read_text  # type: ignore
+            except Exception as e:
+                messagebox.showerror("OCR", f"加载 OCR 模块失败: {e}")
+                return
+
+            umi = (self.cfg or {}).get("umi_ocr", {}) if hasattr(self, "cfg") else {}
+            base_url = str(umi.get("base_url", "http://127.0.0.1:1224"))
+            timeout = float(umi.get("timeout_sec", 5.0) or 5.0)
+            options = umi.get("options", {}) or {}
+
+            try:
+                name_txt = read_text(name_img, engine="umi", umi_base_url=base_url, umi_timeout=timeout, umi_options=options)
+            except Exception as e:
+                messagebox.showerror("OCR", f"名称识别失败（Umi-OCR）：{e}\n请确认 Umi-OCR HTTP 服务已启动。")
+                name_txt = ""
+            try:
+                price_txt = read_text(price_img, engine="umi", umi_base_url=base_url, umi_timeout=timeout, umi_options=options)
+            except Exception as e:
+                messagebox.showerror("OCR", f"价格识别失败（Umi-OCR）：{e}\n请确认 Umi-OCR HTTP 服务已启动。")
+                price_txt = ""
+
+            self.var_test_name.set((name_txt or "").strip())
+            # 价格清洗：与 task_runner._parse_price_text 保持一致
+            try:
+                from task_runner import _parse_price_text  # type: ignore
+            except Exception:
+                _parse_price_text = None  # type: ignore
+            val = None
+            if _parse_price_text is not None:
+                try:
+                    val = _parse_price_text(price_txt or "")
+                except Exception:
+                    val = None
+            if val is None:
+                self.var_test_price.set((price_txt or "").strip())
+            else:
+                self.var_test_price.set(str(int(val)))
+
+        # 识别阈值
+        ttk.Label(row2, text="阈值").pack(side=tk.LEFT)
+        try:
+            self.var_test_conf = tk.DoubleVar(value=0.85)
+        except Exception:
+            self.var_test_conf = tk.StringVar(value="0.85")  # fallback
+        try:
+            spc = ttk.Spinbox(row2, from_=0.5, to=1.0, increment=0.01, textvariable=self.var_test_conf, width=6)
+        except Exception:
+            spc = tk.Spinbox(row2, from_=0.5, to=1.0, increment=0.01, textvariable=self.var_test_conf, width=6)
+        spc.pack(side=tk.LEFT, padx=(4, 10))
+
+        ttk.Button(row2, text="截图并识别", command=_capture_and_ocr).pack(side=tk.LEFT)
+        # 基于模板定位屏幕并识别（无需再次框选）
+        def _locate_and_ocr() -> None:
+            p = (self.var_test_tpl.get() or "").strip()
+            if not p or not os.path.exists(p):
+                messagebox.showwarning("定位", "请先选择模板图片（中间区域图）")
+                return
+            try:
+                import pyautogui  # type: ignore
+            except Exception as e:
+                messagebox.showerror("定位", f"缺少 pyautogui 依赖或不可用: {e}")
+                return
+            # 读取模板尺寸，用于区分是整卡模板还是中间区域模板
+            tpl_w = tpl_h = None
+            try:
+                from PIL import Image  # type: ignore
+                _im = Image.open(p)
+                tpl_w, tpl_h = _im.size
+            except Exception:
+                pass
+            try:
+                try:
+                    conf = float(self.var_test_conf.get())  # type: ignore[arg-type]
+                except Exception:
+                    conf = 0.85
+                box = pyautogui.locateOnScreen(p, confidence=conf)
+            except Exception as e:
+                messagebox.showerror("定位", f"调用 locateOnScreen 失败: {e}")
+                return
+            if not box:
+                messagebox.showwarning("定位", "未在屏幕上匹配到该图片，可尝试降低阈值或重新截图模板。")
+                return
+            # 以匹配到的中间图片区域为基准，反推卡片整体与上下 OCR 区域
+            mid_left = int(getattr(box, 'left', 0))
+            mid_top = int(getattr(box, 'top', 0))
+            mid_w = int(getattr(box, 'width', 0))
+            mid_h = int(getattr(box, 'height', 0))
+
+            MARG_LR, MARG_TB = 30, 20
+            TOP_H, BTM_H = 20, 30
+
+            # 若模板疑似为整卡（165x212 附近），直接使用匹配矩形作为卡片；否则按中间区域推断整卡
+            if tpl_w is not None and tpl_h is not None and abs(tpl_w - 165) <= 6 and abs(tpl_h - 212) <= 8:
+                card_x1, card_y1, card_w, card_h = mid_left, mid_top, mid_w, mid_h
+            else:
+                card_x1 = mid_left - MARG_LR
+                card_y1 = mid_top - (TOP_H + MARG_TB)
+                card_w = mid_w + 2 * MARG_LR
+                card_h = (TOP_H + MARG_TB) + mid_h + (MARG_TB + BTM_H)
+
+            # 生成各区域矩形并截图
+            W, H = self.winfo_screenwidth(), self.winfo_screenheight()
+            def _clamp_rect(x: int, y: int, w: int, h: int) -> tuple[int, int, int, int]:
+                x = max(0, min(x, max(0, W - 1)))
+                y = max(0, min(y, max(0, H - 1)))
+                w = max(1, min(w, W - x))
+                h = max(1, min(h, H - y))
+                return x, y, w, h
+
+            top_rect = _clamp_rect(card_x1, card_y1, card_w, TOP_H)
+            btm_rect = _clamp_rect(card_x1, card_y1 + card_h - BTM_H, card_w, BTM_H)
+            # 中间与整卡矩形
+            if tpl_w is not None and tpl_h is not None and abs(tpl_w - 165) <= 6 and abs(tpl_h - 212) <= 8:
+                mid_rect = _clamp_rect(
+                    card_x1 + MARG_LR,
+                    card_y1 + TOP_H + MARG_TB,
+                    card_w - 2 * MARG_LR,
+                    (card_h - TOP_H - BTM_H) - 2 * MARG_TB,
+                )
+            else:
+                mid_rect = _clamp_rect(mid_left, mid_top, mid_w, mid_h)
+            card_rect = _clamp_rect(card_x1, card_y1, card_w, card_h)
+
+            try:
+                name_img = pyautogui.screenshot(region=top_rect)
+                price_img = pyautogui.screenshot(region=btm_rect)
+                mid_img = pyautogui.screenshot(region=mid_rect)
+                card_img = pyautogui.screenshot(region=card_rect)
+            except Exception as e:
+                messagebox.showerror("截图", f"截屏失败: {e}")
+                return
+
+            # OCR with Umi
+            try:
+                from ocr_reader import read_text  # type: ignore
+            except Exception as e:
+                messagebox.showerror("OCR", f"加载 OCR 模块失败: {e}")
+                return
+
+            umi = (self.cfg or {}).get("umi_ocr", {}) if hasattr(self, "cfg") else {}
+            base_url = str(umi.get("base_url", "http://127.0.0.1:1224"))
+            timeout = float(umi.get("timeout_sec", 5.0) or 5.0)
+            options = umi.get("options", {}) or {}
+
+            try:
+                name_txt = read_text(name_img, engine="umi", umi_base_url=base_url, umi_timeout=timeout, umi_options=options)
+            except Exception as e:
+                messagebox.showerror("OCR", f"名称识别失败（Umi-OCR）：{e}")
+                name_txt = ""
+            try:
+                price_txt = read_text(price_img, engine="umi", umi_base_url=base_url, umi_timeout=timeout, umi_options=options)
+            except Exception as e:
+                messagebox.showerror("OCR", f"价格识别失败（Umi-OCR）：{e}")
+                price_txt = ""
+
+            self.var_test_name.set((name_txt or "").strip())
+            # 价格清洗：与 task_runner._parse_price_text 保持一致
+            try:
+                from task_runner import _parse_price_text  # type: ignore
+            except Exception:
+                _parse_price_text = None  # type: ignore
+            val = None
+            if _parse_price_text is not None:
+                try:
+                    val = _parse_price_text(price_txt or "")
+                except Exception:
+                    val = None
+            if val is None:
+                self.var_test_price.set((price_txt or "").strip())
+            else:
+                self.var_test_price.set(str(int(val)))
+
+            # 保存推断 ROI（名称/中间/价格/整卡）
+            try:
+                import json
+                ts = time.strftime("%Y%m%d_%H%M%S")
+                out_dir = os.path.join(os.getcwd(), "images", "test", f"roi_{ts}_{uuid.uuid4().hex[:6]}")
+                os.makedirs(out_dir, exist_ok=True)
+                p_name = os.path.join(out_dir, "name.png")
+                p_price = os.path.join(out_dir, "price.png")
+                p_mid = os.path.join(out_dir, "middle.png")
+                p_card = os.path.join(out_dir, "card.png")
+                name_img.save(p_name)
+                price_img.save(p_price)
+                mid_img.save(p_mid)
+                card_img.save(p_card)
+                def _to_dict(r):
+                    x, y, w, h = r
+                    return {"x": int(x), "y": int(y), "w": int(w), "h": int(h)}
+                meta = {
+                    "card": _to_dict(card_rect),
+                    "top_name": _to_dict(top_rect),
+                    "middle": _to_dict(mid_rect),
+                    "bottom_price": _to_dict(btm_rect),
+                    "margins": {"lr": 30, "tb": 20},
+                    "sections": {"top": 20, "bottom": 35},
+                }
+                with open(os.path.join(out_dir, "roi.json"), "w", encoding="utf-8") as f:
+                    json.dump(meta, f, ensure_ascii=False, indent=2)
+                # 更新测试模板为中间图并重绘
+                self.var_test_tpl.set(p_mid)
+                try:
+                    _render_selector()
+                except Exception:
+                    pass
+                try:
+                    messagebox.showinfo("保存", f"ROI 已保存到:\n{out_dir}")
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        ttk.Button(row2, text="定位并识别", command=_locate_and_ocr).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Label(row2, text="名称").pack(side=tk.LEFT, padx=(12, 4))
+        ttk.Entry(row2, textvariable=self.var_test_name, width=24).pack(side=tk.LEFT)
+        ttk.Label(row2, text="价格").pack(side=tk.LEFT, padx=(12, 4))
+        ttk.Entry(row2, textvariable=self.var_test_price, width=14).pack(side=tk.LEFT)
+
+
+    # ---------- Tab: 多商品抢购模式 ----------
+    def _build_tab_multi(self) -> None:
+        outer = self.tab_multi
+        frm = ttk.Frame(outer)
+        frm.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+
+        # 必备设置：最近购买 / 我的收藏 模板
+        box_req = ttk.LabelFrame(frm, text="必备设置")
+        box_req.pack(fill=tk.X, padx=4, pady=4)
+
+        # 工具：模板测试/截图/预览（本页私有）
+        def _test_match(name: str, path: str, conf: float) -> None:
+            if not path or not os.path.exists(path):
+                messagebox.showwarning("测试识别", f"文件不存在: {path}")
+                return
+            try:
+                import pyautogui  # type: ignore
+                center = pyautogui.locateCenterOnScreen(path, confidence=conf)
+                if center:
+                    try:
+                        pyautogui.moveTo(center.x, center.y, duration=0.08)
+                        pyautogui.click(center.x, center.y)
+                    except Exception:
+                        pass
+                    return
+                _ = pyautogui.locateOnScreen(path, confidence=conf)
+            except Exception as e:
+                messagebox.showerror("测试识别", f"调用失败: {e}")
+                return
+            messagebox.showwarning("测试识别", f"{name} 未匹配到。可降低置信度或重截图片。")
+
+        def _capture_into(row: "TemplateRow") -> None:
+            def _after(bounds):
+                if not bounds:
+                    return
+                x1, y1, x2, y2 = bounds
+                w, h = max(1, x2 - x1), max(1, y2 - y1)
+                try:
+                    import pyautogui  # type: ignore
+                    img = pyautogui.screenshot(region=(x1, y1, w, h))
+                except Exception as e:
+                    messagebox.showerror("截图", f"截屏失败: {e}")
+                    return
+                os.makedirs("images", exist_ok=True)
+                slug = self._template_slug(row.name)
+                p = os.path.join("images", f"{slug}.png")
+                try:
+                    img.save(p)
+                except Exception as e:
+                    messagebox.showerror("截图", f"保存失败: {e}")
+                    return
+                row.var_path.set(p)
+                self._schedule_autosave()
+
+            self._select_region(_after)
+
+        # 两条模板配置行
+        tpls = (self.cfg.get("templates", {}) or {})
+        data_recent = tpls.get("recent_purchases_tab", {}) if isinstance(tpls.get("recent_purchases_tab"), dict) else {}
+        r_recent = TemplateRow(
+            box_req,
+            "最近购买模板",
+            data_recent,
+            on_test=_test_match,
+            on_capture=_capture_into,
+            on_preview=self._preview_image,
+            on_change=self._schedule_autosave,
+        )
+        r_recent.grid(row=0, column=0, sticky="we", padx=6, pady=4)
+        self.template_rows["recent_purchases_tab"] = r_recent
+
+        data_fav = tpls.get("favorites_tab", {}) if isinstance(tpls.get("favorites_tab"), dict) else {}
+        r_fav = TemplateRow(
+            box_req,
+            "我的收藏模板",
+            data_fav,
+            on_test=_test_match,
+            on_capture=_capture_into,
+            on_preview=self._preview_image,
+            on_change=self._schedule_autosave,
+        )
+        r_fav.grid(row=1, column=0, sticky="we", padx=6, pady=(0, 6))
+        self.template_rows["favorites_tab"] = r_fav
+
+        # 任务列表改为弹窗配置
+
+        # 控制区
+        ctrl = ttk.Frame(frm)
+        ctrl.pack(fill=tk.X, padx=4, pady=(6, 4))
+        self.btn_snipe_start = ttk.Button(ctrl, text="开始任务", command=self._snipe_start)
+        self.btn_snipe_start.pack(side=tk.LEFT)
+        self.btn_snipe_stop = ttk.Button(ctrl, text="终止任务", command=self._snipe_stop_clicked)
+        self.btn_snipe_stop.pack(side=tk.LEFT, padx=6)
+        ttk.Button(ctrl, text="清空全部商品购买记录", command=self._snipe_clear_records).pack(side=tk.LEFT, padx=6)
+        ttk.Button(ctrl, text="配置任务", command=self._open_snipe_tasks_modal).pack(side=tk.LEFT, padx=(12, 0))
+
+        # 任务列表改为弹窗进行配置；此处仅提供预览与控制入口。
+        # 选择商品预览：弹出与任务配置相同的“选择物品”弹窗；
+        # 选择后在屏幕上定位卡片中间模板，依此推断价格区域并将鼠标先移动到“商品（中间图片）”位置，
+        # 再移动到“价格”位置，以示成功获取对应区域。
+        def _pick_preview():
+            def _after_pick(g: dict) -> None:
+                path = str(g.get("image_path", "") or "").strip()
+                name = str(g.get("name", "") or "")
+                if not path or not os.path.exists(path):
+                    messagebox.showwarning("预览", "所选物品缺少图片或路径不存在。")
+                    return
+                try:
+                    import pyautogui  # type: ignore
+                except Exception as e:
+                    messagebox.showerror("预览", f"缺少依赖：{e}")
+                    return
+                conf = 0.83
+                # 尝试定位中间模板
+                try:
+                    box = pyautogui.locateOnScreen(path, confidence=float(conf))
+                except Exception as e:
+                    messagebox.showerror("预览", f"调用屏幕匹配失败：{e}")
+                    return
+                if box is None:
+                    messagebox.showwarning("预览", f"未能在屏幕找到：{name}。请打开‘我的收藏/最近购买’并确保卡片清晰可见。")
+                    return
+                mid = (int(box.left), int(box.top), int(box.width), int(box.height))
+                # 依据 MultiSnipeRunner 的几何推断卡片与价格区域
+                try:
+                    if MultiSnipeRunner is not None:
+                        card = MultiSnipeRunner._infer_card_from_mid(mid)  # type: ignore[attr-defined]
+                        top_rect, btm_rect = MultiSnipeRunner._rois_from_card(card)  # type: ignore[attr-defined]
+                    else:
+                        # 回退常量：与 runner 中保持一致
+                        TOP_H, BTM_H = 20, 30
+                        MARG_LR, MARG_TB = 30, 20
+                        ml, mt, mw, mh = mid
+                        x1 = ml - MARG_LR
+                        y1 = mt - (TOP_H + MARG_TB)
+                        w = mw + 2 * MARG_LR
+                        h = (TOP_H + MARG_TB) + mh + (MARG_TB + BTM_H)
+                        card = (int(x1), int(y1), int(w), int(h))
+                        cl, ct, cw, ch = card
+                        top_rect = (cl, ct, cw, TOP_H)
+                        btm_rect = (cl, ct + ch - BTM_H, cw, BTM_H)
+                except Exception:
+                    messagebox.showerror("预览", "计算区域失败。")
+                    return
+                # 鼠标移动：先至中间模板中心，再至价格区域中心
+                try:
+                    cx_mid = int(mid[0] + mid[2] / 2)
+                    cy_mid = int(mid[1] + mid[3] / 2)
+                    cx_price = int(btm_rect[0] + btm_rect[2] / 2)
+                    cy_price = int(btm_rect[1] + btm_rect[3] / 2)
+                    pyautogui.moveTo(cx_mid, cy_mid, duration=0.12)
+                    time.sleep(0.15)
+                    pyautogui.moveTo(cx_price, cy_price, duration=0.12)
+                except Exception:
+                    pass
+                try:
+                    self._append_multi_log(f"[预览] {name} → mid={mid} price={btm_rect}")
+                except Exception:
+                    pass
+            # 使用与任务配置相同的物品选择器
+            self._open_goods_picker(_after_pick)
+
+        ttk.Button(ctrl, text="选择商品预览", command=_pick_preview).pack(side=tk.LEFT, padx=(12, 0))
+
+        # 日志
+        logf = ttk.LabelFrame(frm, text="日志")
+        logf.pack(fill=tk.BOTH, expand=True, padx=4, pady=(6, 4))
+        topbar = ttk.Frame(logf)
+        topbar.pack(fill=tk.X, padx=6, pady=(6, 0))
+        ttk.Label(topbar, text="日志等级").pack(side=tk.LEFT)
+        self.multi_log_level_var = tk.StringVar(value="info")
+        cmb = ttk.Combobox(topbar, width=8, state="readonly", values=["debug", "info", "error"], textvariable=self.multi_log_level_var)
+        cmb.pack(side=tk.LEFT, padx=6)
+        self.multi_txt = tk.Text(logf, height=12, wrap="word")
+        self.multi_txt.pack(fill=tk.BOTH, expand=True)
+        self.multi_txt.configure(state=tk.DISABLED)
+
+    # ---- 多商品抢购：数据加载/保存 ----
+    def _load_snipe_tasks_data(self, path: str) -> Dict[str, Any]:
+        try:
+            if os.path.exists(path):
+                import json
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    data.setdefault("items", [])
+                    return data
+        except Exception:
+            pass
+        return {"items": []}
+
+    def _save_snipe_tasks_data(self) -> None:
+        try:
+            import json
+            with open(self.snipe_tasks_path, "w", encoding="utf-8") as f:
+                json.dump(self.snipe_tasks_data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    # ---- 多商品抢购：日志 ----
+    def _append_multi_log(self, s: str) -> None:
+        try:
+            import threading as _th
+            if _th.current_thread() is not _th.main_thread():
+                self.after(0, self._append_multi_log, s)
+                return
+        except Exception:
+            pass
+        try:
+            lvl = self._parse_log_level(s)
+            if self._level_value(lvl) < self._level_value(self.multi_log_level_var.get() if hasattr(self, 'multi_log_level_var') else 'info'):
+                return
+        except Exception:
+            pass
+        with self._snipe_log_lock:
+            self.multi_txt.configure(state=tk.NORMAL)
+            self.multi_txt.insert(tk.END, time.strftime("[%H:%M:%S] ") + s + "\n")
+            self.multi_txt.see(tk.END)
+            self.multi_txt.configure(state=tk.DISABLED)
+
+    # ---- 多商品抢购：任务卡片 ----
+    def _render_snipe_task_cards(self) -> None:
+        self._render_snipe_task_cards_into(self.snipe_cards)
+
+    def _render_snipe_task_cards_into(self, parent, *, on_refresh=None) -> None:
+        for w in list(parent.winfo_children()):
+            try:
+                w.destroy()
+            except Exception:
+                pass
+        items: list[dict] = list(self.snipe_tasks_data.get("items", []) or [])
+        if not items:
+            ttk.Label(parent, text="暂无任务，点击‘新增…’添加。", foreground="#666").pack(anchor="w", padx=4, pady=6)
+            return
+        for i, it in enumerate(items):
+            self._build_snipe_task_card(parent, i, it, editable=(self._snipe_editing_index == i), on_refresh=on_refresh)
+
+    def _build_snipe_task_card(self, parent, idx: int | None, it: dict, *, editable: bool, on_refresh=None) -> None:
+        f = ttk.Frame(parent, relief=tk.GROOVE, borderwidth=1)
+        f.pack(fill=tk.X, padx=4, pady=4)
+        # 变量
+        var_enabled = tk.BooleanVar(value=bool(it.get("enabled", True)))
+        var_item_name = tk.StringVar(value=str(it.get("name", "")))
+        var_item_id = tk.StringVar(value=str(it.get("item_id", "")))
+        var_price = tk.IntVar(value=int(it.get("price", it.get("price_threshold", 0)) or 0))
+        var_prem = tk.DoubleVar(value=float(it.get("premium_pct", 0.0) or 0.0))
+        var_mode = tk.StringVar(value=str(it.get("purchase_mode", it.get("mode", "normal")) or "normal").lower())
+        var_qty = tk.IntVar(value=int(it.get("target_total", it.get("buy_qty", 0)) or 0))
+        var_img = tk.StringVar(value=str(it.get("image_path", it.get("template", "")) or ""))
+        var_big = tk.StringVar(value=str(it.get("big_category", "") or ""))
+
+        # 行1：启用、名称、选择
+        row1 = ttk.Frame(f)
+        row1.pack(fill=tk.X, padx=6, pady=(6, 4))
+        chk_enabled = ttk.Checkbutton(row1, text="启用", variable=var_enabled)
+        chk_enabled.pack(side=tk.LEFT)
+        ttk.Label(row1, text="商品").pack(side=tk.LEFT, padx=(12, 4))
+        ent_name = ttk.Entry(row1, textvariable=var_item_name, width=24, state=(tk.NORMAL if editable else tk.DISABLED))
+        ent_name.pack(side=tk.LEFT)
+        def _pick_goods():
+            def _on_pick(g):
+                var_item_name.set(str(g.get('name','')))
+                var_item_id.set(str(g.get('id','')))
+                p = str(g.get('image_path','') or '')
+                if p:
+                    var_img.set(p)
+                bc = str(g.get('big_category','') or '')
+                if bc:
+                    var_big.set(bc)
+            self._open_goods_picker(_on_pick)
+        ttk.Button(row1, text="选择…", command=_pick_goods, state=(tk.NORMAL if editable else tk.DISABLED)).pack(side=tk.LEFT, padx=(6,0))
+        # 只读态启用即时生效：切换即保存
+        if not editable and idx is not None:
+            def _save_enabled(*_):
+                try:
+                    items = list(self.snipe_tasks_data.get("items", []) or [])
+                    if 0 <= int(idx) < len(items):
+                        items[int(idx)]["enabled"] = bool(var_enabled.get())
+                        self.snipe_tasks_data["items"] = items
+                        self._save_snipe_tasks_data()
+                except Exception:
+                    pass
+            try:
+                var_enabled.trace_add("write", _save_enabled)
+            except Exception:
+                pass
+
+        # 预览（只读）——参考“购买任务配置”关键参数展示
+        if not editable:
+            preview = ttk.Frame(f)
+            preview.pack(fill=tk.X, padx=6, pady=(6, 0))
+            try:
+                base = int(var_price.get() or 0)
+            except Exception:
+                base = 0
+            try:
+                prem = float(var_prem.get() or 0.0)
+            except Exception:
+                prem = 0.0
+            limit = base + int(round(base * max(0.0, prem) / 100.0)) if base > 0 else 0
+            purchased = int(it.get("purchased", 0) or 0)
+            target = int(it.get("target_total", it.get("buy_qty", 0)) or 0)
+            mode_disp = "补货" if (var_mode.get() == "restock") else "正常"
+            # 两行栅格：第1行（名称、模式、进度）；第2行（价格、浮动%、上限）
+            r1 = ttk.Frame(preview)
+            r1.pack(fill=tk.X)
+            ttk.Label(r1, text=f"名称：{var_item_name.get()}").grid(row=0, column=0, sticky="w", padx=(0, 8))
+            ttk.Label(r1, text=f"模式：{mode_disp}").grid(row=0, column=1, sticky="w", padx=(0, 8))
+            ttk.Label(r1, text=f"进度：{purchased}/{target}").grid(row=0, column=2, sticky="w", padx=(0, 8))
+            r2 = ttk.Frame(preview)
+            r2.pack(fill=tk.X)
+            ttk.Label(r2, text=f"价格：{base}").grid(row=0, column=0, sticky="w", padx=(0, 8))
+            ttk.Label(r2, text=f"浮动：{int(prem)}%").grid(row=0, column=1, sticky="w", padx=(0, 8))
+            if limit > 0:
+                ttk.Label(r2, text=f"上限：{limit}").grid(row=0, column=2, sticky="w", padx=(0, 8))
+
+        # 行2：价格、浮动%、模式、数量（仅编辑态显示，非编辑态用上方预览）
+        if editable:
+            row2 = ttk.Frame(f)
+            row2.pack(fill=tk.X, padx=6, pady=(0, 6))
+            ttk.Label(row2, text="价格").pack(side=tk.LEFT)
+            ttk.Entry(row2, textvariable=var_price, width=10).pack(side=tk.LEFT, padx=(4, 8))
+            ttk.Label(row2, text="浮动% ").pack(side=tk.LEFT)
+            try:
+                sp_p = ttk.Spinbox(row2, from_=0.0, to=200.0, increment=0.5, textvariable=var_prem, width=8)
+            except Exception:
+                sp_p = tk.Spinbox(row2, from_=0.0, to=200.0, increment=0.5, textvariable=var_prem, width=8)
+            sp_p.pack(side=tk.LEFT)
+            ttk.Label(row2, text="模式").pack(side=tk.LEFT, padx=(12, 4))
+            # 中文展示/英文存储
+            var_mode_disp = tk.StringVar(value=("补货" if var_mode.get() == "restock" else "正常"))
+            cmb = ttk.Combobox(row2, values=["正常", "补货"], state="readonly", textvariable=var_mode_disp, width=10)
+            def _on_mode_change(_e=None):
+                try:
+                    v = var_mode_disp.get()
+                    var_mode.set("restock" if v == "补货" else "normal")
+                except Exception:
+                    pass
+            try:
+                cmb.bind("<<ComboboxSelected>>", _on_mode_change)
+            except Exception:
+                pass
+            cmb.pack(side=tk.LEFT)
+            ttk.Label(row2, text="目标数量").pack(side=tk.LEFT, padx=(12, 4))
+            try:
+                sp_q = ttk.Spinbox(row2, from_=1, to=120, increment=1, textvariable=var_qty, width=8)
+            except Exception:
+                sp_q = tk.Spinbox(row2, from_=1, to=120, increment=1, textvariable=var_qty, width=8)
+            sp_q.pack(side=tk.LEFT)
+            # 移除与补货无关的说明，保持列表简洁
+
+        # 行3：按钮
+        row3 = ttk.Frame(f)
+        row3.pack(fill=tk.X, padx=6, pady=(0, 8))
+        def _do_save():
+            name = (var_item_name.get() or "").strip()
+            iid = (var_item_id.get() or "").strip()
+            if not name or not iid:
+                messagebox.showwarning("保存", "请先选择商品。")
+                return
+            item = {
+                "id": str(it.get("id") or uuid.uuid4().hex),
+                "enabled": bool(var_enabled.get()),
+                "item_id": iid,
+                "name": name,
+                "image_path": (var_img.get() or ""),
+                "big_category": (var_big.get() or ""),
+                "price": int(var_price.get() or 0),
+                "premium_pct": float(var_prem.get() or 0.0),
+                "purchase_mode": str(var_mode.get() or "normal").lower(),
+                "target_total": int(var_qty.get() or 0),
+                "purchased": int(it.get("purchased", 0) or 0),
+            }
+            items = list(self.snipe_tasks_data.get("items", []) or [])
+            if idx is None:
+                items.append(item)
+            else:
+                items[idx] = item
+            self.snipe_tasks_data["items"] = items
+            self._snipe_editing_index = None
+            self._save_snipe_tasks_data()
+            if on_refresh:
+                try:
+                    on_refresh()
+                except Exception:
+                    pass
+            else:
+                self._render_snipe_task_cards()
+        def _do_edit():
+            self._snipe_editing_index = idx
+            if on_refresh:
+                on_refresh()
+            else:
+                self._render_snipe_task_cards()
+        def _do_cancel():
+            self._snipe_editing_index = None
+            if on_refresh:
+                on_refresh()
+            else:
+                self._render_snipe_task_cards()
+        def _do_delete():
+            if not messagebox.askokcancel("删除", f"确认删除 [{var_item_name.get()}]？"):
+                return
+            items = list(self.snipe_tasks_data.get("items", []) or [])
+            if idx is not None and 0 <= idx < len(items):
+                items.pop(idx)
+            self.snipe_tasks_data["items"] = items
+            self._snipe_editing_index = None
+            self._save_snipe_tasks_data()
+            if on_refresh:
+                on_refresh()
+            else:
+                self._render_snipe_task_cards()
+
+        if editable:
+            ttk.Button(row3, text="保存", command=_do_save).pack(side=tk.LEFT)
+            ttk.Button(row3, text="取消", command=_do_cancel).pack(side=tk.LEFT, padx=6)
+        else:
+            ttk.Button(row3, text="编辑", command=_do_edit).pack(side=tk.LEFT)
+            ttk.Button(row3, text="删除", command=_do_delete).pack(side=tk.LEFT, padx=6)
+
+    def _snipe_add_task(self) -> None:
+        self._snipe_editing_index = None
+        items = list(self.snipe_tasks_data.get("items", []) or [])
+        draft = {
+            "id": uuid.uuid4().hex,
+            "enabled": True,
+            "item_id": "",
+            "name": "",
+            "price": 0,
+            "premium_pct": 0.0,
+            "purchase_mode": "normal",
+            "buy_qty": 1,
+        }
+        items.append(draft)
+        self.snipe_tasks_data["items"] = items
+        self._snipe_editing_index = len(items) - 1
+        self._render_snipe_task_cards()
+
+    def _open_snipe_tasks_modal(self) -> None:
+        top = tk.Toplevel(self)
+        top.title("配置任务")
+        top.transient(self)
+        # 合适大小并居中于主窗口
+        try:
+            self._place_modal(top, 860, 600)
+        except Exception:
+            try:
+                top.geometry("860x600")
+            except Exception:
+                pass
+        try:
+            top.grab_set()
+        except Exception:
+            pass
+        frm = ttk.Frame(top)
+        frm.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+
+        # Top bar
+        tb = ttk.Frame(frm)
+        tb.pack(fill=tk.X)
+        def _refresh():
+            self._render_snipe_task_cards_into(cards, on_refresh=_refresh)
+        def _add():
+            self._snipe_editing_index = None
+            items = list(self.snipe_tasks_data.get("items", []) or [])
+            draft = {
+                "id": uuid.uuid4().hex,
+                "enabled": True,
+                "item_id": "",
+                "name": "",
+                "price": 0,
+                "premium_pct": 0.0,
+                "purchase_mode": "normal",
+                "target_total": 0,
+                "purchased": 0,
+            }
+            items.append(draft)
+            self.snipe_tasks_data["items"] = items
+            self._snipe_editing_index = len(items) - 1
+            _refresh()
+        ttk.Button(tb, text="新增…", command=_add).pack(side=tk.LEFT)
+
+        # Cards area with scrolling container
+        wrap = ttk.Frame(frm)
+        wrap.pack(fill=tk.BOTH, expand=True, pady=(6, 6))
+        canvas = tk.Canvas(wrap, highlightthickness=0)
+        vsb = ttk.Scrollbar(wrap, orient=tk.VERTICAL, command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        cards = ttk.Frame(canvas)
+        # Create window inside canvas
+        _win = canvas.create_window((0, 0), window=cards, anchor="nw")
+        # Update scrollregion on size change
+        def _on_cards_configure(_e=None):
+            try:
+                canvas.configure(scrollregion=canvas.bbox("all"))
+            except Exception:
+                pass
+        cards.bind("<Configure>", _on_cards_configure)
+        # Resize inner frame width to canvas width
+        def _on_canvas_configure(e):
+            try:
+                canvas.itemconfigure(_win, width=e.width)
+            except Exception:
+                pass
+        canvas.bind("<Configure>", _on_canvas_configure)
+        try:
+            self._bind_mousewheel(canvas, canvas)
+        except Exception:
+            pass
+        _refresh()
+
+        # Bottom buttons
+        bf = ttk.Frame(frm)
+        bf.pack(fill=tk.X)
+        ttk.Button(bf, text="关闭", command=top.destroy).pack(side=tk.RIGHT)
+
+    # ---- 多商品抢购：运行控制 ----
+    def _snipe_start(self) -> None:
+        if MultiSnipeRunner is None:
+            messagebox.showerror("启动", "模块缺失：multi_snipe_runner 未找到。")
+            return
+        if self._snipe_thread and self._snipe_thread.is_alive():
+            messagebox.showinfo("启动", "任务已在运行中。")
+            return
+        items_raw = list(self.snipe_tasks_data.get("items", []) or [])
+        if not items_raw:
+            messagebox.showwarning("启动", "任务清单为空，请先通过‘配置任务’添加。")
+            return
+        # 启动/恢复至市场页（与购买任务前奏一致）
+        try:
+            res = run_launch_flow(self.cfg, on_log=lambda s: self._append_multi_log(f"【INFO】{s}"))
+            if not res.ok:
+                messagebox.showerror("启动", f"启动失败：{res.error or res.code}")
+                return
+        except Exception as e:
+            messagebox.showerror("启动", f"启动流程异常：{e}")
+            return
+        # 确保进入市场页（若位于首页则点击进入）
+        try:
+            screen = ScreenOps(self.cfg, step_delay=0.02)
+            mk = screen.locate("market_indicator", timeout=0.4)
+            if mk is None:
+                btn = screen.locate("btn_market", timeout=0.8)
+                if btn is not None:
+                    screen.click_center(btn)
+        except Exception:
+            pass
+
+        # 构造运行器（日志级别由 Runner 内部控制，直接透传）
+        runner = MultiSnipeRunner(self.cfg, items_raw, on_log=lambda s: self._append_multi_log(s))
+        self._snipe_runner = runner
+        self._snipe_stop.clear()
+
+        def _loop():
+            while not self._snipe_stop.is_set():
+                try:
+                    res = runner.run_once()
+                except Exception as e:
+                    self._append_multi_log(f"【ERROR】运行异常：{e}")
+                    break
+                # 汇总输出
+                recs = res.get("recognized", []) or []
+                for r in recs:
+                    it = r.get("item")
+                    name = getattr(it, 'name', None) or (it.get('name') if isinstance(it, dict) else '')
+                    raw_txt = (r.get("price_text") or "").strip()
+                    val = r.get("price_value")
+                    self._append_multi_log(
+                        f"【DEBUG】识别 {name}：原始='{raw_txt}' 解析={val if val is not None else '-'}"
+                    )
+                bought = res.get("bought", []) or []
+                for b in bought:
+                    self._append_multi_log(f"【INFO】购买成功：{b.get('name','')} @ {b.get('price','')} (+{b.get('inc','?')})")
+                if bought:
+                    try:
+                        self._append_multi_purchase_records(bought)
+                    except Exception:
+                        pass
+                    # 同步进度到任务数据（按 id 累加 purchased）
+                    try:
+                        items = list(self.snipe_tasks_data.get('items', []) or [])
+                        idmap = {str(x.get('id')): x for x in items}
+                        for b in bought:
+                            iid = str(b.get('id',''))
+                            inc = int(b.get('inc', 0) or 0)
+                            if iid and iid in idmap:
+                                try:
+                                    idmap[iid]['purchased'] = int(idmap[iid].get('purchased', 0) or 0) + inc
+                                except Exception:
+                                    pass
+                        self.snipe_tasks_data['items'] = list(idmap.values())
+                        self._save_snipe_tasks_data()
+                    except Exception:
+                        pass
+                time.sleep(0.2)
+
+        import threading as _th
+        self._snipe_thread = _th.Thread(target=_loop, daemon=True)
+        self._snipe_thread.start()
+        self._append_multi_log("【INFO】多商品抢购：已启动。")
+        # 更新按钮状态并开始轮询线程存活
+        try:
+            self._update_snipe_buttons()
+            self._poll_snipe_thread()
+        except Exception:
+            pass
+
+    def _snipe_stop_clicked(self) -> None:
+        try:
+            self._snipe_stop.set()
+        except Exception:
+            pass
+        self._append_multi_log("【INFO】多商品抢购：已请求终止。")
+        try:
+            self._update_snipe_buttons()
+        except Exception:
+            pass
+
+    def _update_snipe_buttons(self) -> None:
+        """根据线程状态切换开始/终止按钮可用性。"""
+        running = bool(self._snipe_thread and self._snipe_thread.is_alive())
+        try:
+            self.btn_snipe_start.configure(state=(tk.DISABLED if running else tk.NORMAL))
+        except Exception:
+            pass
+        try:
+            self.btn_snipe_stop.configure(state=(tk.NORMAL if running else tk.DISABLED))
+        except Exception:
+            pass
+
+    def _poll_snipe_thread(self) -> None:
+        """轮询线程状态，在线程结束时恢复按钮状态。"""
+        try:
+            if self._snipe_thread and self._snipe_thread.is_alive():
+                self.after(400, self._poll_snipe_thread)
+            else:
+                self._update_snipe_buttons()
+        except Exception:
+            pass
+
+    def _snipe_clear_records(self) -> None:
+        # 清理本模式购买记录（简单实现：删除输出文件）
+        outp = os.path.join("output", "multi_snipe_purchases.json")
+        try:
+            if os.path.exists(outp):
+                os.remove(outp)
+            self._append_multi_log("【INFO】已清空本模式购买记录。")
+        except Exception:
+            pass
+
+    def _append_multi_purchase_records(self, recs: List[Dict[str, Any]]) -> None:
+        os.makedirs("output", exist_ok=True)
+        path = os.path.join("output", "multi_snipe_purchases.json")
+        try:
+            import json
+            data: List[Dict[str, Any]]
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    cur = json.load(f)
+                    data = cur if isinstance(cur, list) else []
+            else:
+                data = []
+            # attach timestamp
+            ts = time.strftime("%Y-%m-%d %H:%M:%S")
+            for r in recs:
+                r = dict(r)
+                r["time"] = ts
+                data.append(r)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    def _open_snipe_tasks_editor(self) -> None:
+        top = tk.Toplevel(self)
+        top.title("配置任务（JSON）")
+        top.transient(self)
+        try:
+            top.grab_set()
+        except Exception:
+            pass
+        frm = ttk.Frame(top)
+        frm.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        txt = tk.Text(frm, wrap="word")
+        txt.pack(fill=tk.BOTH, expand=True)
+        # init content
+        try:
+            import json
+            txt.insert("1.0", json.dumps(self.snipe_tasks_data, ensure_ascii=False, indent=2))
+        except Exception:
+            txt.insert("1.0", "{\n  \"items\": []\n}")
+        btnf = ttk.Frame(frm)
+        btnf.pack(fill=tk.X, pady=(6, 0))
+        def _save():
+            try:
+                import json
+                data = json.loads(txt.get("1.0", tk.END))
+                if not isinstance(data, dict):
+                    raise ValueError("顶层必须是对象 {…}")
+                data.setdefault("items", [])
+                self.snipe_tasks_data = data
+                self._save_snipe_tasks_data()
+                messagebox.showinfo("保存", "已保存。")
+            except Exception as e:
+                messagebox.showerror("保存", f"解析失败：{e}")
+        ttk.Button(btnf, text="保存", command=_save).pack(side=tk.RIGHT)
+        ttk.Button(btnf, text="关闭", command=top.destroy).pack(side=tk.RIGHT, padx=(0, 8))
+
+
     # ---------- Tab: 利润计算 ----------
     def _build_tab_profit(self) -> None:
         outer = self.tab_profit
@@ -7250,10 +8472,10 @@ class GoodsMarketUI(ttk.Frame):
         return tkimg
 
     def _quick_capture_item_image(self, item: dict) -> None:
-        """在卡片上执行快速截图（与编辑对话框中的固定尺寸截图一致）。
+        """在卡片上执行快速截图（与“测试”页截取样式一致）。
 
-        - 使用固定尺寸 135x110 的选择框，鼠标移动跟随，左键确认。
-        - 保存到对应大类目录下并更新该物品的 `image_path`。
+        - 使用卡片样式固定框 165x212（上 20 / 下 30），中间图片区域左右 30、上下 20。
+        - 仅截取中间图片区域并保存到对应大类目录，更新该物品的 `image_path`。
         - 刷新画廊并清理该物品缩略图缓存。
         """
         iid = str(item.get("id", ""))
@@ -7267,16 +8489,34 @@ class GoodsMarketUI(ttk.Frame):
             nonlocal result_path
             if not bounds:
                 return
+            # 卡片整体坐标（根据卡片样式 165x212 推导中间图片区域）
             x1, y1, x2, y2 = bounds
-            w, h = max(1, int(x2 - x1)), max(1, int(y2 - y1))
+            card_w, card_h = max(1, int(x2 - x1)), max(1, int(y2 - y1))
+            # 固定样式：若用户改变了外框大小，仍按 165x212 的比例与边距推导中间区域
+            CARD_W, CARD_H = 165, 212
+            TOP_H, BTM_H = 20, 30
+            MID_H = CARD_H - TOP_H - BTM_H  # 162
+            MARG_LR, MARG_TB = 30, 20
+
+            # 以左上角为基准，推导中间图片区域（不因拖拽尺寸变化而改变）
+            ix = int(x1 + MARG_LR)
+            iy = int(y1 + TOP_H + MARG_TB)
+            iw = int(CARD_W - 2 * MARG_LR)
+            ih = int(MID_H - 2 * MARG_TB)
+
+            # 屏幕裁剪
+            try:
+                W, H = root.winfo_screenwidth(), root.winfo_screenheight()
+            except Exception:
+                W = H = 10**6
+            ix = max(0, min(ix, max(0, W - 1)))
+            iy = max(0, min(iy, max(0, H - 1)))
+            iw = max(1, min(iw, W - ix))
+            ih = max(1, min(ih, H - iy))
+
             try:
                 import pyautogui  # type: ignore
-
-                # 适当裁剪到屏幕范围（避免越界）
-                sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
-                x1b = max(0, min(int(x1), max(0, sw - w)))
-                y1b = max(0, min(int(y1), max(0, sh - h)))
-                img = pyautogui.screenshot(region=(x1b, y1b, w, h))
+                img = pyautogui.screenshot(region=(ix, iy, iw, ih))
             except Exception as e:
                 messagebox.showerror("截图", f"截屏失败: {e}")
                 return
@@ -7297,7 +8537,8 @@ class GoodsMarketUI(ttk.Frame):
                 return
             result_path = path
 
-        sel = _FixedSizeSelector(root, 135, 110, _done)
+        # 使用与“测试”页一致的卡片选择器样式
+        sel = _CardSelector(root, _done, w=165, h=212, top_h=20, bottom_h=30, margin_lr=30, margin_tb=20)
         try:
             sel.show()
         except Exception:
@@ -7416,7 +8657,7 @@ class GoodsMarketUI(ttk.Frame):
                 _update_preview()
 
         def _capture_to_cat():
-            # 固定尺寸截取（135x110），鼠标移动跟随，左键确认；仅用于商品新增/编辑页面
+            # 卡片样式截取（165x212；上 20 / 下 30；中间图片区域左右 30、上下 20）
             root = self.winfo_toplevel()
             result_path: str | None = None
 
@@ -7424,23 +8665,42 @@ class GoodsMarketUI(ttk.Frame):
                 nonlocal result_path
                 if not bounds:
                     return
+                # 按“测试”页样式从卡片整体推导中间图片区域
                 x1, y1, x2, y2 = bounds
-                w, h = max(1, x2 - x1), max(1, y2 - y1)
+                CARD_W, CARD_H = 165, 212
+                TOP_H, BTM_H = 20, 30
+                MID_H = CARD_H - TOP_H - BTM_H
+                MARG_LR, MARG_TB = 30, 20
+
+                ix = int(x1 + MARG_LR)
+                iy = int(y1 + TOP_H + MARG_TB)
+                iw = int(CARD_W - 2 * MARG_LR)
+                ih = int(MID_H - 2 * MARG_TB)
+
+                # 屏幕裁剪
+                try:
+                    W, H = root.winfo_screenwidth(), root.winfo_screenheight()
+                except Exception:
+                    W = H = 10**6
+                ix = max(0, min(ix, max(0, W - 1)))
+                iy = max(0, min(iy, max(0, H - 1)))
+                iw = max(1, min(iw, W - ix))
+                ih = max(1, min(ih, H - iy))
+
                 try:
                     import pyautogui  # type: ignore
-
-                    # 适当裁剪到屏幕范围（避免越界）
-                    sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
-                    x1b = max(0, min(int(x1), max(0, sw - w)))
-                    y1b = max(0, min(int(y1), max(0, sh - h)))
-                    img = pyautogui.screenshot(region=(x1b, y1b, int(w), int(h)))
+                    img = pyautogui.screenshot(region=(ix, iy, int(iw), int(ih)))
                 except Exception as e:
                     messagebox.showerror("截图", f"截屏失败: {e}")
                     return
+
                 # 保存到对应大类
                 big_cat = var_big.get().strip() or "misc"
                 base_dir = self._category_dir(big_cat)
-                os.makedirs(base_dir, exist_ok=True)
+                try:
+                    os.makedirs(base_dir, exist_ok=True)
+                except Exception:
+                    pass
                 fname = f"{uuid.uuid4().hex}.png"
                 path = os.path.join(base_dir, fname)
                 try:
@@ -7450,7 +8710,7 @@ class GoodsMarketUI(ttk.Frame):
                     return
                 result_path = path
 
-            sel = _FixedSizeSelector(root, 135, 110, _done)
+            sel = _CardSelector(root, _done, w=165, h=212, top_h=20, bottom_h=30, margin_lr=30, margin_tb=20)
             try:
                 sel.show()
             except Exception:

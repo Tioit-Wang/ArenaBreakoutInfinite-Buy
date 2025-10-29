@@ -8,12 +8,12 @@
             "price_premium_pct": 1.0,
             "restock_price": 5700,
             "restock_premium_pct": 2.0,
-            "target_total": 10000,
+            "target_total": 20000,
             "duration_min": 600,
             "time_start": "",
             "time_end": "",
             "id": "185cc6ea-b060-4c7b-aeeb-4505ec035f60",
-            "purchased": 620,
+            "purchased": 3940,
             "order": 0
         },
         {

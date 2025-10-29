@@ -93,6 +93,14 @@
         "btn_exit_confirm": {
             "path": "images\\btn_exit_confirm.png",
             "confidence": 0.85
+        },
+        "recent_purchases_tab": {
+            "path": "images\\recent_purchases_tab.png",
+            "confidence": 0.85
+        },
+        "favorites_tab": {
+            "path": "images\\favorites_tab.png",
+            "confidence": 0.85
         }
     },
     "purchase": {
