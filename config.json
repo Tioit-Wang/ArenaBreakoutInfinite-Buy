@@ -190,5 +190,10 @@
         "un_clip_ratio": 2.0,
         "do_angle": 1,
         "most_angle": 1
+    },
+    "debug": {
+        "enabled": true,
+        "overlay_sec": 8.5,
+        "step_sleep": 1.0
     }
 }

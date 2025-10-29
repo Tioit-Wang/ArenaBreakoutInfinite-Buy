@@ -37,8 +37,14 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
     from PIL import Image  # type: ignore
+    from PIL import ImageDraw  # type: ignore
+    from PIL import ImageFont  # type: ignore
+    from PIL import ImageTk  # type: ignore
 except Exception:
     Image = None  # type: ignore
+    ImageDraw = None  # type: ignore
+    ImageFont = None  # type: ignore
+    ImageTk = None  # type: ignore
 
 from task_runner import ScreenOps, _parse_price_text  # type: ignore
 
@@ -82,7 +88,6 @@ class MultiSnipeRunner:
     def __init__(self, cfg: Dict[str, Any], items: List[Dict[str, Any]] | List[SnipeItem], on_log: Callable[[str], None]) -> None:
         self.cfg = cfg
         self.on_log = on_log
-        self.screen = ScreenOps(cfg, step_delay=0.02)
         self.items: List[SnipeItem] = []
         for it in items:
             if isinstance(it, SnipeItem):
@@ -115,6 +120,40 @@ class MultiSnipeRunner:
         # 中间模板框缓存：item.id -> mid_rect (x,y,w,h)，用于更稳的点击进入详情
         self._mid_cache: Dict[str, Tuple[int, int, int, int]] = {}
 
+        # Debug 配置（可视化蒙版 + 额外节流）
+        dbg = (self.cfg.get("debug", {}) or {})
+        try:
+            self._debug_enabled = bool(dbg.get("enabled", False))
+        except Exception:
+            self._debug_enabled = False
+        try:
+            self._debug_overlay_sec = float(dbg.get("overlay_sec", 5.0) or 5.0)
+        except Exception:
+            self._debug_overlay_sec = 5.0
+        try:
+            self._debug_step_sleep = float(dbg.get("step_sleep", 0.0) or 0.0)
+        except Exception:
+            self._debug_step_sleep = 0.0
+        try:
+            self._debug_save_dir = str(dbg.get("save_dir", "debug"))
+        except Exception:
+            self._debug_save_dir = "debug"
+
+        # ScreenOps：若开启调试，则把 step_delay 抬高（优先使用 debug.step_sleep）
+        try:
+            base_delay = 0.02
+            if self._debug_enabled:
+                # clamp to [0.02, 0.2]
+                dd = float(self._debug_step_sleep or 0.0)
+                if dd < base_delay:
+                    dd = base_delay
+                if dd > 0.2:
+                    dd = 0.2
+                base_delay = dd
+            self.screen = ScreenOps(cfg, step_delay=float(base_delay))
+        except Exception:
+            self.screen = ScreenOps(cfg, step_delay=0.02)
+
     # ---------- Utils ----------
     def _log(self, s: str) -> None:
         try:
@@ -135,6 +174,234 @@ class MultiSnipeRunner:
         t = (self.cfg.get("templates", {}) or {}).get(key) or {}
         return str(t.get("path", "")), float(t.get("confidence", 0.85) or 0.85)
 
+    # ---------- Debug helpers ----------
+    def _debug_active(self) -> bool:
+        return bool(getattr(self, "_debug_enabled", False))
+
+    def _debug_pause(self, label: str = "") -> None:
+        if not self._debug_active():
+            return
+        try:
+            d = float(getattr(self, "_debug_step_sleep", 0.0) or 0.0)
+        except Exception:
+            d = 0.0
+        if d > 0:
+            time.sleep(d)
+
+    def _debug_screenshot_full(self):
+        try:
+            return self.screen._pg.screenshot()
+        except Exception:
+            return None
+
+    @staticmethod
+    def _to_xyxy(rect: Tuple[int, int, int, int]) -> Tuple[int, int, int, int]:
+        x, y, w, h = rect
+        return int(x), int(y), int(x + w), int(y + h)
+
+    def _debug_build_annotated(self,
+                               base_img,
+                               overlays: List[Dict[str, Any]],
+                               *,
+                               stage: str = "",
+                               template_path: Optional[str] = None) -> Optional[Any]:
+        """在整屏截图基础上绘制半透明蒙版与 ROI 结构。
+
+        overlays: [{"rect": (l,t,w,h), "label": str, "fill": (r,g,b,alpha), "outline": (r,g,b)}]
+        返回：PIL.Image 或 None
+        """
+        if Image is None:
+            return None
+        try:
+            img = base_img.convert("RGBA")
+        except Exception:
+            return None
+        W, H = img.size
+        # 全屏半透明蒙版
+        try:
+            mask = Image.new("RGBA", (W, H), (0, 0, 0, 120))
+            img = Image.alpha_composite(img, mask)
+        except Exception:
+            pass
+        try:
+            draw = ImageDraw.Draw(img)
+        except Exception:
+            return None
+        # 绘制每个 ROI
+        for ov in overlays:
+            rect = ov.get("rect")
+            if not rect:
+                continue
+            x1, y1, x2, y2 = self._to_xyxy(rect)
+            fill = ov.get("fill") or (255, 255, 0, 80)
+            outline = ov.get("outline") or (255, 255, 0)
+            # 填充（较低透明度）
+            try:
+                roi_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+                roi_draw = ImageDraw.Draw(roi_layer)
+                roi_draw.rectangle([x1, y1, x2, y2], fill=fill)
+                img = Image.alpha_composite(img, roi_layer)
+                draw = ImageDraw.Draw(img)
+            except Exception:
+                try:
+                    draw.rectangle([x1, y1, x2, y2], outline=outline, width=2)
+                except Exception:
+                    pass
+            # 外轮廓
+            try:
+                draw.rectangle([x1, y1, x2, y2], outline=outline, width=2)
+            except Exception:
+                pass
+            # 标签
+            label = str(ov.get("label") or "")
+            if label:
+                try:
+                    tw, th = draw.textlength(label), 14
+                except Exception:
+                    tw, th = len(label) * 8, 14
+                pad = 4
+                bx1, by1 = x1 + 2, y1 + 2
+                bx2, by2 = bx1 + int(tw) + pad * 2, by1 + th + pad
+                try:
+                    draw.rectangle([bx1, by1, bx2, by2], fill=(0, 0, 0, 160))
+                except Exception:
+                    pass
+                try:
+                    draw.text((bx1 + pad, by1 + pad // 2), label, fill=(255, 255, 255, 255))
+                except Exception:
+                    pass
+        # 阶段标题
+        if stage:
+            try:
+                t = f"调试：{stage}"
+                tw, th = draw.textlength(t), 16
+            except Exception:
+                t, tw, th = f"调试：{stage}", len(stage) * 8 + 32, 16
+            try:
+                cx, top = W // 2, 20
+                draw.rectangle([cx - tw // 2 - 8, top - 6, cx + tw // 2 + 8, top + th + 6], fill=(0, 0, 0, 170))
+                draw.text((cx - tw // 2, top), t, fill=(255, 255, 255, 255))
+            except Exception:
+                pass
+        # 在左上角贴上模板图片缩略图
+        if template_path and os.path.exists(template_path):
+            try:
+                tpl = Image.open(template_path).convert("RGBA")
+                maxw = 240
+                ratio = min(1.0, maxw / max(1, tpl.width))
+                tpl = tpl.resize((max(1, int(tpl.width * ratio)), max(1, int(tpl.height * ratio))))
+                # 放在 16, 60 处
+                x_off, y_off = 16, 60
+                # 边框底板
+                draw.rectangle([x_off - 6, y_off - 24, x_off + tpl.width + 6, y_off + tpl.height + 6], fill=(0, 0, 0, 180))
+                draw.text((x_off, y_off - 18), "模板预览", fill=(255, 255, 255, 255))
+                img.alpha_composite(tpl, dest=(x_off, y_off))
+            except Exception:
+                pass
+        return img.convert("RGB")
+
+    def _debug_show_overlay(self,
+                            overlays: List[Dict[str, Any]],
+                            *,
+                            stage: str,
+                            template_path: Optional[str] = None,
+                            save_name: Optional[str] = None) -> None:
+        """显示 5s 叠加蒙版；若 Tk 不可用，则落盘图片并等待 5s。
+
+        overlays: 列表，每项含 rect=(l,t,w,h), label, 颜色
+        """
+        if not self._debug_active():
+            return
+        base = self._debug_screenshot_full()
+        if base is None:
+            time.sleep(max(0.0, float(self._debug_overlay_sec)))
+            return
+        annotated = self._debug_build_annotated(base, overlays, stage=stage, template_path=template_path)
+        if annotated is None:
+            time.sleep(max(0.0, float(self._debug_overlay_sec)))
+            return
+        # 保存调试图片
+        try:
+            os.makedirs(self._debug_save_dir, exist_ok=True)
+            ts = time.strftime("%Y%m%d_%H%M%S")
+            name = save_name or f"overlay_{ts}.png"
+            annotated.save(os.path.join(self._debug_save_dir, name))
+        except Exception:
+            pass
+        # 在屏幕中央展示 5s（尽量走 Tk 主线程）
+        try:
+            import tkinter as tk  # type: ignore
+            root = getattr(tk, "_default_root", None)
+        except Exception:
+            root = None
+        delay_ms = int(max(0.0, float(self._debug_overlay_sec)) * 1000)
+        if root is None:
+            time.sleep(max(0.0, float(self._debug_overlay_sec)))
+            return
+        done = threading.Event()
+
+        def _spawn():
+            try:
+                top = tk.Toplevel(root)
+                try:
+                    top.attributes("-topmost", True)
+                except Exception:
+                    pass
+                top.overrideredirect(True)
+                sw, sh = int(root.winfo_screenwidth()), int(root.winfo_screenheight())
+                iw, ih = int(annotated.width), int(annotated.height)
+                # 缩放以适配屏幕
+                scale = min(1.0, (sw - 80) / max(1, iw), (sh - 80) / max(1, ih))
+                disp = annotated
+                if scale < 0.999:
+                    try:
+                        disp = annotated.resize((max(1, int(iw * scale)), max(1, int(ih * scale))))
+                    except Exception:
+                        pass
+                iw2, ih2 = disp.width, disp.height
+                x = max(0, (sw - iw2) // 2)
+                y = max(0, (sh - ih2) // 2)
+                try:
+                    top.geometry(f"{iw2}x{ih2}+{x}+{y}")
+                except Exception:
+                    pass
+                # 显示图片
+                try:
+                    from PIL import ImageTk as _ImageTk  # type: ignore
+                except Exception:
+                    _ImageTk = None  # type: ignore
+                if _ImageTk is None:
+                    try:
+                        top.after(delay_ms, lambda: (top.destroy(), done.set()))
+                        return
+                    except Exception:
+                        done.set()
+                        return
+                try:
+                    photo = _ImageTk.PhotoImage(disp)
+                except Exception:
+                    top.after(delay_ms, lambda: (top.destroy(), done.set()))
+                    return
+                import tkinter as tk2  # type: ignore
+                lbl = tk2.Label(top, image=photo, borderwidth=0, highlightthickness=0)
+                lbl.image = photo  # Prevent GC
+                lbl.pack(fill=tk2.BOTH, expand=True)
+                try:
+                    top.after(delay_ms, lambda: (top.destroy(), done.set()))
+                except Exception:
+                    done.set()
+            except Exception:
+                done.set()
+
+        try:
+            root.after(0, _spawn)
+        except Exception:
+            # Fallback：阻塞等待
+            time.sleep(max(0.0, float(self._debug_overlay_sec)))
+            return
+        # 阻塞等待窗口关闭
+        done.wait(timeout=(max(5.0, float(self._debug_overlay_sec) + 1.0)))
+
     # ---------- 刷新（最近购买 -> 我的收藏） ----------
     def refresh_favorites(self) -> bool:
         rp_path, rp_conf = self._tpl("recent_purchases_tab")
@@ -146,15 +413,26 @@ class MultiSnipeRunner:
         try:
             box = self.screen._pg.locateOnScreen(rp_path, confidence=rp_conf)
             if box is not None:
-                self.screen.click_center((int(box.left), int(box.top), int(box.width), int(box.height)))
+                rect = (int(box.left), int(box.top), int(box.width), int(box.height))
+                self.screen.click_center(rect)
+                # Debug 可视化：最近购买模板与位置
+                self._debug_show_overlay([
+                    {"rect": rect, "label": "最近购买", "fill": (45, 124, 255, 90), "outline": (45, 124, 255)},
+                ], stage="刷新：最近购买", template_path=rp_path, save_name="overlay_refresh_rp.png")
                 time.sleep(0.05)
+                self._debug_pause("after_click_rp")
         except Exception:
             pass
         # 第二步：点击我的收藏（此时应为未选中态，可匹配）
         try:
             box = self.screen._pg.locateOnScreen(fav_path, confidence=fav_conf)
             if box is not None:
-                self.screen.click_center((int(box.left), int(box.top), int(box.width), int(box.height)))
+                rect = (int(box.left), int(box.top), int(box.width), int(box.height))
+                self.screen.click_center(rect)
+                # Debug 可视化：我的收藏模板与位置
+                self._debug_show_overlay([
+                    {"rect": rect, "label": "我的收藏", "fill": (46, 160, 67, 90), "outline": (46, 160, 67)},
+                ], stage="刷新：我的收藏", template_path=fav_path, save_name="overlay_refresh_fav.png")
                 time.sleep(0.05)
                 self._log("[刷新] 已执行：最近购买 -> 我的收藏")
                 return True
@@ -206,6 +484,17 @@ class MultiSnipeRunner:
         self._mid_cache[item.id] = mid
         self._card_cache[item.id] = card
         self._log_debug(f"[定位][{item.name}] mid={mid} card={card}")
+        # Debug 可视化：卡片结构与 ROI 区域
+        try:
+            top_rect, btm_rect = self._rois_from_card(card)
+            self._debug_show_overlay([
+                {"rect": card, "label": f"卡片[{item.name}]", "fill": (204, 204, 204, 40), "outline": (204, 204, 204)},
+                {"rect": mid, "label": "中间模板", "fill": (255, 216, 77, 90), "outline": (255, 216, 77)},
+                {"rect": top_rect, "label": "名称区(Top)", "fill": (45, 124, 255, 90), "outline": (45, 124, 255)},
+                {"rect": btm_rect, "label": "价格区(Bottom)", "fill": (46, 160, 67, 90), "outline": (46, 160, 67)},
+            ], stage="卡片定位与ROI", template_path=item.template, save_name=f"overlay_card_{item.id}.png")
+        except Exception:
+            pass
         return True
 
     # ---------- 批量截图 ----------
@@ -235,6 +524,14 @@ class MultiSnipeRunner:
             if name_img is None or price_img is None:
                 self._log(f"[截图][{it.name}] 失败：ROI 越界或截屏异常。")
                 continue
+            # Debug 可视化：即将 OCR 的两个 ROI
+            try:
+                self._debug_show_overlay([
+                    {"rect": top_rect, "label": f"名称ROI[{it.name}]", "fill": (45, 124, 255, 90), "outline": (45, 124, 255)},
+                    {"rect": btm_rect, "label": f"价格ROI[{it.name}]", "fill": (46, 160, 67, 90), "outline": (46, 160, 67)},
+                ], stage="列表OCR区域", template_path=it.template, save_name=f"overlay_rois_{it.id}.png")
+            except Exception:
+                pass
             jobs.append({
                 "item": it,
                 "name_img": name_img,
@@ -315,6 +612,14 @@ class MultiSnipeRunner:
         if height <= 0 or width <= 0:
             return None
         roi = (x_left, y_top, width, height)
+        # Debug 可视化：详情页平均价OCR区域（以购买按钮为锚）
+        try:
+            self._debug_show_overlay([
+                {"rect": (b_left, b_top, b_w, _b_h), "label": "按钮-购买", "fill": (255, 99, 71, 70), "outline": (255, 99, 71)},
+                {"rect": roi, "label": "详情均价OCR区域", "fill": (255, 216, 77, 90), "outline": (255, 216, 77)},
+            ], stage="详情价复核区域", template_path=None, save_name="overlay_detail_avg.png")
+        except Exception:
+            pass
         img = self._screenshot(roi)
         if img is None:
             return None
@@ -446,6 +751,13 @@ class MultiSnipeRunner:
         target_box = mid or card
         if not target_box:
             return False, 0
+        # Debug：进入详情前可视化点击区域
+        try:
+            self._debug_show_overlay([
+                {"rect": target_box, "label": f"进入详情[{it.name}]", "fill": (45, 124, 255, 90), "outline": (45, 124, 255)},
+            ], stage="进入详情点击", template_path=getattr(it, "template", None) or None, save_name=f"overlay_enter_{it.id}.png")
+        except Exception:
+            pass
         self.screen.click_center(target_box)
         time.sleep(0.05)
         # 详情价复核：以“购买”按钮为锚点
@@ -455,6 +767,13 @@ class MultiSnipeRunner:
         if unit is None or int(unit) > int(price_limit):
             c = self.screen.locate("btn_close", timeout=0.3)
             if c is not None:
+                # Debug：复核失败时，标注关闭按钮
+                try:
+                    self._debug_show_overlay([
+                        {"rect": c, "label": "关闭详情", "fill": (255, 99, 71, 70), "outline": (255, 99, 71)},
+                    ], stage="复核未通过-关闭详情", template_path=None, save_name="overlay_close_on_reject.png")
+                except Exception:
+                    pass
                 self.screen.click_center(c)
             return False, 0
         # 购买数量/Max 逻辑
@@ -480,20 +799,52 @@ class MultiSnipeRunner:
             if c is not None:
                 self.screen.click_center(c)
             return False, 0
+        # Debug：购买按钮点击
+        try:
+            buy_tpl, _ = self._tpl("btn_buy")
+            self._debug_show_overlay([
+                {"rect": b, "label": "购买按钮", "fill": (46, 160, 67, 90), "outline": (46, 160, 67)},
+            ], stage="点击购买", template_path=(buy_tpl if buy_tpl and os.path.exists(buy_tpl) else None), save_name="overlay_click_buy.png")
+        except Exception:
+            pass
         self.screen.click_center(b)
         t_end = time.time() + 0.6
         got_ok = False
         found_fail = False
         while time.time() < t_end:
-            if self.screen.locate("buy_ok", timeout=0.0) is not None:
+            ok_box = self.screen.locate("buy_ok", timeout=0.0)
+            if ok_box is not None:
                 got_ok = True
+                # Debug：购买成功标识
+                try:
+                    ok_tpl, _ = self._tpl("buy_ok")
+                    self._debug_show_overlay([
+                        {"rect": ok_box, "label": "购买成功", "fill": (46, 160, 67, 90), "outline": (46, 160, 67)},
+                    ], stage="购买结果-成功", template_path=(ok_tpl if ok_tpl and os.path.exists(ok_tpl) else None), save_name="overlay_buy_ok.png")
+                except Exception:
+                    pass
                 break
-            if self.screen.locate("buy_fail", timeout=0.0) is not None:
+            fail_box = self.screen.locate("buy_fail", timeout=0.0)
+            if fail_box is not None:
                 found_fail = True
+                # Debug：购买失败标识
+                try:
+                    fail_tpl, _ = self._tpl("buy_fail")
+                    self._debug_show_overlay([
+                        {"rect": fail_box, "label": "购买失败", "fill": (255, 99, 71, 90), "outline": (255, 99, 71)},
+                    ], stage="购买结果-失败", template_path=(fail_tpl if fail_tpl and os.path.exists(fail_tpl) else None), save_name="overlay_buy_fail.png")
+                except Exception:
+                    pass
             time.sleep(0.02)
         # 关闭详情
         c = self.screen.locate("btn_close", timeout=0.4)
         if c is not None:
+            try:
+                self._debug_show_overlay([
+                    {"rect": c, "label": "关闭详情", "fill": (45, 124, 255, 70), "outline": (45, 124, 255)},
+                ], stage="关闭详情", template_path=None, save_name="overlay_close_after_buy.png")
+            except Exception:
+                pass
             self.screen.click_center(c)
         if not (got_ok and not found_fail):
             return False, 0

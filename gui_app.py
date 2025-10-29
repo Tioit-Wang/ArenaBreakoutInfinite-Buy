@@ -2487,6 +2487,95 @@ class App(tk.Tk):
             except Exception:
                 pass
 
+        # 调试模式（可视化蒙版 + 步进延时）
+        box_dbg = ttk.LabelFrame(outer, text="调试模式")
+        box_dbg.pack(fill=tk.X, padx=8, pady=8)
+        dbg_cfg = self.cfg.get("debug", {}) if isinstance(self.cfg.get("debug"), dict) else {}
+        try:
+            self.var_debug_enabled = tk.BooleanVar(value=bool(dbg_cfg.get("enabled", False)))
+        except Exception:
+            self.var_debug_enabled = tk.BooleanVar(value=False)
+        try:
+            _ov = float(dbg_cfg.get("overlay_sec", 5.0))
+        except Exception:
+            _ov = 5.0
+        self.var_debug_overlay = tk.DoubleVar(value=_ov)
+        try:
+            _st = float(dbg_cfg.get("step_sleep", 0.0))
+        except Exception:
+            _st = 0.0
+        self.var_debug_step = tk.DoubleVar(value=_st)
+
+        chk = ttk.Checkbutton(box_dbg, text="启用调试可视化（绘制ROI/模板）", variable=self.var_debug_enabled)
+        chk.grid(row=0, column=0, columnspan=2, sticky="w", padx=6, pady=(4, 2))
+        ttk.Label(box_dbg, text="蒙版时长(秒)").grid(row=1, column=0, sticky="e", padx=6, pady=4)
+        try:
+            sp_ov = ttk.Spinbox(box_dbg, from_=0.5, to=15.0, increment=0.5, width=8, textvariable=self.var_debug_overlay)
+        except Exception:
+            sp_ov = tk.Spinbox(box_dbg, from_=0.5, to=15.0, increment=0.5, width=8, textvariable=self.var_debug_overlay)
+        sp_ov.grid(row=1, column=1, sticky="w")
+        ttk.Label(box_dbg, text="步进延时(秒)").grid(row=1, column=2, sticky="e", padx=12)
+        try:
+            sp_st = ttk.Spinbox(box_dbg, from_=0.0, to=1.0, increment=0.01, width=8, textvariable=self.var_debug_step)
+        except Exception:
+            sp_st = tk.Spinbox(box_dbg, from_=0.0, to=1.0, increment=0.01, width=8, textvariable=self.var_debug_step)
+        sp_st.grid(row=1, column=3, sticky="w")
+        try:
+            ttk.Button(box_dbg, text="立即预览蒙版", command=self._debug_test_overlay).grid(row=1, column=4, padx=10)
+        except Exception:
+            pass
+        for c in range(0, 5):
+            try:
+                box_dbg.columnconfigure(c, weight=0)
+            except Exception:
+                pass
+        # 自动保存（去抖）
+        for v in [self.var_debug_enabled, self.var_debug_overlay, self.var_debug_step]:
+            try:
+                v.trace_add("write", lambda *_: self._schedule_autosave())
+            except Exception:
+                pass
+
+    def _debug_test_overlay(self) -> None:
+        """显示一个 2 秒的半透明全屏蒙版，验证叠加行为。"""
+        try:
+            ov = float(self.var_debug_overlay.get() or 5.0)
+        except Exception:
+            ov = 5.0
+        if ov < 0.5:
+            ov = 0.5
+        if ov > 15.0:
+            ov = 15.0
+        try:
+            top = tk.Toplevel(self)
+            W = int(self.winfo_screenwidth())
+            H = int(self.winfo_screenheight())
+            top.geometry(f"{W}x{H}+0+0")
+            try:
+                top.attributes("-alpha", 0.3)
+            except Exception:
+                pass
+            try:
+                top.attributes("-topmost", True)
+            except Exception:
+                pass
+            top.overrideredirect(True)
+            cv = tk.Canvas(top, bg="black", highlightthickness=0)
+            cv.pack(fill=tk.BOTH, expand=True)
+            try:
+                cv.create_text(W // 2, 40, text="调试蒙版预览（ROI/模板可视化开关位于此区）", fill="white", font=("Segoe UI", 14))
+                cx, cy = W // 2, H // 2
+                cv.create_rectangle(cx - 220, cy - 120, cx + 220, cy + 120, outline="#2ea043", width=3)
+                cv.create_text(cx, cy, text="示例区域", fill="white", font=("Segoe UI", 16))
+            except Exception:
+                pass
+            try:
+                top.after(int(ov * 1000), top.destroy)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
 
     def _save_and_sync(self, *, silent: bool = False) -> None:
         # Flush templates
@@ -2564,7 +2653,30 @@ class App(tk.Tk):
         except Exception:
             pass
 
-
+        # Flush debug config
+        try:
+            self.cfg.setdefault("debug", {})
+            self.cfg["debug"]["enabled"] = bool(self.var_debug_enabled.get())
+            try:
+                ov = float(self.var_debug_overlay.get() or 5.0)
+            except Exception:
+                ov = 5.0
+            if ov < 0.5:
+                ov = 0.5
+            if ov > 15.0:
+                ov = 15.0
+            self.cfg["debug"]["overlay_sec"] = float(ov)
+            try:
+                st = float(self.var_debug_step.get() or 0.0)
+            except Exception:
+                st = 0.0
+            if st < 0.0:
+                st = 0.0
+            if st > 1.0:
+                st = 1.0
+            self.cfg["debug"]["step_sleep"] = float(st)
+        except Exception:
+            pass
 
         save_config(self.cfg, "config.json")
         if not silent:
