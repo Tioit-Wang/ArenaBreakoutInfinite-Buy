@@ -32,7 +32,7 @@ except Exception:
     pass
 
 from app_config import load_config  # type: ignore
-from ocr_reader import read_text  # type: ignore
+from utils.ocr_utils import recognize_numbers, recognize_text  # type: ignore
 
 
 class FatalOcrError(RuntimeError):
@@ -830,61 +830,74 @@ class Buyer:
                 bin_top = img_top
             try:
                 bin_bot = img_bot.convert("L").point(lambda p: 255 if p > 128 else 0)  # type: ignore
+        except Exception:
+            bin_bot = img_bot
+        # 使用 utils.ocr_utils 进行数字识别（优先路径）
+        try:
+            ocfg = self.cfg.get("umi_ocr") or {}
+            cands = recognize_numbers(
+                bin_top,
+                base_url=str(ocfg.get("base_url", "http://127.0.0.1:1224")),
+                timeout=float(ocfg.get("timeout_sec", 2.5) or 2.5),
+                options=dict(ocfg.get("options", {}) or {}),
+                offset=(x_left, y_top),
+            ) if bin_top is not None else []
+            cand = max([c for c in cands if getattr(c, "value", None) is not None], key=lambda c: int(c.value)) if cands else None  # type: ignore[arg-type]
+            val = int(getattr(cand, "value", 0)) if cand is not None and getattr(cand, "value", None) is not None else None
+        except Exception:
+            val = None
+        if isinstance(val, int) and val > 0:
+            try:
+                floor = int(expected_floor or 0)
             except Exception:
-                bin_bot = img_bot
-        # 仅对上半部分做 OCR（平均单价）
-        eng = str(avg_cfg.get("ocr_engine", "umi") or "umi").lower()
+                floor = 0
+            if floor > 0 and int(val) < max(1, floor // 2):
+                return None
+            self._log(
+                item_disp,
+                purchased_str,
+                f"平均价 OCR 成功 值={val} ROI=({x_left},{y_top},{x_left + width},{y_top + mid_h}) 缩放={sc:.2f} btn耗时={btn_ms}ms",
+            )
+            try:
+                from history_store import append_price  # type: ignore
+                append_price(
+                    item_id=goods.id,
+                    item_name=goods.name or goods.search_name or str(item_disp),
+                    price=int(val),
+                    category=(goods.big_category or "") or None,
+                )
+            except Exception:
+                pass
+            return int(val)
+        # 仅对上半部分做 OCR（平均单价），统一使用 Umi-OCR（utils/ocr_utils）
         txt = ""
         ocr_ms = -1
         try:
-            if eng in ("tesseract", "tess", "ts"):
-                allow = str(avg_cfg.get("ocr_allowlist", "0123456789KM"))
-                need = "KMkm"
-                allow_ex = allow + "".join(ch for ch in need if ch not in allow)
-                cfg = f"--oem 3 --psm 6 -c tessedit_char_whitelist={allow_ex}"
-                t_ocr = time.perf_counter()
-                if bin_top is not None:
-                    txt = read_text(
-                        bin_top,
-                        engine="tesseract",
-                        grayscale=True,
-                        tess_config=cfg,
-                    )
-                ocr_ms = int((time.perf_counter() - t_ocr) * 1000.0)
-            else:
-                ocfg = self.cfg.get("umi_ocr") or {}
-                t_ocr = time.perf_counter()
-                if bin_top is not None:
-                    txt = read_text(
-                        bin_top,
-                        engine="umi",
-                        grayscale=True,
-                        umi_base_url=str(ocfg.get("base_url", "http://127.0.0.1:1224")),
-                        umi_timeout=float(ocfg.get("timeout_sec", 2.5) or 2.5),
-                        umi_options=dict(ocfg.get("options", {}) or {}),
-                    )
-                ocr_ms = int((time.perf_counter() - t_ocr) * 1000.0)
+            ocfg = self.cfg.get("umi_ocr") or {}
+            t_ocr = time.perf_counter()
+            if bin_top is not None:
+                # 使用 recognize_text 获取原始文本，随后本地解析
+                boxes = recognize_text(
+                    bin_top,
+                    base_url=str(ocfg.get("base_url", "http://127.0.0.1:1224")),
+                    timeout=float(ocfg.get("timeout_sec", 2.5) or 2.5),
+                    options=dict(ocfg.get("options", {}) or {}),
+                )
+                txt = " ".join((b.text or "").strip() for b in boxes if (b.text or "").strip())
+            ocr_ms = int((time.perf_counter() - t_ocr) * 1000.0)
         except Exception as e:
-            if eng in ("umi", "umi-ocr", "umiocr"):
-                self._log(
-                    item_disp,
-                    purchased_str,
-                    f"Umi OCR 失败: {e} | 引擎={eng} ROI=({x_left},{y_top},{x_left + width},{y_top + mid_h}) 缩放={sc:.2f} btn耗时={btn_ms}ms OCR耗时={ocr_ms if ocr_ms >= 0 else '-'}ms",
-                )
-                raise FatalOcrError(str(e))
-            else:
-                self._log(
-                    item_disp,
-                    purchased_str,
-                    f"平均价 OCR 失败: {e} | 引擎={eng} ROI=({x_left},{y_top},{x_left + width},{y_top + mid_h}) 缩放={sc:.2f} btn耗时={btn_ms}ms OCR耗时={ocr_ms if ocr_ms >= 0 else '-'}ms",
-                )
-                return None
+            self._log(
+                item_disp,
+                purchased_str,
+                f"Umi OCR 失败: {e} | ROI=({x_left},{y_top},{x_left + width},{y_top + mid_h}) 缩放={sc:.2f} btn耗时={btn_ms}ms OCR耗时={ocr_ms if ocr_ms >= 0 else '-'}ms",
+            )
+            raise FatalOcrError(str(e))
         val = _parse_price_text(txt or "")
         if val is None or val <= 0:
             self._log(
                 item_disp,
                 purchased_str,
-                f"平均价 OCR 解析失败：'{(txt or '').strip()[:64]}' | 引擎={eng} ROI=({x_left},{y_top},{x_left + width},{y_top + mid_h}) 缩放={sc:.2f} btn耗时={btn_ms}ms OCR耗时={ocr_ms if ocr_ms >= 0 else '-'}ms",
+                f"平均价 OCR 解析失败：'{(txt or '').strip()[:64]}' | ROI=({x_left},{y_top},{x_left + width},{y_top + mid_h}) 缩放={sc:.2f} btn耗时={btn_ms}ms OCR耗时={ocr_ms if ocr_ms >= 0 else '-'}ms",
             )
             return None
         # 验证：若设置价格存在，且识别值低于 50% 的设置价格，则视为识别错误，本次丢弃
@@ -905,7 +918,7 @@ class Buyer:
         self._log(
             item_disp,
             purchased_str,
-            f"平均价 OCR 成功 值={val} 引擎={eng} ROI=({x_left},{y_top},{x_left + width},{y_top + mid_h}) 缩放={sc:.2f} btn耗时={btn_ms}ms OCR耗时={ocr_ms}ms",
+            f"平均价 OCR 成功 值={val} ROI=({x_left},{y_top},{x_left + width},{y_top + mid_h}) 缩放={sc:.2f} btn耗时={btn_ms}ms OCR耗时={ocr_ms}ms",
         )
         # 记录价格历史（按物品），供历史价格与分钟聚合使用
         try:

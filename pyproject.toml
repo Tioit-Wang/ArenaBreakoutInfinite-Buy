@@ -34,7 +34,6 @@ py-modules = [
   "gui_app",
   "app_config",
   "price_reader",
-  "ocr_reader",
   "history_store",
   "task_runner",
 ]

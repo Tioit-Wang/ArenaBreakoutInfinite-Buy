@@ -34,6 +34,7 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import random
 
 try:
     from PIL import Image  # type: ignore
@@ -46,7 +47,26 @@ except Exception:
     ImageFont = None  # type: ignore
     ImageTk = None  # type: ignore
 
+# 中文字体工具（Matplotlib/PIL/Tk）
+try:
+    from font_util import draw_text, pil_font, tk_font  # type: ignore
+except Exception:
+    def draw_text(*_a, **_kw):  # type: ignore
+        try:
+            d = _a[0]
+            xy = _a[1]
+            text = _a[2]
+            fill = _kw.get("fill", (255, 255, 255))
+            d.text(xy, text, fill=fill)
+        except Exception:
+            pass
+    def pil_font(_size: int = 14):  # type: ignore
+        return None
+    def tk_font(_root, _size: int = 12):  # type: ignore
+        return None
+
 from task_runner import ScreenOps, _parse_price_text  # type: ignore
+from utils.ocr_utils import recognize_numbers  # type: ignore
 
 
 # 卡片与 ROI 固定参数（与“测试”页逻辑一致）
@@ -134,10 +154,25 @@ class MultiSnipeRunner:
             self._debug_step_sleep = float(dbg.get("step_sleep", 0.0) or 0.0)
         except Exception:
             self._debug_step_sleep = 0.0
+        # 保存叠加截图（新配置）
         try:
-            self._debug_save_dir = str(dbg.get("save_dir", "debug"))
+            self._debug_save_overlay_images = bool(dbg.get("save_overlay_images", False))
         except Exception:
-            self._debug_save_dir = "debug"
+            self._debug_save_overlay_images = False
+        try:
+            self._debug_overlay_dir = str(
+                dbg.get("overlay_dir", os.path.join("images", "debug", "可视化调试"))
+            )
+        except Exception:
+            # 兼容旧字段 save_dir
+            self._debug_overlay_dir = str(dbg.get("save_dir", os.path.join("images", "debug", "可视化调试")))
+        # 运行轮次与叠加序号（便于命名/分组）
+        self._loop_no: int = 0
+        self._loop_dir: Optional[str] = None
+        self._overlay_seq: int = 0
+        # 复用型蒙版窗口（降低创建销毁开销）
+        self._ov_top = None
+        self._ov_canvas = None
 
         # ScreenOps：若开启调试，则把 step_delay 抬高（优先使用 debug.step_sleep）
         try:
@@ -153,6 +188,29 @@ class MultiSnipeRunner:
             self.screen = ScreenOps(cfg, step_delay=float(base_delay))
         except Exception:
             self.screen = ScreenOps(cfg, step_delay=0.02)
+
+        # 运行时调优（等待/并发/CPU 降压），通过 cfg['multi_snipe_tuning'] 可覆盖
+        # - probe_step_sec: 收藏就绪探测的单次 sleep（默认 0.06）
+        # - post_click_wait_sec: 点击标签后的额外等待（非 debug，默认 0.2）
+        # - roi_pre_capture_wait_sec: 截 ROI 前的短等待（非 debug，默认 0.05）
+        # - ocr_max_workers: OCR 并发度（默认 4，原为 6 以降低 CPU 压力）
+        tuning = (self.cfg.get("multi_snipe_tuning", {}) or {})
+        try:
+            self._probe_step_sec = float(tuning.get("probe_step_sec", 0.06) or 0.06)
+        except Exception:
+            self._probe_step_sec = 0.06
+        try:
+            self._post_click_wait_sec = float(tuning.get("post_click_wait_sec", 0.2) or 0.2)
+        except Exception:
+            self._post_click_wait_sec = 0.2
+        try:
+            self._roi_pre_capture_wait_sec = float(tuning.get("roi_pre_capture_wait_sec", 0.05) or 0.05)
+        except Exception:
+            self._roi_pre_capture_wait_sec = 0.05
+        try:
+            self._ocr_max_workers = int(tuning.get("ocr_max_workers", 4) or 4)
+        except Exception:
+            self._ocr_max_workers = 4
 
     # ---------- Utils ----------
     def _log(self, s: str) -> None:
@@ -266,10 +324,8 @@ class MultiSnipeRunner:
                     draw.rectangle([bx1, by1, bx2, by2], fill=(0, 0, 0, 160))
                 except Exception:
                     pass
-                try:
-                    draw.text((bx1 + pad, by1 + pad // 2), label, fill=(255, 255, 255, 255))
-                except Exception:
-                    pass
+                # 使用中文字体绘制标签
+                draw_text(draw, (bx1 + pad, by1 + pad // 2), label, fill=(255, 255, 255, 255), size=14)
         # 阶段标题
         if stage:
             try:
@@ -280,9 +336,10 @@ class MultiSnipeRunner:
             try:
                 cx, top = W // 2, 20
                 draw.rectangle([cx - tw // 2 - 8, top - 6, cx + tw // 2 + 8, top + th + 6], fill=(0, 0, 0, 170))
-                draw.text((cx - tw // 2, top), t, fill=(255, 255, 255, 255))
             except Exception:
                 pass
+            # 使用中文字体绘制标题
+            draw_text(draw, (cx - tw // 2, top), t, fill=(255, 255, 255, 255), size=16)
         # 在左上角贴上模板图片缩略图
         if template_path and os.path.exists(template_path):
             try:
@@ -294,7 +351,7 @@ class MultiSnipeRunner:
                 x_off, y_off = 16, 60
                 # 边框底板
                 draw.rectangle([x_off - 6, y_off - 24, x_off + tpl.width + 6, y_off + tpl.height + 6], fill=(0, 0, 0, 180))
-                draw.text((x_off, y_off - 18), "模板预览", fill=(255, 255, 255, 255))
+                draw_text(draw, (x_off, y_off - 18), "模板预览", fill=(255, 255, 255, 255), size=14)
                 img.alpha_composite(tpl, dest=(x_off, y_off))
             except Exception:
                 pass
@@ -306,88 +363,177 @@ class MultiSnipeRunner:
                             stage: str,
                             template_path: Optional[str] = None,
                             save_name: Optional[str] = None) -> None:
-        """显示 5s 叠加蒙版；若 Tk 不可用，则落盘图片并等待 5s。
+        """基于全屏蒙版的实时可视化叠加。
 
-        overlays: 列表，每项含 rect=(l,t,w,h), label, 颜色
+        - 直接在顶层半透明窗口的 Canvas 上绘制矩形与标签，保持 overlay_sec 秒。
+        - 若配置开启保存，则在绘制后抓取整屏截图（含叠加）保存到按轮次分组的目录。
+        - 回退：若 Tk 不可用，按旧逻辑在静态截图上绘制并保存（若启用保存），然后仅 sleep overlay_sec。
         """
         if not self._debug_active():
             return
-        base = self._debug_screenshot_full()
-        if base is None:
-            time.sleep(max(0.0, float(self._debug_overlay_sec)))
-            return
-        annotated = self._debug_build_annotated(base, overlays, stage=stage, template_path=template_path)
-        if annotated is None:
-            time.sleep(max(0.0, float(self._debug_overlay_sec)))
-            return
-        # 保存调试图片
+        # 统一生成当前轮次的序号与保存名
         try:
-            os.makedirs(self._debug_save_dir, exist_ok=True)
-            ts = time.strftime("%Y%m%d_%H%M%S")
-            name = save_name or f"overlay_{ts}.png"
-            annotated.save(os.path.join(self._debug_save_dir, name))
+            self._overlay_seq += 1
+            seq = int(self._overlay_seq)
         except Exception:
-            pass
-        # 在屏幕中央展示 5s（尽量走 Tk 主线程）
+            seq = 1
+            self._overlay_seq = 1
+        ts = time.strftime("%H%M%S")
+        def _clean(s: str) -> str:
+            s = str(s or "").strip()
+            for ch in ("/", "\\", ":", "*", "?", "\"", "<", ">", "|", " "):
+                s = s.replace(ch, "_")
+            return s[:60] or "overlay"
+        fname = save_name or f"{_clean(stage)}.png"
+        fname = f"{seq:03d}_{fname}"
+        delay_ms = int(max(0.0, float(self._debug_overlay_sec)) * 1000)
+
+        # 记录一次叠加的概要日志
+        self._log_debug(f"[可视化] 阶段={stage} 叠加数={len(overlays)} 持续={self._debug_overlay_sec}s 保存={( 'on' if getattr(self,'_debug_save_overlay_images', False) else 'off')} seq={seq}")
+        # Tk 路径：在主线程创建/复用蒙版窗口并绘制
         try:
             import tkinter as tk  # type: ignore
             root = getattr(tk, "_default_root", None)
         except Exception:
             root = None
-        delay_ms = int(max(0.0, float(self._debug_overlay_sec)) * 1000)
+
         if root is None:
+            # 回退：无法显示蒙版，改为在静态截图上绘制；若开启保存则落盘
+            base = self._debug_screenshot_full()
+            if base is not None and bool(getattr(self, "_debug_save_overlay_images", False)):
+                annotated = self._debug_build_annotated(base, overlays, stage=stage, template_path=template_path)
+                try:
+                    loop_dir = self._loop_dir or self._debug_overlay_dir
+                    os.makedirs(loop_dir, exist_ok=True)
+                    annotated.save(os.path.join(loop_dir, fname))
+                    self._log_debug(f"[可视化] 已保存(静态) {os.path.join(loop_dir, fname)}")
+                except Exception:
+                    pass
             time.sleep(max(0.0, float(self._debug_overlay_sec)))
             return
+
         done = threading.Event()
 
         def _spawn():
             try:
-                top = tk.Toplevel(root)
-                try:
-                    top.attributes("-topmost", True)
-                except Exception:
-                    pass
-                top.overrideredirect(True)
-                sw, sh = int(root.winfo_screenwidth()), int(root.winfo_screenheight())
-                iw, ih = int(annotated.width), int(annotated.height)
-                # 缩放以适配屏幕
-                scale = min(1.0, (sw - 80) / max(1, iw), (sh - 80) / max(1, ih))
-                disp = annotated
-                if scale < 0.999:
+                W = int(root.winfo_screenwidth())
+                H = int(root.winfo_screenheight())
+                # 创建或复用顶层窗口
+                top = getattr(self, "_ov_top", None)
+                cv = getattr(self, "_ov_canvas", None)
+                if top is None or cv is None:
+                    t = tk.Toplevel(root)
                     try:
-                        disp = annotated.resize((max(1, int(iw * scale)), max(1, int(ih * scale))))
+                        t.attributes("-topmost", True)
                     except Exception:
                         pass
-                iw2, ih2 = disp.width, disp.height
-                x = max(0, (sw - iw2) // 2)
-                y = max(0, (sh - ih2) // 2)
+                    t.overrideredirect(True)
+                    try:
+                        t.attributes("-alpha", 0.35)
+                    except Exception:
+                        pass
+                    try:
+                        t.geometry(f"{W}x{H}+0+0")
+                    except Exception:
+                        pass
+                    c = tk.Canvas(t, width=W, height=H, highlightthickness=0, bg="#000000")
+                    try:
+                        c.pack(fill=tk.BOTH, expand=True)
+                    except Exception:
+                        c.pack()
+                    self._ov_top = t
+                    self._ov_canvas = c
+                    top, cv = t, c
+                else:
+                    try:
+                        top.deiconify()
+                    except Exception:
+                        pass
+                    try:
+                        top.geometry(f"{W}x{H}+0+0")
+                    except Exception:
+                        pass
+                    try:
+                        cv.delete("all")
+                    except Exception:
+                        pass
+
+                # 绘制标题（优先使用中文字体）
                 try:
-                    top.geometry(f"{iw2}x{ih2}+{x}+{y}")
+                    ttxt = f"调试：{stage}" if stage else ""
+                    if ttxt:
+                        tw = max(120, len(ttxt) * 10)
+                        x1 = max(8, W // 2 - tw // 2)
+                        x2 = min(W - 8, x1 + tw)
+                        y1, y2 = 20, 42
+                        cv.create_rectangle(x1, y1, x2, y2, fill="#000000", outline="")
+                        try:
+                            f = tk_font(root, 12)
+                        except Exception:
+                            f = None
+                        if f is not None:
+                            cv.create_text((x1 + x2) // 2, (y1 + y2) // 2, text=ttxt, fill="#ffffff", font=f)
+                        else:
+                            cv.create_text((x1 + x2) // 2, (y1 + y2) // 2, text=ttxt, fill="#ffffff")
                 except Exception:
                     pass
-                # 显示图片
-                try:
-                    from PIL import ImageTk as _ImageTk  # type: ignore
-                except Exception:
-                    _ImageTk = None  # type: ignore
-                if _ImageTk is None:
+
+                # 绘制每个 ROI（边框 + 标签）
+                for ov in overlays:
+                    rect = ov.get("rect")
+                    if not rect:
+                        continue
+                    x1, y1, x2, y2 = self._to_xyxy(rect)
+                    outline = ov.get("outline") or (255, 255, 0)
                     try:
-                        top.after(delay_ms, lambda: (top.destroy(), done.set()))
-                        return
+                        color = "#%02x%02x%02x" % (int(outline[0]), int(outline[1]), int(outline[2]))
                     except Exception:
-                        done.set()
-                        return
+                        color = "#ffff00"
+                    try:
+                        cv.create_rectangle(x1, y1, x2, y2, outline=color, width=2)
+                    except Exception:
+                        pass
+                    label = str(ov.get("label") or "")
+                    if label:
+                        try:
+                            lw = max(60, len(label) * 9 + 12)
+                            lx1, ly1 = x1 + 2, y1 + 2
+                            lx2, ly2 = lx1 + lw, ly1 + 18
+                            cv.create_rectangle(lx1, ly1, lx2, ly2, fill="#000000", outline="")
+                            try:
+                                f = tk_font(root, 11)
+                            except Exception:
+                                f = None
+                            if f is not None:
+                                cv.create_text(lx1 + 6, (ly1 + ly2) // 2, text=label, fill="#ffffff", anchor="w", font=f)
+                            else:
+                                cv.create_text(lx1 + 6, (ly1 + ly2) // 2, text=label, fill="#ffffff", anchor="w")
+                        except Exception:
+                            pass
+
+                # 可选：保存真实屏幕截图（含叠加）
+                if bool(getattr(self, "_debug_save_overlay_images", False)):
+                    def _capture_and_save():
+                        try:
+                            import pyautogui as _pg  # type: ignore
+                            img = _pg.screenshot()
+                            loop_dir = self._loop_dir or self._debug_overlay_dir
+                            os.makedirs(loop_dir, exist_ok=True)
+                            img.save(os.path.join(loop_dir, fname))
+                            try:
+                                self._log_debug(f"[可视化] 已保存 {os.path.join(loop_dir, fname)}")
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+                    try:
+                        root.after(80, _capture_and_save)
+                    except Exception:
+                        pass
+
+                # 定时隐藏窗口并结束
                 try:
-                    photo = _ImageTk.PhotoImage(disp)
-                except Exception:
-                    top.after(delay_ms, lambda: (top.destroy(), done.set()))
-                    return
-                import tkinter as tk2  # type: ignore
-                lbl = tk2.Label(top, image=photo, borderwidth=0, highlightthickness=0)
-                lbl.image = photo  # Prevent GC
-                lbl.pack(fill=tk2.BOTH, expand=True)
-                try:
-                    top.after(delay_ms, lambda: (top.destroy(), done.set()))
+                    top.after(delay_ms, lambda: (top.withdraw(), done.set()))
                 except Exception:
                     done.set()
             except Exception:
@@ -396,10 +542,8 @@ class MultiSnipeRunner:
         try:
             root.after(0, _spawn)
         except Exception:
-            # Fallback：阻塞等待
             time.sleep(max(0.0, float(self._debug_overlay_sec)))
             return
-        # 阻塞等待窗口关闭
         done.wait(timeout=(max(5.0, float(self._debug_overlay_sec) + 1.0)))
 
     # ---------- 刷新（最近购买 -> 我的收藏） ----------
@@ -407,14 +551,17 @@ class MultiSnipeRunner:
         rp_path, rp_conf = self._tpl("recent_purchases_tab")
         fav_path, fav_conf = self._tpl("favorites_tab")
         if not rp_path or not os.path.exists(rp_path) or not fav_path or not os.path.exists(fav_path):
-            self._log("[刷新] 模板缺失：请在‘多商品抢购模式’内配置‘最近购买’与‘我的收藏’模板。")
+            # 刷新失败归为 Info：提示用户关键缺失
+            self._log_info("[刷新] 模板缺失：请在‘多商品抢购模式’内配置‘最近购买’与‘我的收藏’模板。")
             return False
+        self._log_debug(f"[刷新] 开始：最近购买→我的收藏 rp_conf={rp_conf:.2f} fav_conf={fav_conf:.2f}")
         # 第一步：点击最近购买（使其进入选中态）
         try:
             box = self.screen._pg.locateOnScreen(rp_path, confidence=rp_conf)
             if box is not None:
                 rect = (int(box.left), int(box.top), int(box.width), int(box.height))
                 self.screen.click_center(rect)
+                self._log_debug(f"[刷新] 点击最近购买 rect={rect}")
                 # Debug 可视化：最近购买模板与位置
                 self._debug_show_overlay([
                     {"rect": rect, "label": "最近购买", "fill": (45, 124, 255, 90), "outline": (45, 124, 255)},
@@ -429,16 +576,94 @@ class MultiSnipeRunner:
             if box is not None:
                 rect = (int(box.left), int(box.top), int(box.width), int(box.height))
                 self.screen.click_center(rect)
+                self._log_debug(f"[刷新] 点击我的收藏 rect={rect}")
                 # Debug 可视化：我的收藏模板与位置
                 self._debug_show_overlay([
                     {"rect": rect, "label": "我的收藏", "fill": (46, 160, 67, 90), "outline": (46, 160, 67)},
                 ], stage="刷新：我的收藏", template_path=fav_path, save_name="overlay_refresh_fav.png")
                 time.sleep(0.05)
-                self._log("[刷新] 已执行：最近购买 -> 我的收藏")
+                # 进入收藏后，随机挑选一个任务的中间模板等待匹配成功，避免内容尚未加载完就截 ROI
+                try:
+                    got = self._wait_favorites_content_ready(probe_step=float(getattr(self, "_probe_step_sec", 0.06)))
+                    self._log_debug(f"[刷新] 收藏内容就绪={got}")
+                except Exception:
+                    pass
+                # 刷新成功使用 Info 简报
+                self._log_info("[刷新] 已执行：最近购买 -> 我的收藏")
                 return True
         except Exception:
             pass
-        self._log("[刷新] 未能完成：请检查标签模板是否清晰、阈值是否合适。")
+        # 刷新失败（未匹配到收藏标签）同样使用 Info 简报
+        self._log_info("[刷新] 未能完成：请检查标签模板是否清晰、阈值是否合适。")
+        return False
+
+    def _wait_favorites_content_ready(self, *, timeout: float = 1.8, confidence: float = 0.83, probe_step: float = 0.06, max_probe_items: int = 6) -> bool:
+        """在收藏页等待任意一个任务的中间模板出现在屏幕上。
+
+        目的：避免刚进入收藏时数据尚未加载就开始 ROI 截图与 OCR，导致误判。
+
+        策略：
+        - 从启用的任务中收集有可用模板的条目，随机打乱；
+        - 在 timeout 窗口内，循环按序尝试 locateOnScreen，命中即返回 True；
+        - 命中后展示一次叠加并小暂停；
+        - 若候选为空或超时未命中，返回 False（外层仍会继续，但这一步已尽力等待）。
+        """
+        try:
+            items = [
+                it for it in self.items
+                if bool(getattr(it, "enabled", True)) and (getattr(it, "template", None) and os.path.exists(getattr(it, "template")))
+            ]
+        except Exception:
+            items = []
+        if not items:
+            try:
+                self._log_debug("[就绪等待] 候选为空：无启用任务或模板缺失")
+            except Exception:
+                pass
+            return False
+        try:
+            random.shuffle(items)
+        except Exception:
+            pass
+        # 限制本轮探测的任务数量，降低全屏匹配的开销
+        items = items[:max(1, int(max_probe_items))]
+        # 轮询直到超时
+        end = time.time() + max(0.2, float(timeout))
+        idx = 0
+        names = ", ".join([str(getattr(it, 'name', '') or '') for it in items])
+        self._log_debug(
+            f"[就绪等待] 计划探测 {len(items)} 项 timeout={timeout}s step={probe_step}s conf={confidence} 列表=[{names}]"
+        )
+        while time.time() < end:
+            it = items[idx % len(items)]
+            idx += 1
+            # 每轮探测加入间隔，避免忙等并给 UI 留出渲染时间
+            try:
+                time.sleep(max(0.02, float(probe_step)))
+            except Exception:
+                time.sleep(0.02)
+            path = getattr(it, "template", "") or ""
+            try:
+                box = self.screen._pg.locateOnScreen(path, confidence=float(confidence))
+            except Exception:
+                box = None
+            if box is not None:
+                rect = (int(box.left), int(box.top), int(box.width), int(box.height))
+                self._log_debug(f"[就绪等待] 命中 {it.name} rect={rect}")
+                # 可视化：命中的那个中间模板
+                try:
+                    self._debug_show_overlay([
+                        {"rect": rect, "label": f"就绪[{it.name}]", "fill": (255, 216, 77, 90), "outline": (255, 216, 77)},
+                    ], stage="收藏加载就绪", template_path=path, save_name="overlay_fav_ready.png")
+                except Exception:
+                    pass
+                # 稳定一下再返回
+                time.sleep(0.05)
+                return True
+            else:
+                self._log_debug(f"[就绪等待] 未命中 {it.name}")
+        time.sleep(max(0.02, float(probe_step)))
+        self._log_debug("[就绪等待] 超时，继续后续流程")
         return False
 
     # ---------- 坐标推断与缓存 ----------
@@ -462,9 +687,15 @@ class MultiSnipeRunner:
         if item.id in self._card_cache:
             return True
         if not item.template or not os.path.exists(item.template):
-            self._log(f"[定位][{item.name}] 中间模板缺失：{item.template}")
+            # 单条任务配置问题，降级为 Debug，避免 Info 污染
+            self._log_debug(f"[定位][{item.name}] 中间模板缺失：{item.template}")
             return False
-        end = time.time() + max(0.0, timeout)
+        try:
+            self._log_debug(f"[定位][{item.name}] 开始 timeout={timeout}s conf={confidence} tpl={item.template}")
+        except Exception:
+            pass
+        t0 = time.time()
+        end = t0 + max(0.0, timeout)
         box = None
         while time.time() < end and box is None:
             try:
@@ -476,14 +707,22 @@ class MultiSnipeRunner:
                 pass
             time.sleep(0.02)
         if box is None:
-            self._log(f"[定位][{item.name}] 匹配失败，建议降低阈值或重截模板。")
+            try:
+                self._log_debug(f"[定位][{item.name}] 结束 未命中 耗时={int((time.time()-t0)*1000)}ms")
+            except Exception:
+                pass
+            # 定位失败细节保持 Debug
+            self._log_debug(f"[定位][{item.name}] 匹配失败，建议降低阈值或重截模板。")
             return False
         # 同时缓存中间模板框与推导出的卡片框
         mid = box
         card = self._infer_card_from_mid(box)
         self._mid_cache[item.id] = mid
         self._card_cache[item.id] = card
-        self._log_debug(f"[定位][{item.name}] mid={mid} card={card}")
+        try:
+            self._log_debug(f"[定位][{item.name}] 结束 命中 mid={mid} card={card} 耗时={int((time.time()-t0)*1000)}ms")
+        except Exception:
+            pass
         # Debug 可视化：卡片结构与 ROI 区域
         try:
             top_rect, btm_rect = self._rois_from_card(card)
@@ -505,8 +744,17 @@ class MultiSnipeRunner:
             return None
 
     def collect_batch_rois(self) -> List[Dict[str, Any]]:
+        t0 = time.time()
         jobs: List[Dict[str, Any]] = []
+        total = 0
         for it in self.items:
+            # 跳过禁用任务，禁用任务不应进入截图/OCR阶段
+            try:
+                if not bool(getattr(it, "enabled", True)):
+                    continue
+            except Exception:
+                pass
+            total += 1
             # 跳过已达目标数量的任务
             try:
                 if int(getattr(it, "target_total", 0) or 0) > 0 and int(getattr(it, "purchased", 0) or 0) >= int(getattr(it, "target_total", 0) or 0):
@@ -518,20 +766,26 @@ class MultiSnipeRunner:
             card = self._card_cache.get(it.id)
             if not card:
                 continue
+            # 非调试：在定位命中后，截取 ROI 之前稍作等待，提升文字稳定性
+            try:
+                if not self._debug_active():
+                    time.sleep(max(0.0, float(getattr(self, "_roi_pre_capture_wait_sec", 0.05))))
+            except Exception:
+                pass
+            # 非调试：在定位命中后，截取 ROI 前短暂等待，提升文字稳定性
+            try:
+                if not self._debug_active():
+                    time.sleep(max(0.0, float(getattr(self, "_roi_pre_capture_wait_sec", 0.05))))
+            except Exception:
+                pass
             top_rect, btm_rect = self._rois_from_card(card)
             name_img = self._screenshot(top_rect)
             price_img = self._screenshot(btm_rect)
             if name_img is None or price_img is None:
-                self._log(f"[截图][{it.name}] 失败：ROI 越界或截屏异常。")
+                # 截图失败为 Debug 细节
+                self._log_debug(f"[截图][{it.name}] 失败：ROI 越界或截屏异常。")
                 continue
-            # Debug 可视化：即将 OCR 的两个 ROI
-            try:
-                self._debug_show_overlay([
-                    {"rect": top_rect, "label": f"名称ROI[{it.name}]", "fill": (45, 124, 255, 90), "outline": (45, 124, 255)},
-                    {"rect": btm_rect, "label": f"价格ROI[{it.name}]", "fill": (46, 160, 67, 90), "outline": (46, 160, 67)},
-                ], stage="列表OCR区域", template_path=it.template, save_name=f"overlay_rois_{it.id}.png")
-            except Exception:
-                pass
+            # 可视化移至 OCR 后展示，以便底部标注实际“清洗后价格”
             jobs.append({
                 "item": it,
                 "name_img": name_img,
@@ -539,49 +793,75 @@ class MultiSnipeRunner:
                 "top_rect": top_rect,
                 "btm_rect": btm_rect,
             })
+        try:
+            self._log_debug(f"[截图] 批量完成 目标={total} 有效={len(jobs)} 耗时={int((time.time()-t0)*1000)}ms")
+        except Exception:
+            pass
         return jobs
 
     # ---------- 并发 OCR ----------
-    def _umi_ocr_one(self, pil_image) -> str:
-        # 直接调用 ocr_reader.read_text 以统一行为
-        try:
-            from ocr_reader import read_text  # type: ignore
-        except Exception:
-            read_text = None  # type: ignore
-        if read_text is None:
-            return ""
+    def _umi_ocr_one(self, pil_image, *, allowlist: Optional[str] = None) -> str:
+        # 优先使用 utils.ocr_utils 作为统一识别实现
+        from utils.ocr_utils import recognize_text  # type: ignore
         umi = (self.cfg.get("umi_ocr", {}) or {})
         base_url = str(umi.get("base_url", "http://127.0.0.1:1224"))
         timeout = float(umi.get("timeout_sec", 5.0) or 5.0)
         options = umi.get("options", {}) or {}
-        try:
-            # 启用灰度，有助于提升数字识别稳定性（与测试/详情复核保持一致）
-            return read_text(
-                pil_image,
-                engine="umi",
-                grayscale=True,
-                umi_base_url=base_url,
-                umi_timeout=timeout,
-                umi_options=options,
-            ) or ""
-        except Exception:
-            return ""
+        # 统一使用 Umi-OCR：若提供 allowlist，则透传至 options 的常见键位（由 Umi 端决定是否采纳）
+        if allowlist:
+            try:
+                opts = dict(options)
+                opts.setdefault("rec_char_type", "custom")
+                opts.setdefault("custom_chars", allowlist)
+                opts.setdefault("use_space_char", False)
+                options = opts
+            except Exception:
+                pass
+        boxes = recognize_text(pil_image, base_url=base_url, timeout=timeout, options=options)
+        txt = " ".join((b.text or "").strip() for b in boxes if (b.text or "").strip())
+        return txt
 
-    def ocr_batch(self, imgs: List[Tuple[str, Any]], *, max_workers: int = 6) -> Dict[str, str]:
+    def ocr_batch(self, imgs: List[Tuple[str, Any]], *, max_workers: Optional[int] = None) -> Dict[str, str]:
         """并发 OCR。
 
         imgs: [(key, PIL.Image), ...]
         返回：key -> text
         """
+        t0 = time.time()
         results: Dict[str, str] = {}
+        # 动态并发：支持 CPU 降压（可用 cfg['multi_snipe_tuning'].ocr_max_workers 覆盖）
+        try:
+            if not isinstance(max_workers, int) or max_workers <= 0:
+                max_workers = int(getattr(self, "_ocr_max_workers", 4) or 4)
+        except Exception:
+            max_workers = 4
+        try:
+            self._log_debug(f"[OCR] 开始 并发={max_workers} 数量={len(imgs)} 引擎=umi")
+        except Exception:
+            pass
+        # Determine allowlist for price images (key startswith 'price:')
+        try:
+            price_allow = str(self.cfg.get("ocr_allowlist", "0123456789KkMm"))
+        except Exception:
+            price_allow = "0123456789KkMm"
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            futs = {ex.submit(self._umi_ocr_one, im): key for key, im in imgs}
+            futs = {}
+            for key, im in imgs:
+                if isinstance(key, str) and key.startswith("price:"):
+                    fut = ex.submit(self._umi_ocr_one, im, allowlist=price_allow)
+                else:
+                    fut = ex.submit(self._umi_ocr_one, im)
+                futs[fut] = key
             for fu in as_completed(futs):
                 key = futs[fu]
                 try:
                     results[key] = fu.result() or ""
                 except Exception:
                     results[key] = ""
+        try:
+            self._log_debug(f"[OCR] 结束 耗时={int((time.time()-t0)*1000)}ms")
+        except Exception:
+            pass
         return results
 
     # ---------- 详情页平均价读取（锚定“购买”按钮） ----------
@@ -596,6 +876,7 @@ class MultiSnipeRunner:
             hei = int(avg_cfg.get("height", 45) or 45)
         except Exception:
             dist, hei = 5, 45
+        t0 = time.time()
         y_bottom = int(b_top - dist)
         y_top = int(y_bottom - hei)
         x_left = int(b_left)
@@ -620,6 +901,7 @@ class MultiSnipeRunner:
             ], stage="详情价复核区域", template_path=None, save_name="overlay_detail_avg.png")
         except Exception:
             pass
+        self._log_debug(f"[详情均价] ROI x={x_left} y={y_top} w={width} h={height} dist={dist} height={hei}")
         img = self._screenshot(roi)
         if img is None:
             return None
@@ -644,16 +926,32 @@ class MultiSnipeRunner:
                 img_top = img_top.resize((max(1, int(img_top.width * sc)), max(1, int(img_top.height * sc))))
             except Exception:
                 pass
-        txt = self._umi_ocr_one(img_top) or ""
-        val = _parse_price_text(txt or "")
+        # Downstream allowlist hint to OCR service
+        try:
+            avg_allow = str(self.cfg.get("ocr_allowlist", "0123456789KkMm"))
+        except Exception:
+            avg_allow = "0123456789KkMm"
+        txt = self._umi_ocr_one(img_top, allowlist=avg_allow) or ""
+        # 白名单清洗：仅保留 0-9 与 KkMm
+        try:
+            allowlist = str(self.cfg.get("ocr_allowlist", "0123456789KkMm"))
+        except Exception:
+            allowlist = "0123456789KkMm"
+        txt_clean = "".join(ch for ch in (txt or "") if ch in allowlist)
+        val = _parse_price_text(txt_clean or "")
         if val is None or val <= 0:
+            self._log_debug(
+                f"[详情均价] 识别失败 文本='{(txt_clean[:20] + '...') if len(txt_clean)>20 else txt_clean}' 耗时={int((time.time()-t0)*1000)}ms"
+            )
             return None
         try:
             floor = int(expected_floor or 0)
         except Exception:
             floor = 0
         if floor > 0 and int(val) < max(1, floor // 2):
+            self._log_debug(f"[详情均价] 低于地板/2 val={val} floor={floor}")
             return None
+        self._log_debug(f"[详情均价] 结果={int(val)} scale={sc} 耗时={int((time.time()-t0)*1000)}ms")
         return int(val)
 
     # ---------- 单轮扫描 ----------
@@ -662,31 +960,122 @@ class MultiSnipeRunner:
 
         返回项：{item, name_text, price_text, price_value}
         """
+        t0 = time.time()
+        self._log_debug("[扫描] 开始：刷新与批量截图")
         self.refresh_favorites()
         jobs = self.collect_batch_rois()
+        self._log_debug(f"[扫描] 截图完成 jobs={len(jobs)} 耗时={int((time.time()-t0)*1000)}ms")
         pairs: List[Tuple[str, Any]] = []
         for j in jobs:
             it: SnipeItem = j["item"]
-            # 外层价格识别：将价格 ROI 放大 1.5 倍后再 OCR
+            # 外层价格识别：将价格 ROI 放大 2.5 倍后再 OCR
             price_img_scaled = j.get("price_img")
             try:
                 if price_img_scaled is not None:
                     w0, h0 = price_img_scaled.size  # type: ignore[attr-defined]
-                    sw = max(1, int(w0 * 1.5))
-                    sh = max(1, int(h0 * 1.5))
+                    sw = max(1, int(w0 * 2.5))
+                    sh = max(1, int(h0 * 2.5))
                     price_img_scaled = price_img_scaled.resize((sw, sh))
             except Exception:
                 pass
             j["price_img_scaled"] = price_img_scaled
             pairs.append((f"name:{it.id}", j["name_img"]))
-            pairs.append((f"price:{it.id}", price_img_scaled))
+            # 列表价改为 utils/ocr_utils 识别，批量 OCR 不再包含 price
+        t1 = time.time()
         texts = self.ocr_batch(pairs)
+        self._log_debug(f"[扫描] OCR完成 耗时={int((time.time()-t1)*1000)}ms 总耗时={int((time.time()-t0)*1000)}ms")
         out: List[Dict[str, Any]] = []
         for j in jobs:
             it: SnipeItem = j["item"]
             name_txt = (texts.get(f"name:{it.id}") or "").strip()
-            price_txt = (texts.get(f"price:{it.id}") or "").strip()
-            val = _parse_price_text(price_txt or "")
+            # 使用 utils/ocr_utils 进行列表价数字识别
+            price_txt = ""
+            cand_val: Optional[int] = None
+            try:
+                btm_rect = j.get("btm_rect")
+                offset = (int(btm_rect[0]), int(btm_rect[1])) if btm_rect else (0, 0)
+            except Exception:
+                offset = (0, 0)
+            img_for_num = j.get("price_img_scaled") or j.get("price_img")
+            try:
+                umi = (self.cfg.get("umi_ocr", {}) or {})
+                _umi_base = str(umi.get("base_url", "http://127.0.0.1:1224"))
+                _umi_timeout = float(umi.get("timeout_sec", 2.5) or 2.5)
+                _umi_opts = dict(umi.get("options", {}) or {})
+            except Exception:
+                _umi_base, _umi_timeout, _umi_opts = "http://127.0.0.1:1224", 2.5, {}
+            try:
+                cands = recognize_numbers(
+                    img_for_num,
+                    base_url=_umi_base,
+                    timeout=_umi_timeout,
+                    options=_umi_opts,
+                    offset=offset,
+                )
+            except Exception:
+                cands = []
+            try:
+                cand = max([c for c in cands if getattr(c, "value", None) is not None], key=lambda c: int(c.value)) if cands else None  # type: ignore[arg-type]
+            except Exception:
+                cand = None
+            if cand is not None:
+                try:
+                    price_txt = str(getattr(cand, "clean_text", "") or "")
+                except Exception:
+                    price_txt = str(getattr(cand, "text", "") or "")
+                try:
+                    cand_val = int(getattr(cand, "value", None)) if getattr(cand, "value", None) is not None else None
+                except Exception:
+                    cand_val = None
+            # 关键词判定：若为错误/提示文本，直接视为无效
+            try:
+                _t = (price_txt or "").strip().lower()
+                if _t and any(k in _t for k in (
+                    "no text found", "no text", "未识别", "识别失败", "请求失败", "error", "exception", "path", "base64"
+                )):
+                    price_txt = ""
+            except Exception:
+                pass
+            # 白名单清洗（列表价格）：仅保留 0-9 与 KkMm
+            try:
+                price_cfg = self.cfg.get("price_roi", {}) or {}
+            except Exception:
+                price_cfg = {}
+            allowlist = str(self.cfg.get("ocr_allowlist", "0123456789KkMm"))
+            price_txt_clean = "".join(ch for ch in price_txt if ch in allowlist)
+            val = _parse_price_text(price_txt_clean or "")
+            if cand_val is not None:
+                try:
+                    val = int(cand_val)
+                except Exception:
+                    pass
+            # 调试叠加：在列表上直接标注识别文本（顶部=名称；底部=清洗后价格或原始价格）
+            try:
+                if self._debug_active():
+                    top_rect = j.get("top_rect")
+                    btm_rect = j.get("btm_rect")
+                    price_disp = (str(int(val)) if isinstance(val, int) else (price_txt_clean or "NA"))
+                    overlays = []
+                    if top_rect:
+                        overlays.append({"rect": top_rect, "label": f"{(name_txt or it.name)[:16]}", "fill": (45,124,255,90), "outline": (45,124,255)})
+                    if btm_rect:
+                        overlays.append({"rect": btm_rect, "label": f"{price_disp}", "fill": (46,160,67,90), "outline": (46,160,67)})
+                    # 高亮 utils 数字候选 bbox（若存在）
+                    try:
+                        if 'cand' in locals() and cand is not None and getattr(cand, 'bbox', None):
+                            bx, by, bw, bh = getattr(cand, 'bbox')
+                            overlays.append({
+                                "rect": (int(bx), int(by), int(bw), int(bh)),
+                                "label": f"候选{cand_val if isinstance(cand_val, int) else ''}",
+                                "fill": (255, 99, 71, 50),
+                                "outline": (255, 99, 71)
+                            })
+                    except Exception:
+                        pass
+                    if overlays:
+                        self._debug_show_overlay(overlays, stage="列表OCR结果", template_path=getattr(it, "template", None) or None, save_name=f"overlay_rois_{it.id}.png")
+            except Exception:
+                pass
             # 保存调试用的价格 ROI 图片（文件名包含结果与时间）
             try:
                 dbg_dir = os.path.join("debug")
@@ -729,15 +1118,24 @@ class MultiSnipeRunner:
                 "top_rect": j.get("top_rect"),
                 "btm_rect": j.get("btm_rect"),
             })
+        self._log_debug(f"[扫描] 结束 结果条数={len(out)}")
         return out
 
     # ---------- 数量调整 ----------
     def _adjust_qty(self, target: int) -> None:
         target = max(1, int(target or 1))
+        try:
+            self._log_debug(f"[数量] 目标数量={target}")
+        except Exception:
+            pass
         if target <= 1:
             return
         plus = self.screen.locate("qty_plus", timeout=0.2)
         if plus is None:
+            try:
+                self._log_debug("[数量] 未找到数量+ 按钮")
+            except Exception:
+                pass
             return
         for _ in range(target - 1):
             self.screen.click_center(plus)
@@ -745,12 +1143,17 @@ class MultiSnipeRunner:
 
     # ---------- 购买（进入详情→复核详情价→购买） ----------
     def _purchase_once(self, it: SnipeItem, *, price_limit: int) -> Tuple[bool, int]:
+        t0 = time.time()
         # 优先用中间图中心进入详情，兜底卡片中心
         mid = self._mid_cache.get(it.id)
         card = self._card_cache.get(it.id)
         target_box = mid or card
         if not target_box:
             return False, 0
+        try:
+            self._log_debug(f"[购买][{it.name}] 步骤1: 进入详情 target={target_box}")
+        except Exception:
+            pass
         # Debug：进入详情前可视化点击区域
         try:
             self._debug_show_overlay([
@@ -763,7 +1166,10 @@ class MultiSnipeRunner:
         # 详情价复核：以“购买”按钮为锚点
         base = int(getattr(it, "price", 0) or getattr(it, "price_threshold", 0) or 0)
         unit = self._read_detail_avg_price(expected_floor=(base if base > 0 else None))
-        self._log_debug(f"[复核][{it.name}] 详情平均价={unit if unit is not None else '-'} 上限={price_limit}")
+        try:
+            self._log_debug(f"[复核][{it.name}] 步骤2: 详情平均价={unit if unit is not None else '-'} 上限={price_limit}")
+        except Exception:
+            pass
         if unit is None or int(unit) > int(price_limit):
             c = self.screen.locate("btn_close", timeout=0.3)
             if c is not None:
@@ -775,6 +1181,10 @@ class MultiSnipeRunner:
                 except Exception:
                     pass
                 self.screen.click_center(c)
+            try:
+                self._log_debug(f"[购买][{it.name}] 复核未通过 用时={int((time.time()-t0)*1000)}ms")
+            except Exception:
+                pass
             return False, 0
         # 购买数量/Max 逻辑
         mode = str(getattr(it, "purchase_mode", "normal") or "normal").lower()
@@ -785,6 +1195,10 @@ class MultiSnipeRunner:
                 self.screen.click_center(mx)
                 time.sleep(0.02)
                 used_max = True
+                try:
+                    self._log_debug(f"[数量][{it.name}] 使用最大按钮")
+                except Exception:
+                    pass
             else:
                 self._adjust_qty(5)
         else:
@@ -798,6 +1212,10 @@ class MultiSnipeRunner:
             c = self.screen.locate("btn_close", timeout=0.3)
             if c is not None:
                 self.screen.click_center(c)
+            try:
+                self._log_debug(f"[购买][{it.name}] 未找到购买按钮 用时={int((time.time()-t0)*1000)}ms")
+            except Exception:
+                pass
             return False, 0
         # Debug：购买按钮点击
         try:
@@ -847,6 +1265,10 @@ class MultiSnipeRunner:
                 pass
             self.screen.click_center(c)
         if not (got_ok and not found_fail):
+            try:
+                self._log_debug(f"[购买][{it.name}] 失败/放弃 用时={int((time.time()-t0)*1000)}ms")
+            except Exception:
+                pass
             return False, 0
         # 购买增量：参考 task_runner 的逻辑
         try:
@@ -854,10 +1276,33 @@ class MultiSnipeRunner:
         except Exception:
             is_ammo = False
         inc = (120 if used_max else 10) if is_ammo else (5 if used_max else 1)
+        try:
+            self._log_debug(f"[购买][{it.name}] 成功 数量+={int(inc)} 总用时={int((time.time()-t0)*1000)}ms")
+        except Exception:
+            pass
         return True, int(inc)
 
     # ---------- 跑一轮并购买 ----------
     def run_once(self) -> Dict[str, Any]:
+        # 标记一轮开始：更新轮次与叠加序号、建立本轮输出目录（若开启保存）
+        try:
+            self._loop_no = int(getattr(self, "_loop_no", 0)) + 1
+        except Exception:
+            self._loop_no = 1
+        self._overlay_seq = 0
+        try:
+            ts = time.strftime("%Y%m%d_%H%M%S")
+        except Exception:
+            ts = str(int(time.time()))
+        try:
+            if bool(getattr(self, "_debug_save_overlay_images", False)):
+                loop_name = f"{ts}_loop-{self._loop_no:04d}"
+                self._loop_dir = os.path.join(self._debug_overlay_dir, loop_name)
+                os.makedirs(self._loop_dir, exist_ok=True)
+        except Exception:
+            pass
+        t0 = time.time()
+        self._log_debug(f"[一轮] 开始 轮次={self._loop_no}")
         results = self.scan_once()
         bought: List[Dict[str, Any]] = []
         for r in results:
@@ -896,4 +1341,13 @@ class MultiSnipeRunner:
                 self._log_info(f"[购买][{it.name}] 成功，列表价={val}")
             else:
                 self._log_info(f"[购买][{it.name}] 放弃或失败（详情复核未通过/未知）")
+        try:
+            self._log_debug(f"[一轮] 结束 识别={len(results)} 购买={len(bought)} 用时={int((time.time()-t0)*1000)}ms")
+        except Exception:
+            pass
+        # 一轮摘要：Info 输出识别/购买/耗时（精简且可读）
+        try:
+            self._log_info(f"[一轮] 完成 识别={len(results)} 购买={len(bought)} 用时={int((time.time()-t0)*1000)}ms")
+        except Exception:
+            pass
         return {"recognized": results, "bought": bought}

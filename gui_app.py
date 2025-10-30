@@ -1,10 +1,26 @@
-﻿import os
+import os
 import threading
 import time
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import uuid
 from typing import Any, Dict, List, Optional
+
+# 中文字体工具（Matplotlib/PIL/Tk）
+try:
+    from font_util import pil_font, setup_matplotlib_chinese, tk_font, draw_text  # type: ignore
+except Exception:
+    def pil_font(_size: int = 14):  # type: ignore
+        return None
+    def setup_matplotlib_chinese() -> None:  # type: ignore
+        return
+    def tk_font(_root, _size: int = 12):  # type: ignore
+        return None
+    def draw_text(draw, xy, text: str, fill=(255, 255, 255), size: int = 14):  # type: ignore
+        try:
+            draw.text(xy, text, fill=fill)
+        except Exception:
+            pass
 
 from app_config import ensure_default_config, load_config, save_config
 try:
@@ -15,9 +31,33 @@ try:
 except Exception:
     pass
 from task_runner import TaskRunner, run_launch_flow, ScreenOps
+# 尝试稳健加载 multi_snipe_runner：优先常规导入；失败时回退到按文件路径加载，并记录错误信息
+_multi_import_error: str | None = None
 try:
     from multi_snipe_runner import MultiSnipeRunner, SnipeItem  # type: ignore
-except Exception:
+except ImportError as e:
+    try:
+        import importlib.util as _ilu  # type: ignore
+        _here = os.path.dirname(os.path.abspath(__file__))
+        _path = os.path.join(_here, 'multi_snipe_runner.py')
+        if os.path.exists(_path):
+            _spec = _ilu.spec_from_file_location('multi_snipe_runner', _path)
+            if _spec and _spec.loader:
+                _mod = _ilu.module_from_spec(_spec)
+                _spec.loader.exec_module(_mod)  # type: ignore
+                MultiSnipeRunner = getattr(_mod, 'MultiSnipeRunner', None)  # type: ignore
+                SnipeItem = getattr(_mod, 'SnipeItem', None)  # type: ignore
+                if MultiSnipeRunner is None or SnipeItem is None:
+                    _multi_import_error = f"模块加载不完整：{_path}"
+        else:
+            _multi_import_error = f"文件不存在：{_path}"
+    except Exception as e2:
+        _multi_import_error = f"导入失败：{e!r}; 回退失败：{e2!r}"
+        MultiSnipeRunner = None  # type: ignore
+        SnipeItem = None  # type: ignore
+except Exception as e:
+    # 非 ImportError（如语法/运行时错误），保留详细异常用于 UI 提示
+    _multi_import_error = f"导入异常：{e!r}"
     MultiSnipeRunner = None  # type: ignore
     SnipeItem = None  # type: ignore
 
@@ -57,7 +97,14 @@ class _RegionSelector:
         cv.pack(fill=tk.BOTH, expand=True)
         self.canvas = cv
         try:
-            cv.create_text(w // 2, 30, text="拖拽选择区域，Esc/右键取消", fill="white", font=("Segoe UI", 12))
+            f = tk_font(self.root, 12)
+        except Exception:
+            f = None
+        try:
+            if f is not None:
+                cv.create_text(w // 2, 30, text="拖拽选择区域，Esc/右键取消", fill="white", font=f)
+            else:
+                cv.create_text(w // 2, 30, text="拖拽选择区域，Esc/右键取消", fill="white")
         except Exception:
             pass
         cv.bind("<ButtonPress-1>", self._on_press)
@@ -152,7 +199,14 @@ class _FixedSizeSelector:
         cv.pack(fill=tk.BOTH, expand=True)
         self.canvas = cv
         try:
-            cv.create_text(W // 2, 30, text=f"移动鼠标定位，左键确认（{self.w}x{self.h}），右键/ESC取消", fill="white", font=("Segoe UI", 12))
+            f = tk_font(self.root, 12)
+        except Exception:
+            f = None
+        try:
+            if f is not None:
+                cv.create_text(W // 2, 30, text=f"移动鼠标定位，左键确认（{self.w}x{self.h}），右键/ESC取消", fill="white", font=f)
+            else:
+                cv.create_text(W // 2, 30, text=f"移动鼠标定位，左键确认（{self.w}x{self.h}），右键/ESC取消", fill="white")
         except Exception:
             pass
         self.rect = cv.create_rectangle(0, 0, 1, 1, outline="red", width=2)
@@ -269,13 +323,25 @@ class _CardSelector:
         cv.pack(fill=tk.BOTH, expand=True)
         self.canvas = cv
         try:
-            cv.create_text(
-                W // 2,
-                30,
-                text=f"移动鼠标定位，左键确认（{self.w}x{self.h}），右键/ESC取消",
-                fill="white",
-                font=("Segoe UI", 12),
-            )
+            f = tk_font(self.root, 12)
+        except Exception:
+            f = None
+        try:
+            if f is not None:
+                cv.create_text(
+                    W // 2,
+                    30,
+                    text=f"移动鼠标定位，左键确认（{self.w}x{self.h}），右键/ESC取消",
+                    fill="white",
+                    font=f,
+                )
+            else:
+                cv.create_text(
+                    W // 2,
+                    30,
+                    text=f"移动鼠标定位，左键确认（{self.w}x{self.h}），右键/ESC取消",
+                    fill="white",
+                )
         except Exception:
             pass
         # Pre-create items for fast redraw
@@ -1985,6 +2051,11 @@ class App(tk.Tk):
         # Template manager（新增二级分组：标识模板）
         box_tpl = ttk.LabelFrame(outer, text="模板管理")
         box_tpl.pack(fill=tk.X, padx=8, pady=8)
+        # 保证下方 grid 子项（单个模板行容器）可横向拉伸
+        try:
+            box_tpl.columnconfigure(0, weight=1)
+        except Exception:
+            pass
 
         self.template_rows: Dict[str, TemplateRow] = {}
 
@@ -2010,7 +2081,7 @@ class App(tk.Tk):
                 # 未找到时，尝试返回矩形以辅助日志
                 box = pyautogui.locateOnScreen(path, confidence=conf)
             except Exception as e:
-                messagebox.showerror("测试识别", f"调用失败: {e}")
+                messagebox.showerror("选图片", f"失败: {e}")
                 return
             # 失败：提示
             messagebox.showwarning("测试识别", f"{name} 未匹配到。可降低置信度或重截图片。")
@@ -2026,7 +2097,7 @@ class App(tk.Tk):
                     import pyautogui  # type: ignore
                     img = pyautogui.screenshot(region=(x1, y1, w, h))
                 except Exception as e:
-                    messagebox.showerror("截图", f"截屏失败: {e}")
+                    messagebox.showerror("选图片", f"失败: {e}")
                     return
                 os.makedirs("images", exist_ok=True)
                 slug = self._template_slug(row.name)
@@ -2034,7 +2105,7 @@ class App(tk.Tk):
                 try:
                     img.save(path)
                 except Exception as e:
-                    messagebox.showerror("截图", f"保存失败: {e}")
+                    messagebox.showerror("选图片", f"失败: {e}")
                     return
                 row.var_path.set(path)
                 # Autosave (debounced)
@@ -2106,6 +2177,11 @@ class App(tk.Tk):
         except Exception:
             # Fallback to pack if grid not available (shouldn't happen here)
             box_ident.pack(fill=tk.X, padx=6, pady=(6, 4))
+        # 标识模板分组内仅 1 列，需允许列宽拉伸到 100%
+        try:
+            box_ident.columnconfigure(0, weight=1)
+        except Exception:
+            pass
 
         # 渲染【首页标识模板】【市场标识模板】（底层键：home_indicator / market_indicator）
         try:
@@ -2153,6 +2229,11 @@ class App(tk.Tk):
             box_tpl_general.grid(row=1, column=0, sticky="we", padx=6, pady=(4, 6))
         except Exception:
             box_tpl_general.pack(fill=tk.X, padx=6, pady=(4, 6))
+        # 同样确保单列容器可横向拉伸
+        try:
+            box_tpl_general.columnconfigure(0, weight=1)
+        except Exception:
+            pass
 
         # render rows (display Chinese name for known ASCII keys)
         rowc = 0
@@ -2237,7 +2318,7 @@ class App(tk.Tk):
                             self._append_log(f"[模板测试] 异常: {e}")
                         except Exception:
                             pass
-                        messagebox.showerror("模板识别", f"识别失败: {e}")
+                        messagebox.showerror("选图片", f"失败: {e}")
                         return
                     if center:
                         try:
@@ -2266,8 +2347,7 @@ class App(tk.Tk):
         self.var_roi_top_off = tk.IntVar(value=int(roi_cfg.get("top_offset", 0)))
         self.var_roi_btm_off = tk.IntVar(value=int(roi_cfg.get("bottom_offset", 0)))
         self.var_roi_lr_pad = tk.IntVar(value=int(roi_cfg.get("lr_pad", 0)))
-        # 新增：初始化区域模板/ROI 的 OCR 引擎与放大倍率
-        self.var_roi_engine = tk.StringVar(value=str(roi_cfg.get("ocr_engine", "")))
+        # 新增：初始化区域模板/ROI 的放大倍率（OCR 引擎已统一为 Umi-OCR）
         try:
             _sc_def_roi = float(roi_cfg.get("scale", 1.0))
         except Exception:
@@ -2312,10 +2392,7 @@ class App(tk.Tk):
         ttk.Button(box_roi, text="预览", command=self._roi_preview_from_screen).grid(row=2, column=6, padx=6)
 
         # 行3：识别引擎 + 放大倍率（供基于 ROI 的读取流程使用）
-        ttk.Label(box_roi, text="识别引擎").grid(row=3, column=0, padx=4, pady=4, sticky="e")
-        self.cmb_roi_engine = ttk.Combobox(box_roi, textvariable=self.var_roi_engine, state="readonly",
-                                           values=["", "tesseract", "umi"], width=12)
-        self.cmb_roi_engine.grid(row=3, column=1, sticky="w")
+        # 引擎选择已移除（统一使用 Umi-OCR 封装，不再显示 UI）
         ttk.Label(box_roi, text="放大倍率").grid(row=3, column=2, padx=8, pady=4, sticky="e")
         try:
             sp_roi_sc = ttk.Spinbox(box_roi, from_=0.6, to=2.5, increment=0.1, textvariable=self.var_roi_scale, width=6)
@@ -2346,7 +2423,6 @@ class App(tk.Tk):
         _upd_status(self.var_roi_top_tpl, self.lab_roi_top_status)
         _upd_status(self.var_roi_btm_tpl, self.lab_roi_btm_status)
         try:
-            self.var_roi_engine.trace_add("write", lambda *_: self._schedule_autosave())
             self.var_roi_scale.trace_add("write", lambda *_: self._schedule_autosave())
         except Exception:
             pass
@@ -2362,14 +2438,14 @@ class App(tk.Tk):
                     import pyautogui  # type: ignore
                     img = pyautogui.screenshot(region=(x1, y1, w, h))
                 except Exception as e:
-                    messagebox.showerror("截图", f"截屏失败: {e}")
+                    messagebox.showerror("选图片", f"失败: {e}")
                     return
                 os.makedirs("images", exist_ok=True)
                 path = os.path.join("images", f"{slug}.png")
                 try:
                     img.save(path)
                 except Exception as e:
-                    messagebox.showerror("截图", f"保存失败: {e}")
+                    messagebox.showerror("选图片", f"失败: {e}")
                     return
                 var.set(path)
                 # 自动保存（去抖）
@@ -2427,7 +2503,7 @@ class App(tk.Tk):
         # Defaults
         self.var_avg_dist = tk.IntVar(value=int(avg_cfg.get("distance_from_buy_top", 5)))
         self.var_avg_height = tk.IntVar(value=int(avg_cfg.get("height", 45)))
-        self.var_avg_engine = tk.StringVar(value=str(avg_cfg.get("ocr_engine", "umi")))
+        # OCR 引擎统一为 Umi-OCR，不再设置引擎变量
         try:
             _sc_def = float(avg_cfg.get("scale", 1.0))
         except Exception:
@@ -2450,11 +2526,7 @@ class App(tk.Tk):
 
         ttk.Button(box_avg, text="预览", command=self._avg_price_roi_preview).grid(row=0, column=5, padx=8)
 
-        # Row 1: OCR engine + scale
-        ttk.Label(box_avg, text="识别引擎").grid(row=1, column=0, padx=4, pady=4, sticky="e")
-        self.cmb_avg_engine = ttk.Combobox(box_avg, textvariable=self.var_avg_engine, state="readonly",
-                                           values=["tesseract", "umi"], width=12)
-        self.cmb_avg_engine.grid(row=1, column=1, sticky="w")
+        # Row 1: 仅保留缩放（引擎选择 UI 已移除，统一使用 Umi-OCR）
         ttk.Label(box_avg, text="放大倍率").grid(row=1, column=2, padx=8, pady=4, sticky="e")
         try:
             sp_sc = ttk.Spinbox(box_avg, from_=0.6, to=2.5, increment=0.1, textvariable=self.var_avg_scale, width=6)
@@ -2466,7 +2538,7 @@ class App(tk.Tk):
             box_avg.columnconfigure(i, weight=0)
 
         # 自动保存（距离/高度）
-        for v in [self.var_avg_dist, self.var_avg_height, self.var_avg_engine, self.var_avg_scale]:
+        for v in [self.var_avg_dist, self.var_avg_height, self.var_avg_scale]:
             try:
                 v.trace_add("write", lambda *_: self._schedule_autosave())
             except Exception:
@@ -2487,54 +2559,7 @@ class App(tk.Tk):
             except Exception:
                 pass
 
-        # 调试模式（可视化蒙版 + 步进延时）
-        box_dbg = ttk.LabelFrame(outer, text="调试模式")
-        box_dbg.pack(fill=tk.X, padx=8, pady=8)
-        dbg_cfg = self.cfg.get("debug", {}) if isinstance(self.cfg.get("debug"), dict) else {}
-        try:
-            self.var_debug_enabled = tk.BooleanVar(value=bool(dbg_cfg.get("enabled", False)))
-        except Exception:
-            self.var_debug_enabled = tk.BooleanVar(value=False)
-        try:
-            _ov = float(dbg_cfg.get("overlay_sec", 5.0))
-        except Exception:
-            _ov = 5.0
-        self.var_debug_overlay = tk.DoubleVar(value=_ov)
-        try:
-            _st = float(dbg_cfg.get("step_sleep", 0.0))
-        except Exception:
-            _st = 0.0
-        self.var_debug_step = tk.DoubleVar(value=_st)
-
-        chk = ttk.Checkbutton(box_dbg, text="启用调试可视化（绘制ROI/模板）", variable=self.var_debug_enabled)
-        chk.grid(row=0, column=0, columnspan=2, sticky="w", padx=6, pady=(4, 2))
-        ttk.Label(box_dbg, text="蒙版时长(秒)").grid(row=1, column=0, sticky="e", padx=6, pady=4)
-        try:
-            sp_ov = ttk.Spinbox(box_dbg, from_=0.5, to=15.0, increment=0.5, width=8, textvariable=self.var_debug_overlay)
-        except Exception:
-            sp_ov = tk.Spinbox(box_dbg, from_=0.5, to=15.0, increment=0.5, width=8, textvariable=self.var_debug_overlay)
-        sp_ov.grid(row=1, column=1, sticky="w")
-        ttk.Label(box_dbg, text="步进延时(秒)").grid(row=1, column=2, sticky="e", padx=12)
-        try:
-            sp_st = ttk.Spinbox(box_dbg, from_=0.0, to=1.0, increment=0.01, width=8, textvariable=self.var_debug_step)
-        except Exception:
-            sp_st = tk.Spinbox(box_dbg, from_=0.0, to=1.0, increment=0.01, width=8, textvariable=self.var_debug_step)
-        sp_st.grid(row=1, column=3, sticky="w")
-        try:
-            ttk.Button(box_dbg, text="立即预览蒙版", command=self._debug_test_overlay).grid(row=1, column=4, padx=10)
-        except Exception:
-            pass
-        for c in range(0, 5):
-            try:
-                box_dbg.columnconfigure(c, weight=0)
-            except Exception:
-                pass
-        # 自动保存（去抖）
-        for v in [self.var_debug_enabled, self.var_debug_overlay, self.var_debug_step]:
-            try:
-                v.trace_add("write", lambda *_: self._schedule_autosave())
-            except Exception:
-                pass
+        # 调试模式（已迁移至“多商品抢购模式”页面）
 
     def _debug_test_overlay(self) -> None:
         """显示一个 2 秒的半透明全屏蒙版，验证叠加行为。"""
@@ -2563,10 +2588,18 @@ class App(tk.Tk):
             cv = tk.Canvas(top, bg="black", highlightthickness=0)
             cv.pack(fill=tk.BOTH, expand=True)
             try:
-                cv.create_text(W // 2, 40, text="调试蒙版预览（ROI/模板可视化开关位于此区）", fill="white", font=("Segoe UI", 14))
+                f1 = tk_font(self, 14)
+                if f1 is not None:
+                    cv.create_text(W // 2, 40, text="调试蒙版预览（ROI/模板可视化开关位于此区）", fill="white", font=f1)
+                else:
+                    cv.create_text(W // 2, 40, text="调试蒙版预览（ROI/模板可视化开关位于此区）", fill="white")
                 cx, cy = W // 2, H // 2
                 cv.create_rectangle(cx - 220, cy - 120, cx + 220, cy + 120, outline="#2ea043", width=3)
-                cv.create_text(cx, cy, text="示例区域", fill="white", font=("Segoe UI", 16))
+                f2 = tk_font(self, 16)
+                if f2 is not None:
+                    cv.create_text(cx, cy, text="示例区域", fill="white", font=f2)
+                else:
+                    cv.create_text(cx, cy, text="示例区域", fill="white")
             except Exception:
                 pass
             try:
@@ -2617,11 +2650,7 @@ class App(tk.Tk):
         self.cfg["price_roi"]["top_offset"] = int(self.var_roi_top_off.get() or 0)
         self.cfg["price_roi"]["bottom_offset"] = int(self.var_roi_btm_off.get() or 0)
         self.cfg["price_roi"]["lr_pad"] = int(self.var_roi_lr_pad.get() or 0)
-        # 新增：引擎与放大倍率
-        eng = str(self.var_roi_engine.get() or "").strip().lower()
-        if eng not in ("", "tesseract", "umi"):
-            eng = ""
-        self.cfg["price_roi"]["ocr_engine"] = eng
+        # 放大倍率
         try:
             sc = float(self.var_roi_scale.get() or 1.0)
         except Exception:
@@ -2631,16 +2660,13 @@ class App(tk.Tk):
         if sc > 2.5:
             sc = 2.5
         self.cfg["price_roi"]["scale"] = float(sc)
+        # 已弃用字段（ocr_engine）不再保存
 
         # Flush average price area (distance/height)
         try:
             self.cfg.setdefault("avg_price_area", {})
             self.cfg["avg_price_area"]["distance_from_buy_top"] = int(self.var_avg_dist.get() or 0)
             self.cfg["avg_price_area"]["height"] = int(self.var_avg_height.get() or 0)
-            eng = str(self.var_avg_engine.get() or "umi").lower()
-            if eng not in ("tesseract", "umi"):
-                eng = "umi"
-            self.cfg["avg_price_area"]["ocr_engine"] = eng
             try:
                 sc = float(self.var_avg_scale.get() or 1.0)
             except Exception:
@@ -2650,6 +2676,7 @@ class App(tk.Tk):
             if sc > 2.5:
                 sc = 2.5
             self.cfg["avg_price_area"]["scale"] = float(sc)
+            # 已弃用字段（ocr_engine）不再保存
         except Exception:
             pass
 
@@ -2675,6 +2702,18 @@ class App(tk.Tk):
             if st > 1.0:
                 st = 1.0
             self.cfg["debug"]["step_sleep"] = float(st)
+            # 新增：保存可视化截图与目录
+            try:
+                self.cfg["debug"]["save_overlay_images"] = bool(self.var_debug_save_imgs.get())
+            except Exception:
+                self.cfg["debug"]["save_overlay_images"] = False
+            try:
+                _dir = (self.var_debug_overlay_dir.get() or "").strip()
+            except Exception:
+                _dir = ""
+            if not _dir:
+                _dir = os.path.join("images", "debug", "可视化调试")
+            self.cfg["debug"]["overlay_dir"] = _dir
         except Exception:
             pass
 
@@ -2706,19 +2745,19 @@ class App(tk.Tk):
             import numpy as _np  # type: ignore
             import cv2 as _cv2  # type: ignore
         except Exception as e:
-            messagebox.showerror("预览", f"缺少依赖或导入失败: {e}")
+            messagebox.showerror("选图片", f"失败: {e}")
             return
         try:
             img_pil = pyautogui.screenshot()
         except Exception as e:
-            messagebox.showerror("预览", f"截屏失败: {e}")
+            messagebox.showerror("选图片", f"失败: {e}")
             return
         # PIL -> OpenCV BGR
         try:
             img_rgb = _np.array(img_pil)
             img_bgr = img_rgb[:, :, ::-1].copy()
         except Exception as e:
-            messagebox.showerror("预览", f"图像转换失败: {e}")
+            messagebox.showerror("选图片", f"失败: {e}")
             return
 
         # Prepare
@@ -2818,27 +2857,16 @@ class App(tk.Tk):
         except Exception:
             pass
 
-        # OCR using configured engine (price_roi.ocr_engine fallback -> avg_price_area.ocr_engine)
+        # OCR 预览（统一使用 Umi-OCR via utils/ocr_utils）
         raw_text = ""
         cleaned = ""
         parsed_val = None
         elapsed_ms = -1.0
-        # Decide OCR engine (price_roi override -> avg engine)
-        try:
-            _cur = str(self.var_roi_engine.get() or "").strip().lower()
-        except Exception:
-            _cur = ""
-        try:
-            eng = _cur if _cur else str(self.var_avg_engine.get() or "umi").lower()
-        except Exception:
-            eng = "umi"
         try:
             import time as _time
             from PIL import Image as _Image  # type: ignore
             import numpy as _np  # type: ignore
-            import pytesseract  # type: ignore
-            from price_reader import _maybe_init_tesseract  # type: ignore
-            _maybe_init_tesseract()
+            from utils.ocr_utils import recognize_text  # type: ignore
             # Compose PIL image from bin/crop
             img = None
             if thb is not None:
@@ -2852,23 +2880,17 @@ class App(tk.Tk):
                     img = _Image.fromarray(arr[:, :, ::-1])
                 except Exception:
                     img = None
-
+            # Call Umi-OCR
+            ocfg = self.cfg.get("umi_ocr") or {}
             t0 = _time.perf_counter()
-            if eng in ("umi", "umi-ocr", "umiocr"):
-                try:
-                    o_texts, o_ms = self._run_umi_ocr(pil_image=img)
-                    raw_text = "\n".join(map(str, o_texts or []))
-                    elapsed_ms = float(o_ms)
-                except Exception as _e:
-                    raw_text = f"[umi失败] {_e}"
-            if not raw_text:
-                allow = str(self.cfg.get("avg_price_area", {}).get("ocr_allowlist", "0123456789KM"))
-                need = "KMkm"
-                allow_ex = allow + "".join(ch for ch in need if ch not in allow)
-                cfg = f"--oem 3 --psm 6 -c tessedit_char_whitelist={allow_ex}"
-                raw_text = pytesseract.image_to_string(img, config=cfg) if img is not None else ""
-            if elapsed_ms < 0:
-                elapsed_ms = (_time.perf_counter() - t0) * 1000.0
+            boxes = recognize_text(
+                img,
+                base_url=str(ocfg.get("base_url", "http://127.0.0.1:1224")),
+                timeout=float(ocfg.get("timeout_sec", 2.5) or 2.5),
+                options=dict(ocfg.get("options", {}) or {}),
+            ) if img is not None else []
+            elapsed_ms = (_time.perf_counter() - t0) * 1000.0
+            raw_text = "\n".join((b.text or "").strip() for b in boxes if (b.text or "").strip())
             up = (raw_text or "").upper()
             cleaned = "".join(ch for ch in up if ch in "0123456789KM")
             t = cleaned.strip().upper()
@@ -2889,9 +2911,9 @@ class App(tk.Tk):
 
         try:
             self._preview_avg_price_window(crop_path, raw_text, cleaned, parsed_val, elapsed_ms,
-                                           engine=eng, title="价格区域（模板ROI）")
+                                           engine="umi", title="价格区域（模板ROI）")
         except Exception as e:
-            messagebox.showerror("预览", f"显示失败: {e}")
+            messagebox.showerror("选图片", f"失败: {e}")
 
     
 
@@ -2923,7 +2945,7 @@ class App(tk.Tk):
             m_box = pyautogui.locateOnScreen(p_m, confidence=float(r_minus.get_confidence() or 0.85))
             p_box = pyautogui.locateOnScreen(p_p, confidence=float(r_plus.get_confidence() or 0.85))
         except Exception as e:
-            messagebox.showerror("数量输入区域", f"匹配失败: {e}")
+            messagebox.showerror("选图片", f"失败: {e}")
             return None, None
         if not m_box or not p_box:
             messagebox.showwarning("数量输入区域", "未匹配到‘数量-’或‘数量+’，请降低阈值或重截清晰模板。")
@@ -2987,14 +3009,14 @@ class App(tk.Tk):
             import pyautogui  # type: ignore
             img = pyautogui.screenshot(region=(x1, y1, w, h))
         except Exception as e:
-            messagebox.showerror("预览", f"截屏失败: {e}")
+            messagebox.showerror("选图片", f"失败: {e}")
             return
         os.makedirs("images", exist_ok=True)
         path = os.path.join("images", "_qty_input_roi.png")
         try:
             img.save(path)
         except Exception as e:
-            messagebox.showerror("预览", f"保存失败: {e}")
+            messagebox.showerror("选图片", f"失败: {e}")
             return
         try:
             self._append_log(f"[数量输入区域] 截取: ({x1},{y1},{x2},{y2}) -> {path}")
@@ -3014,7 +3036,7 @@ class App(tk.Tk):
             pyautogui.moveTo(cx, cy, duration=0.1)
             pyautogui.click(cx, cy)
         except Exception as e:
-            messagebox.showerror("点击", f"点击失败: {e}")
+            messagebox.showerror("选图片", f"失败: {e}")
             return
         try:
             self._append_log(f"[数量输入区域] 点击中心: ({cx},{cy})，区域=({x1},{y1},{x2},{y2})")
@@ -3022,15 +3044,7 @@ class App(tk.Tk):
             pass
 
     def _ocr_text_parse_km(self, bin_img, *, fallback_img=None):
-        # 使用 avg_price_area.ocr_engine 以与平均单价预览保持一致
-        try:
-            cur = str(self.var_cur_engine.get() or "").strip().lower()
-        except Exception:
-            cur = ""
-        try:
-            eng = cur if cur else str(self.var_avg_engine.get() or "umi").lower()
-        except Exception:
-            eng = "tesseract"
+        """对二值化或彩色图片做 OCR，并解析为整数（支持 K/M 后缀）。统一使用 Umi-OCR。"""
         raw_text = ""
         elapsed_ms = -1.0
         cleaned = ""
@@ -3039,10 +3053,8 @@ class App(tk.Tk):
             import time as _time
             import numpy as _np  # type: ignore
             from PIL import Image as _Image  # type: ignore
-            import pytesseract  # type: ignore
-            from price_reader import _maybe_init_tesseract  # type: ignore
-            _maybe_init_tesseract()
-            t0 = _time.perf_counter()
+            from utils.ocr_utils import recognize_text  # type: ignore
+            # 构造 PIL.Image
             img = None
             if bin_img is not None:
                 try:
@@ -3051,46 +3063,20 @@ class App(tk.Tk):
                     img = None
             if img is None and fallback_img is not None:
                 try:
-                    # fallback_img is BGR ndarray
                     arr = _np.array(fallback_img)
-                    from PIL import Image as _Image2  # type: ignore
-                    img = _Image2.fromarray(arr[:, :, ::-1])
+                    img = _Image.fromarray(arr[:, :, ::-1])
                 except Exception:
                     img = None
-            # Log engine and image shape for troubleshooting
-            try:
-                h0, w0 = (bin_img.shape[:2] if bin_img is not None else (fallback_img.shape[:2] if fallback_img is not None else (0, 0)))
-                self._append_log(f"[货币ROI预览] 引擎={eng} 输入={w0}x{h0}")
-            except Exception:
-                pass
-
-            if eng in ("umi", "umi-ocr", "umiocr"):
-                try:
-                    # Log Umi-OCR config
-                    try:
-                        ocfg = dict(self.cfg.get("umi_ocr", {}) or {})
-                        base_url = str(ocfg.get("base_url", "http://127.0.0.1:1224")).rstrip("/")
-                        timeout = float(ocfg.get("timeout_sec", 2.5) or 2.5)
-                        opt_keys = ",".join(sorted(map(str, (ocfg.get("options", {}) or {}).keys())))
-                        self._append_log(f"[货币ROI预览] Umi-OCR base_url={base_url} timeout={timeout}s opts={opt_keys or '-'}")
-                    except Exception:
-                        pass
-                    texts, o_ms = self._run_umi_ocr(pil_image=img)
-                    raw_text = "\n".join(map(str, texts or []))
-                    elapsed_ms = float(o_ms)
-                except Exception as _e:
-                    raw_text = f"[umi失败] {_e}"
-            if not raw_text:
-                allow = str(self.cfg.get("avg_price_area", {}).get("ocr_allowlist", "0123456789KM"))
-                need = "KMkm"
-                allow_ex = allow + "".join(ch for ch in need if ch not in allow)
-                cfg = f"--oem 3 --psm 6 -c tessedit_char_whitelist={allow_ex}"
-                raw_text = pytesseract.image_to_string(img, config=cfg) if img is not None else ""
+            ocfg = self.cfg.get("umi_ocr") or {}
+            t0 = _time.perf_counter()
+            boxes = recognize_text(
+                img,
+                base_url=str(ocfg.get("base_url", "http://127.0.0.1:1224")),
+                timeout=float(ocfg.get("timeout_sec", 2.5) or 2.5),
+                options=dict(ocfg.get("options", {}) or {}),
+            ) if img is not None else []
             elapsed_ms = (_time.perf_counter() - t0) * 1000.0
-            try:
-                self._append_log(f"[货币ROI预览] 耗时={int(elapsed_ms)}ms 结果={(raw_text or '').strip()[:64]}")
-            except Exception:
-                pass
+            raw_text = "\n".join((b.text or "").strip() for b in boxes if (b.text or "").strip())
             up = (raw_text or "").upper()
             cleaned = "".join(ch for ch in up if ch in "0123456789KM")
             t = cleaned.strip().upper()
@@ -3473,22 +3459,21 @@ class App(tk.Tk):
         if not os.path.exists(crop_path):
             messagebox.showwarning("预览", "截取图不存在。")
             return
-        # Run OCR first to get timing/text (use Tesseract for quick preview)
+        # Run OCR first to get timing/text via utils (Umi-OCR)
         try:
             import time as _time
             from PIL import Image as _Image  # type: ignore
-            import pytesseract  # type: ignore
-            try:
-                from price_reader import _maybe_init_tesseract  # type: ignore
-                _maybe_init_tesseract()
-            except Exception:
-                pass
+            from utils.ocr_utils import recognize_text  # type: ignore
             imgp = _Image.open(crop_path)
+            umi = (self.cfg.get("umi_ocr", {}) if hasattr(self, "cfg") else {}) or {}
+            base_url = str(umi.get("base_url", "http://127.0.0.1:1224"))
+            timeout = float(umi.get("timeout_sec", 2.5) or 2.5)
+            options = dict(umi.get("options", {}) or {})
             t0 = _time.perf_counter()
-            raw = pytesseract.image_to_string(imgp) or ""
+            _boxes = recognize_text(imgp, base_url=base_url, timeout=timeout, options=options)
             ocr_ms = (_time.perf_counter() - t0) * 1000.0
-            ocr_texts = [ln.strip() for ln in str(raw).splitlines() if ln.strip()]
-            ocr_scores = []
+            ocr_texts = [b.text.strip() for b in _boxes if (b.text or "").strip()]
+            ocr_scores = [float(b.score) if getattr(b, "score", None) is not None else None for b in _boxes]
         except Exception as e:
             ocr_texts, ocr_scores, ocr_ms = [], [], -1.0
 
@@ -3554,7 +3539,14 @@ class App(tk.Tk):
             cv.image = tk_crop
         except Exception as e:
             try:
-                cv.create_text(10, 10, anchor=tk.NW, text=f"加载截取图失败: {e}")
+                f = tk_font(self, 12)
+            except Exception:
+                f = None
+            try:
+                if f is not None:
+                    cv.create_text(10, 10, anchor=tk.NW, text=f"加载截取图失败: {e}", font=f)
+                else:
+                    cv.create_text(10, 10, anchor=tk.NW, text=f"加载截取图失败: {e}")
             except Exception:
                 pass
 
@@ -3600,62 +3592,7 @@ class App(tk.Tk):
 
     # OcrLite path removed
 
-    def _run_umi_ocr(self, img_path: str | None = None, pil_image=None):
-        """Call Umi-OCR HTTP API (/api/ocr) with a PIL image or a file path.
-
-        Returns (texts: list[str], elapsed_ms: float). Uses cfg['umi_ocr'].
-        """
-        import base64 as _b64
-        import io as _io
-        import time as _time
-        try:
-            import requests  # type: ignore
-        except Exception as e:
-            raise RuntimeError(f"Umi-OCR 依赖缺失: requests ({e})")
-        cfg = (self.cfg.get("umi_ocr", {}) or {})
-        base_url = str(cfg.get("base_url", "http://127.0.0.1:1224")).rstrip("/")
-        timeout = float(cfg.get("timeout_sec", 2.5) or 2.5)
-        opts = dict(cfg.get("options", {}) or {})
-        url = base_url + "/api/ocr"
-        # Build base64
-        if pil_image is not None:
-            bio = _io.BytesIO()
-            try:
-                pil_image.save(bio, format="PNG")
-            except Exception:
-                pil_image.convert("RGB").save(bio, format="PNG")
-            data_b64 = _b64.b64encode(bio.getvalue()).decode("ascii")
-        elif img_path is not None:
-            with open(img_path, "rb") as f:
-                data_b64 = _b64.b64encode(f.read()).decode("ascii")
-        else:
-            raise ValueError("_run_umi_ocr: missing image input")
-        payload = {"base64": data_b64}
-        if opts:
-            payload["options"] = opts
-        t0 = _time.perf_counter()
-        resp = requests.post(url, json=payload, timeout=timeout)
-        elapsed_ms = (_time.perf_counter() - t0) * 1000.0
-        resp.raise_for_status()
-        j = resp.json()
-        code = int(j.get("code", 0) or 0)
-        data = j.get("data")
-        texts: list[str] = []
-        if code == 100:
-            if isinstance(data, list):
-                # dict list
-                try:
-                    for e in data:
-                        t = e.get("text") if isinstance(e, dict) else None
-                        if t:
-                            texts.append(str(t))
-                except Exception:
-                    pass
-            elif isinstance(data, str):
-                texts = [data]
-        elif isinstance(data, str):
-            texts = [data]
-        return texts, float(elapsed_ms)
+    # OCR 直连函数已移除（统一使用 utils/ocr_utils）
 
     # Warm-up removed
 
@@ -3664,7 +3601,7 @@ class App(tk.Tk):
             import pyautogui  # type: ignore
             from PIL import Image  # type: ignore
         except Exception as e:
-            messagebox.showerror("预览", f"缺少依赖或导入失败: {e}")
+            messagebox.showerror("选图片", f"失败: {e}")
             return
 
         buy_row = None
@@ -3714,7 +3651,7 @@ class App(tk.Tk):
             try:
                 box = pyautogui.locateOnScreen(path, confidence=conf)
             except Exception as e:
-                messagebox.showerror("预览", f"模板匹配失败: {e}")
+                messagebox.showerror("选图片", f"失败: {e}")
                 return
         if center is None and not box:
             try:
@@ -3784,7 +3721,7 @@ class App(tk.Tk):
         try:
             img = pyautogui.screenshot(region=(x_left, y_top, width, height))
         except Exception as e:
-            messagebox.showerror("预览", f"截图失败: {e}")
+            messagebox.showerror("选图片", f"失败: {e}")
             return
         # Split ROI into two halves: top (平均价), bottom (合计)
         try:
@@ -3843,32 +3780,29 @@ class App(tk.Tk):
             bin_top.save(path_top)
             bin_bot.save(path_bot)
         except Exception as e:
-            messagebox.showerror("预览", f"保存截图失败: {e}")
+            messagebox.showerror("选图片", f"失败: {e}")
             return
 
         # OCR both halves
         import time as _time
-        import pytesseract  # type: ignore
         try:
-            from price_reader import _maybe_init_tesseract  # type: ignore
-            _maybe_init_tesseract()
         except Exception:
             pass
-        eng = str(self.var_avg_engine.get() or "umi").lower()
         def _ocr(pil_img):
             raw = ""; ms = -1.0
             t0 = _time.perf_counter()
-            if eng in ("umi", "umi-ocr", "umiocr"):
-                try:
-                    texts, o_ms = self._run_umi_ocr(pil_image=pil_img)
-                    raw = "\n".join(map(str, texts or [])); ms = float(o_ms)
-                except Exception as _e:
-                    raw = f"[umi失败] {_e}"
-            if not raw:
-                allow = str(self.cfg.get("avg_price_area", {}).get("ocr_allowlist", "0123456789KM"))
-                need = "KMkm"; allow_ex = allow + "".join(ch for ch in need if ch not in allow)
-                cfg = f"--oem 3 --psm 6 -c tessedit_char_whitelist={allow_ex}"
-                raw = pytesseract.image_to_string(pil_img, config=cfg) or ""
+            try:
+                from utils.ocr_utils import recognize_text  # type: ignore
+                ocfg = self.cfg.get("umi_ocr") or {}
+                boxes = recognize_text(
+                    pil_img,
+                    base_url=str(ocfg.get("base_url", "http://127.0.0.1:1224")),
+                    timeout=float(ocfg.get("timeout_sec", 2.5) or 2.5),
+                    options=dict(ocfg.get("options", {}) or {}),
+                ) if pil_img is not None else []
+                raw = "\n".join((b.text or "").strip() for b in boxes if (b.text or "").strip())
+            except Exception as _e:
+                raw = f"[umi失败] {_e}"
             if ms < 0: ms = (_time.perf_counter() - t0) * 1000.0
             up = (raw or "").upper(); cleaned = "".join(ch for ch in up if ch in "0123456789KM")
             t = cleaned.strip().upper(); mult = 1
@@ -3885,17 +3819,17 @@ class App(tk.Tk):
         try:
             self._preview_avg_price_window_dual(path_top, raw_t, clean_t, parsed_t, ms_t,
                                                 path_bot, raw_b, clean_b, parsed_b, ms_b,
-                                                engine=eng)
+                                                engine="umi")
         except Exception as e:
-            messagebox.showerror("预览", f"显示失败: {e}")
+            messagebox.showerror("选图片", f"失败: {e}")
 
-    def _preview_avg_price_window(self, crop_path: str, raw_text: str, cleaned: str, parsed_val, elapsed_ms: float, *, engine: str = "tesseract", title: str | None = None) -> None:
+    def _preview_avg_price_window(self, crop_path: str, raw_text: str, cleaned: str, parsed_val, elapsed_ms: float, *, engine: str = "umi", title: str | None = None) -> None:
         if not os.path.exists(crop_path):
             messagebox.showwarning("预览", "ROI 截图不存在。")
             return
         top = tk.Toplevel(self)
         try:
-            eng_map = {"tesseract": "PyTesseract", "umi": "Umi-OCR"}
+            eng_map = {"umi": "Umi-OCR"}
             eng_name = eng_map.get(engine.lower(), engine)
             ttl_base = title if isinstance(title, str) and title else "平均单价区域"
             top.title(f"预览 - {ttl_base}（截图 + {eng_name}）")
@@ -4044,68 +3978,7 @@ class App(tk.Tk):
         # Load items from config
         self._load_items_from_cfg()
 
-    # ---------- Tab3: OCR Lab ----------
-    def _build_tab3(self) -> None:
-        return
-        outer = self.tab3
-        frm = ttk.Frame(outer)
-        frm.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
-
-        # Top controls
-        ctrl = ttk.Frame(frm)
-        ctrl.pack(fill=tk.X)
-
-        ttk.Label(ctrl, text="图片路径").pack(side=tk.LEFT)
-        self.var_lab_img = tk.StringVar(value="")
-        ent = ttk.Entry(ctrl, textvariable=self.var_lab_img, width=60)
-        ent.pack(side=tk.LEFT, padx=6)
-        ttk.Button(ctrl, text="选择…", command=self._lab_pick_image).pack(side=tk.LEFT)
-
-        # Params row 1 - split + zoom
-        p1 = ttk.Frame(frm)
-        p1.pack(fill=tk.X, pady=(8, 4))
-        ttk.Label(p1, text="左右分割阈值").pack(side=tk.LEFT)
-        self.var_lab_split = tk.DoubleVar(value=0.50)
-        # 使用 tk.Scale 支持 resolution 步进更细腻
-        s = tk.Scale(p1, from_=0.30, to=0.70, resolution=0.01, orient=tk.HORIZONTAL, showvalue=False,
-                     variable=self.var_lab_split, command=lambda _=None: self._lab_render(), length=260)
-        s.pack(side=tk.LEFT, padx=6)
-        self.lab_split_val = ttk.Label(p1, text="0.50")
-        self.lab_split_val.pack(side=tk.LEFT, padx=(0, 12))
-        ttk.Label(p1, text="缩放").pack(side=tk.LEFT)
-        self.var_lab_zoom = tk.DoubleVar(value=1.5)
-        try:
-            sp = tk.Spinbox(p1, from_=0.5, to=3.0, increment=0.1, textvariable=self.var_lab_zoom, width=5, command=self._lab_render)
-        except Exception:
-            sp = ttk.Entry(p1, textvariable=self.var_lab_zoom, width=6)
-        sp.pack(side=tk.LEFT, padx=6)
-
-        # Params row 2
-        p2 = ttk.Frame(frm)
-        p2.pack(fill=tk.X, pady=(4, 4))
-        ttk.Label(p2, text="价格范围").pack(side=tk.LEFT)
-        self.var_lab_price_min = tk.IntVar(value=10)
-        self.var_lab_price_max = tk.IntVar(value=10_000_000)
-        ttk.Entry(p2, textvariable=self.var_lab_price_min, width=8).pack(side=tk.LEFT, padx=2)
-        ttk.Label(p2, text="~").pack(side=tk.LEFT)
-        ttk.Entry(p2, textvariable=self.var_lab_price_max, width=10).pack(side=tk.LEFT, padx=2)
-        ttk.Label(p2, text="数量范围").pack(side=tk.LEFT, padx=(12, 0))
-        self.var_lab_qty_min = tk.IntVar(value=0)
-        self.var_lab_qty_max = tk.IntVar(value=1_000_000)
-        ttk.Entry(p2, textvariable=self.var_lab_qty_min, width=8).pack(side=tk.LEFT, padx=2)
-        ttk.Label(p2, text="~").pack(side=tk.LEFT)
-        ttk.Entry(p2, textvariable=self.var_lab_qty_max, width=10).pack(side=tk.LEFT, padx=2)
-
-        # Params row 3
-        p3 = ttk.Frame(frm)
-        p3.pack(fill=tk.X, pady=(4, 8))
-        ttk.Label(p3, text="显示变体").pack(side=tk.LEFT)
-        self.var_lab_variant = tk.StringVar(value="auto")
-        self.cmb_variant = ttk.Combobox(p3, textvariable=self.var_lab_variant, state="readonly", values=["auto", "raw"], width=14)
-        self.cmb_variant.pack(side=tk.LEFT, padx=6)
-        self.cmb_variant.bind("<<ComboboxSelected>>", lambda _e: self._lab_render())
-        ttk.Button(p3, text="重新计算", command=self._lab_compute_variants).pack(side=tk.LEFT)
-        ttk.Button(p3, text="导出当前标注图", command=self._lab_save_annotated).pack(side=tk.LEFT, padx=6)
+    # ---------- Tab3: OCR Lab（已移除） ----------
 
     # ---------- 执行日志（新逻辑） ----------
     def _build_tab_exec(self) -> None:
@@ -4286,165 +4159,8 @@ class App(tk.Tk):
                     pass
         except Exception:
             pass
-        # Auto split & refine options
-        self.var_lab_auto_split = tk.BooleanVar(value=True)
-        ttk.Checkbutton(p3, text="自动分割", variable=self.var_lab_auto_split, command=self._lab_render).pack(side=tk.LEFT, padx=(12, 0))
-        self.var_lab_refine = tk.BooleanVar(value=True)
-        ttk.Checkbutton(p3, text="裁剪细读", variable=self.var_lab_refine, command=self._lab_render).pack(side=tk.LEFT)
-        # Chart mode controls (for bar-chart style images)
-        self.var_lab_chart_mode = tk.BooleanVar(value=False)
-        ttk.Checkbutton(p3, text="图表模式(条形图)", variable=self.var_lab_chart_mode, command=self._lab_render).pack(side=tk.LEFT, padx=(12, 0))
-        ttk.Label(p3, text="最大刻度").pack(side=tk.LEFT, padx=(12, 0))
-        self.var_lab_chart_max = tk.IntVar(value=100_000_000)
-        try:
-            tk.Spinbox(p3, from_=1, to=2_000_000_000, increment=1000, textvariable=self.var_lab_chart_max, width=12, command=self._lab_render).pack(side=tk.LEFT, padx=(4, 0))
-        except Exception:
-            ttk.Entry(p3, textvariable=self.var_lab_chart_max, width=12).pack(side=tk.LEFT, padx=(4, 0))
-        self.var_lab_chart_k = tk.BooleanVar(value=True)
-        ttk.Checkbutton(p3, text="K单位", variable=self.var_lab_chart_k, command=self._lab_render).pack(side=tk.LEFT, padx=(8, 0))
-        # Interference removal toggles
-        self.var_lab_rm_hbars = tk.BooleanVar(value=True)
-        self.var_lab_rm_vsep = tk.BooleanVar(value=True)
-        ttk.Checkbutton(p3, text="去横条", variable=self.var_lab_rm_hbars, command=self._lab_render).pack(side=tk.LEFT, padx=(12, 0))
-        ttk.Checkbutton(p3, text="去中线", variable=self.var_lab_rm_vsep, command=self._lab_render).pack(side=tk.LEFT)
-
-        # Help text
-        tip = ttk.Label(frm, text="说明：普通模式：检测数字并按左右分割为价格/数量；图表模式：在深色条形图中，条长映射数量，条末数值为价格，支持K单位。",
-                        foreground="#666")
-        tip.pack(fill=tk.X, pady=(0, 4))
-
-        # Preview (single annotated preview for quick glance)
-        prev = ttk.Frame(frm)
-        prev.pack(fill=tk.X)
-        self.lab_prev = ttk.Label(prev)
-        self.lab_prev.pack(padx=10, pady=10, anchor="w")
-        self.lab_result = ttk.Label(frm, text="未加载")
-        self.lab_result.pack(pady=(0, 4), anchor="w")
-
-        # Pairing results table (chart mode)
-        pairs_box = ttk.LabelFrame(frm, text="配对结果（自上而下）")
-        pairs_box.pack(fill=tk.X, pady=(2, 6))
-        self.pairs_tree = ttk.Treeview(pairs_box, columns=("idx", "price", "qty"), show="headings", height=6)
-        self.pairs_tree.heading("idx", text="序")
-        self.pairs_tree.heading("price", text="价格")
-        self.pairs_tree.heading("qty", text="数量")
-        self.pairs_tree.column("idx", width=40, anchor="e")
-        self.pairs_tree.column("price", width=120, anchor="e")
-        self.pairs_tree.column("qty", width=160, anchor="e")
-        self.pairs_tree.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        sbp = ttk.Scrollbar(pairs_box, orient=tk.VERTICAL, command=self.pairs_tree.yview)
-        sbp.pack(side=tk.RIGHT, fill=tk.Y)
-        self.pairs_tree.configure(yscrollcommand=sbp.set)
-        act2 = ttk.Frame(frm)
-        act2.pack(fill=tk.X)
-        ttk.Button(act2, text="复制结果", command=self._pairs_copy_to_clipboard).pack(side=tk.LEFT)
-
-        # Step-by-step panel with scroll
-        step_box = ttk.LabelFrame(frm, text="步骤预览（图像处理 → 候选框 → 分割 → 裁剪 → 识别）")
-        step_box.pack(fill=tk.BOTH, expand=True, pady=(4, 6))
-        step_outer = ttk.Frame(step_box)
-        step_outer.pack(fill=tk.BOTH, expand=True)
-        self.lab_steps_canvas = tk.Canvas(step_outer, highlightthickness=0, height=300)
-        self.lab_steps_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        sb = ttk.Scrollbar(step_outer, orient=tk.VERTICAL, command=self.lab_steps_canvas.yview)
-        sb.pack(side=tk.RIGHT, fill=tk.Y)
-        self.lab_steps_canvas.configure(yscrollcommand=sb.set)
-        self.lab_steps_inner = ttk.Frame(self.lab_steps_canvas)
-        self.lab_steps_canvas.create_window((0, 0), window=self.lab_steps_inner, anchor="nw")
-        self.lab_steps_inner.bind("<Configure>", lambda e: self.lab_steps_canvas.configure(scrollregion=self.lab_steps_canvas.bbox("all")))
-        # Enable wheel scroll on the step preview pane
-        try:
-            self._bind_mousewheel(self.lab_steps_inner, self.lab_steps_canvas)
-        except Exception:
-            pass
-        # keep references to Tk images to avoid GC
-        self._lab_step_tkimgs: list[Any] = []
-
-        # Crops preview
-        crop_box = ttk.Frame(frm)
-        crop_box.pack(fill=tk.X, pady=(2, 4))
-        ttk.Label(crop_box, text="裁剪：左(价格)").pack(side=tk.LEFT)
-        self.lab_left_crop = ttk.Label(crop_box)
-        self.lab_left_crop.pack(side=tk.LEFT, padx=6)
-        ttk.Label(crop_box, text="右(数量)").pack(side=tk.LEFT, padx=(14, 0))
-        self.lab_right_crop = ttk.Label(crop_box)
-        self.lab_right_crop.pack(side=tk.LEFT, padx=6)
-
-        # Save steps button
-        act = ttk.Frame(frm)
-        act.pack(fill=tk.X)
-        ttk.Button(act, text="保存本次流程", command=self._lab_save_steps).pack(side=tk.LEFT)
-
-        # Diagnostics box
-        diagf = ttk.Frame(frm)
-        diagf.pack(fill=tk.BOTH, expand=True)
-        ttk.Label(diagf, text="诊断").pack(anchor="w")
-        self.lab_diag = tk.Text(diagf, height=6, wrap="word")
-        self.lab_diag.pack(fill=tk.BOTH, expand=True)
-        try:
-            self.lab_diag.configure(state=tk.DISABLED)
-        except Exception:
-            pass
-
-        # State
-        self._lab_pil = None
-        self._lab_variants = []  # list of (name, PIL.Image)
-        self._lab_cur_img = None
-
-        # Trace entries to re-render
-        for v in [self.var_lab_price_min, self.var_lab_price_max, self.var_lab_qty_min, self.var_lab_qty_max, self.var_lab_zoom]:
-            try:
-                v.trace_add("write", lambda *_: self._lab_render())
-            except Exception:
-                pass
-
-    def _lab_pick_image(self) -> None:
+        # Lab UI 移除
         return
-        path = filedialog.askopenfilename(title="选择图片", filetypes=[("Image", ".png .jpg .jpeg .bmp"), ("All", "*.*")])
-        if not path:
-            return
-        self.var_lab_img.set(path)
-        try:
-            from PIL import Image  # type: ignore
-            self._lab_pil = Image.open(path).convert("RGB")
-        except Exception as e:
-            messagebox.showerror("打开图片", f"失败: {e}")
-            self._lab_pil = None
-            return
-        self._lab_compute_variants()
-
-    def _lab_compute_variants(self) -> None:
-        return
-        if self._lab_pil is None:
-            return
-        self._lab_variants = [("raw", self._lab_pil.copy())]
-        # Use price_reader's preprocess variants
-        try:
-            import numpy as _np  # type: ignore
-            import cv2 as _cv2  # type: ignore
-            from price_reader import _preprocess_variants_for_digits  # type: ignore
-            arrs = _preprocess_variants_for_digits(self._lab_pil)
-            for i, a in enumerate(arrs):
-                try:
-                    if len(a.shape) == 2:
-                        pil = self._pil_from_cv_gray(a)
-                    else:
-                        pil = self._pil_from_cv_bgr(a)
-                    self._lab_variants.append((f"v{i:02d}", pil))
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        # Update combobox options
-        vals = ["auto"] + [n for (n, _) in self._lab_variants]
-        try:
-            self.cmb_variant.configure(values=vals)
-        except Exception:
-            self.cmb_variant["values"] = vals
-        if self.var_lab_variant.get() not in vals:
-            self.var_lab_variant.set("auto")
-        self._lab_render()
-
     # ---------- Chart-mode helpers for OCR Lab ----------
     def _fmt_k(self, n: int) -> str:
         try:
@@ -4502,15 +4218,8 @@ class App(tk.Tk):
         except Exception:
             return None
 
-    def _lab_detect_chart_and_draw(self, pil_img):
+def _lab_detect_chart_and_draw(self, pil_img):
         return pil_img, 0, 0, []
-        try:
-            import numpy as _np  # type: ignore
-            import cv2 as _cv2  # type: ignore
-            import pytesseract as _pt  # type: ignore
-            from PIL import ImageDraw  # type: ignore
-        except Exception:
-            return pil_img, 0, 0, "[Chart] 缺少 OpenCV/Tesseract 依赖，无法进行条形图模式识别。"
 
         # Parameters
         try:
@@ -4615,7 +4324,7 @@ class App(tk.Tk):
             try:
                 for psm in (7, 6, 13):
                     cfg = f"--oem 3 --psm {psm} -c tessedit_char_whitelist=0123456789kK.,"
-                    d = _pt.image_to_data(crop, config=cfg, output_type=_pt.Output.DICT)
+                    d ={}
                     n = len(d.get("text", []))
                     for i in range(n):
                         s = d.get("text", [""])[i] or ""
@@ -4683,7 +4392,11 @@ class App(tk.Tk):
         for (pval, _q, (x_l, y_t, x_r, y_b), _) in results:
             lbl = self._fmt_k(int(pval or 0))
             try:
-                dr.text((x_r + 4, int((y_t + y_b) / 2) - 7), lbl, fill=textc)
+                f = pil_font(12)
+                if f is not None:
+                    dr.text((x_r + 4, int((y_t + y_b) / 2) - 7), lbl, fill=textc, font=f)
+                else:
+                    dr.text((x_r + 4, int((y_t + y_b) / 2) - 7), lbl, fill=textc)
             except Exception:
                 pass
 
@@ -4697,94 +4410,14 @@ class App(tk.Tk):
 
     # (Tab4 UI removed per需求)
 
-    def _lab_render(self) -> None:
+def _lab_render(self) -> None:
         return
-        # Update split label & ensure formatting
-        try:
-            # 统一两位小数显示
-            split_val = round(float(self.var_lab_split.get()), 2)
-            self.var_lab_split.set(split_val)
-            self.lab_split_val.configure(text=f"{split_val:.2f}")
-        except Exception:
-            pass
-        if not self._lab_variants:
-            self.lab_result.configure(text="未生成变体")
-            return
-        variant = self.var_lab_variant.get().strip() or "auto"
-        if variant == "auto":
-            # pick best variant by our heuristic
-            name, pil = self._lab_pick_best_variant()
-        else:
-            name, pil = next(((n, p) for (n, p) in self._lab_variants if n == variant), self._lab_variants[0])
 
-        # Chart mode branch
-        if bool(getattr(self, "var_lab_chart_mode", tk.BooleanVar(value=False)).get()):
-            img, price, qty, diag = self._lab_detect_chart_and_draw(pil)
-        else:
-            img, price, qty, diag = self._lab_detect_and_draw(pil)
-        self._lab_cur_img = img
-        if price and qty:
-            status, color = "正常", "#0a7e07"
-        elif price and not qty:
-            status, color = "仅价格", "#c97a00"
-        elif qty and not price:
-            status, color = "仅数量", "#c97a00"
-        else:
-            status, color = "异常", "#c1121f"
-        try:
-            self.lab_result.configure(text=f"变体: {name}    价格: {price}    数量: {qty}    状态: {status}", foreground=color)
-        except Exception:
-            self.lab_result.configure(text=f"变体: {name}    价格: {price}    数量: {qty}    状态: {status}")
-        # Diagnostics
-        try:
-            self.lab_diag.configure(state=tk.NORMAL)
-            self.lab_diag.delete("1.0", tk.END)
-            self.lab_diag.insert(tk.END, diag or "")
-            self.lab_diag.configure(state=tk.DISABLED)
-        except Exception:
-            pass
-        # Update pairs table (chart mode only)
-        try:
-            for iid in self.pairs_tree.get_children(""):
-                self.pairs_tree.delete(iid)
-            if bool(getattr(self, "var_lab_chart_mode", tk.BooleanVar(value=False)).get()):
-                pairs = getattr(self, "_lab_pairs", []) or []
-                for (idx, p, q) in pairs:
-                    self.pairs_tree.insert("", tk.END, values=(idx, p, q))
-        except Exception:
-            pass
-        # Show
-        self._lab_show_image(img)
-        # Also render step-by-step panel
-        try:
-            if bool(getattr(self, "var_lab_chart_mode", tk.BooleanVar(value=False)).get()):
-                self._lab_render_steps_chart(raw_pil=self._lab_pil or pil)
-            else:
-                self._lab_render_steps(raw_pil=self._lab_pil or pil, variant_pil=pil)
-        except Exception:
-            pass
-
-    def _lab_pick_best_variant(self):
+def _lab_pick_best_variant(self):
         return None, None
-        best = self._lab_variants[0]
-        best_score = (float("inf"), 0)  # (price min asc, qty desc)
-        for (n, p) in self._lab_variants:
-            _, pr, qt, _ = self._lab_detect_and_draw(p, draw=False)
-            pr = int(pr or 0)
-            qt = int(qt or 0)
-            score = (pr if pr > 0 else float("inf"), -qt)
-            if score < best_score:
-                best, best_score = (n, p), score
-        return best
 
-    def _lab_detect_and_draw(self, pil_img, draw=True):
+def _lab_detect_and_draw(self, pil_img, draw=True):
         return pil_img, 0, 0, []
-        # OCR via pytesseract
-        try:
-            import pytesseract  # type: ignore
-            from PIL import ImageDraw  # type: ignore
-        except Exception:
-            return pil_img, 0, 0, "[OCR] pytesseract 不可用。请安装并确保 tesseract 在系统路径。"
 
         # OCR tokens
         psm_list = [6, 7, 11, 13]
@@ -4793,7 +4426,7 @@ class App(tk.Tk):
         for psm in psm_list:
             config = f"--oem 3 --psm {psm} -c tessedit_char_whitelist=0123456789,"
             try:
-                data = pytesseract.image_to_data(pil_img, config=config, output_type=pytesseract.Output.DICT)
+                data = {}
             except Exception as e:
                 diag_lines.append(f"[OCR] psm={psm} 调用异常: {e}")
                 continue
@@ -4849,14 +4482,13 @@ class App(tk.Tk):
         # Optional refine by cropping detected blocks and re-OCR each side
         if bool(self.var_lab_refine.get()) and (left_tokens or right_tokens):
             try:
-                import pytesseract as _pt  # type: ignore
                 from PIL import Image  # type: ignore
                 def _ocr_numbers(pil_crop):
                     vals = []
                     for psm in (7, 6, 13):
                         cfg = f"--oem 3 --psm {psm} -c tessedit_char_whitelist=0123456789,"
                         try:
-                            d = _pt.image_to_data(pil_crop, config=cfg, output_type=_pt.Output.DICT)
+                            d ={}
                         except Exception:
                             continue
                         for txt in d.get("text", []) or []:
@@ -4946,40 +4578,11 @@ class App(tk.Tk):
             img = pil_img
         return img, int(price or 0), int(qty or 0), "\n".join(diag_lines)
 
-    def _lab_show_image(self, pil_img):
+def _lab_show_image(self, pil_img):
         return
-        try:
-            from PIL import ImageTk  # type: ignore
-        except Exception:
-            return
-        # 应用用户放大倍数（默认1.5倍），再适配最大窗口尺寸
-        try:
-            zoom = float(self.var_lab_zoom.get() or 1.5)
-        except Exception:
-            zoom = 1.5
-        max_w, max_h = 1200, 700
-        w, h = pil_img.size
-        zw, zh = int(w * zoom), int(h * zoom)
-        # 若超出最大尺寸，则再做一次整体等比缩放
-        scale_fit = min(max_w / max(1, zw), max_h / max(1, zh), 1.0)
-        tw, th = int(zw * scale_fit), int(zh * scale_fit)
-        disp = pil_img.resize((tw, th)) if (tw != w or th != h) else pil_img
-        tkimg = ImageTk.PhotoImage(disp)
-        self.lab_prev.configure(image=tkimg)
-        self.lab_prev.image = tkimg
 
-    def _lab_save_annotated(self) -> None:
+def _lab_save_annotated(self) -> None:
         return
-        if self._lab_cur_img is None:
-            return
-        base = self.var_lab_img.get().strip() or "annotated"
-        root, ext = os.path.splitext(base)
-        out = root + "_ann.png"
-        try:
-            self._lab_cur_img.save(out)
-            messagebox.showinfo("保存", f"已保存: {out}")
-        except Exception as e:
-            messagebox.showerror("保存", f"失败: {e}")
 
     def _pairs_copy_to_clipboard(self) -> None:
         try:
@@ -5102,7 +4705,7 @@ class App(tk.Tk):
             for psm in cfgs:
                 cfg = f"--oem 3 --psm {psm} -c tessedit_char_whitelist=0123456789,"
                 try:
-                    data = _pt.image_to_data(variant_img, config=cfg, output_type=_pt.Output.DICT)
+                    data ={}
                 except Exception:
                     continue
                 n = len(data.get("text", []))
@@ -5214,7 +4817,7 @@ class App(tk.Tk):
                 for psm in (7, 6, 13):
                     cfg = f"--oem 3 --psm {psm} -c tessedit_char_whitelist=0123456789,"
                     try:
-                        d = _pt.image_to_data(pil_crop, config=cfg, output_type=_pt.Output.DICT)
+                        d ={}
                     except Exception:
                         continue
                     for txt in d.get("text", []) or []:
@@ -5254,7 +4857,11 @@ class App(tk.Tk):
             status = "正常" if (price and qty) else ("仅价格" if price else ("仅数量" if qty else "异常"))
             txt = f"价格: {int(price or 0)}    数量: {int(qty or 0)}    状态: {status}"
             try:
-                draw_final.text((6, final.size[1] - 22), txt, fill=(230, 230, 230))
+                f = pil_font(14)
+                if f is not None:
+                    draw_final.text((6, final.size[1] - 22), txt, fill=(230, 230, 230), font=f)
+                else:
+                    draw_final.text((6, final.size[1] - 22), txt, fill=(230, 230, 230))
             except Exception:
                 pass
             steps.append(("最终结果", final))
@@ -5284,12 +4891,12 @@ class App(tk.Tk):
             import cv2 as _cv2  # type: ignore
             import numpy as _np  # type: ignore
         except Exception as e:
-            messagebox.showerror("保存流程", f"缺少依赖: {e}")
+            messagebox.showerror("选图片", f"失败: {e}")
             return
         try:
             pil = Image.open(base).convert("RGB")
         except Exception as e:
-            messagebox.showerror("保存流程", f"打开失败: {e}")
+            messagebox.showerror("选图片", f"失败: {e}")
             return
         ts = time.strftime("%Y%m%d_%H%M%S")
         out_dir = os.path.join("images", f"proc_{ts}")
@@ -5350,7 +4957,6 @@ class App(tk.Tk):
             dumps.append(("step_06_rm_vsep.png", self._pil_from_cv_gray(x)))
             # 07 候选条形 + 候选价格框 + 选择
             try:
-                import pytesseract as _pt2  # type: ignore
                 from PIL import ImageDraw as _ID  # type: ignore
                 H,W = x.shape[:2]
                 cnts, _ = _cv2.findContours((x > 0).astype(_np.uint8), _cv2.RETR_EXTERNAL, _cv2.CHAIN_APPROX_SIMPLE)
@@ -5384,7 +4990,7 @@ class App(tk.Tk):
                     for psm in (7,6,13):
                         cfg = f"--oem 3 --psm {psm} -c tessedit_char_whitelist=0123456789k,"
                         try:
-                            d = _pt2.image_to_data(crop, config=cfg, output_type=_pt2.Output.DICT)
+                            d = {}
                         except Exception:
                             continue
                         n = len(d.get("text", []))
@@ -5421,7 +5027,14 @@ class App(tk.Tk):
                     dumps.append(("step_09_selected_price.png", im_sel))
                     # final annotated
                     final = im_sel.copy(); dr = _ID.Draw(final)
-                    dr.text((px[2] + 4, int((px[1] + px[3]) / 2) - 7), self._fmt_k(pv), fill=(169,176,184))
+                    try:
+                        f = pil_font(12)
+                    except Exception:
+                        f = None
+                    if f is not None:
+                        dr.text((px[2] + 4, int((px[1] + px[3]) / 2) - 7), self._fmt_k(pv), fill=(169,176,184), font=f)
+                    else:
+                        dr.text((px[2] + 4, int((px[1] + px[3]) / 2) - 7), self._fmt_k(pv), fill=(169,176,184))
                     dumps.append(("step_10_final.png", final))
             except Exception:
                 pass
@@ -5523,7 +5136,14 @@ class App(tk.Tk):
                 draw_final = ImageDraw.Draw(final)
                 status = "正常" if (price and qty) else ("仅价格" if price else ("仅数量" if qty else "异常"))
                 txt = f"价格: {int(price or 0)}    数量: {int(qty or 0)}    状态: {status}"
-                draw_final.text((6, final.size[1] - 22), txt, fill=(230, 230, 230))
+                try:
+                    f = pil_font(14)
+                except Exception:
+                    f = None
+                if f is not None:
+                    draw_final.text((6, final.size[1] - 22), txt, fill=(230, 230, 230), font=f)
+                else:
+                    draw_final.text((6, final.size[1] - 22), txt, fill=(230, 230, 230))
                 dumps.append(("step_06_final.png", final))
             except Exception:
                 pass
@@ -5630,7 +5250,7 @@ class App(tk.Tk):
                 for psm in (7, 6, 13):
                     cfg = f"--oem 3 --psm {psm} -c tessedit_char_whitelist=0123456789kK.,"
                     try:
-                        d = _pt.image_to_data(crop, config=cfg, output_type=_pt.Output.DICT)
+                        d ={}
                     except Exception:
                         continue
                     n = len(d.get("text", []))
@@ -5674,7 +5294,14 @@ class App(tk.Tk):
                         dr.rectangle([x1,y1,x2,y2], outline=(93,100,107), width=1)
                     pv, qv, _bar, px = results[0]
                     dr.rectangle([px[0],px[1],px[2],px[3]], outline=selc, width=1)
-                    dr.text((px[2] + 4, int((px[1] + px[3]) / 2) - 7), self._fmt_k(pv), fill=(169,176,184))
+                    try:
+                        f = pil_font(12)
+                    except Exception:
+                        f = None
+                    if f is not None:
+                        dr.text((px[2] + 4, int((px[1] + px[3]) / 2) - 7), self._fmt_k(pv), fill=(169,176,184), font=f)
+                    else:
+                        dr.text((px[2] + 4, int((px[1] + px[3]) / 2) - 7), self._fmt_k(pv), fill=(169,176,184))
                     # 结果文案
                     W0,H0 = final.size
                     try:
@@ -5684,7 +5311,14 @@ class App(tk.Tk):
                         dr = _ID.Draw(final)
                     except Exception:
                         pass
-                    dr.text((6, final.size[1]-22), f"价格:{pv} 数量:{qv}", fill=(230,230,230))
+                    try:
+                        f2 = pil_font(14)
+                    except Exception:
+                        f2 = None
+                    if f2 is not None:
+                        dr.text((6, final.size[1]-22), f"价格:{pv} 数量:{qv}", fill=(230,230,230), font=f2)
+                    else:
+                        dr.text((6, final.size[1]-22), f"价格:{pv} 数量:{qv}", fill=(230,230,230))
                     steps.append(("最终结果", final))
                 except Exception:
                     pass
@@ -6299,8 +5933,12 @@ class App(tk.Tk):
                 import matplotlib.dates as mdates  # type: ignore
                 import matplotlib.ticker as mtick  # type: ignore
                 from datetime import datetime
+                try:
+                    setup_matplotlib_chinese()
+                except Exception:
+                    pass
             except Exception as e:
-                messagebox.showerror("历史价格", f"缺少 matplotlib 或后端不可用: {e}")
+                messagebox.showerror("选图片", f"失败: {e}")
                 return
 
             for w in figf.winfo_children():
@@ -6532,7 +6170,7 @@ class App(tk.Tk):
                         w.writerow([iso, task_name, price, qty, amount])
                 messagebox.showinfo("导出CSV", f"已导出到: {path}")
             except Exception as e:
-                messagebox.showerror("导出CSV", f"导出失败: {e}")
+                messagebox.showerror("选图片", f"失败: {e}")
         def _clear_purchase():
             try:
                 from history_store import clear_purchase_history  # type: ignore
@@ -6785,7 +6423,7 @@ class App(tk.Tk):
                 mid_img = pyautogui.screenshot(region=mid_rect)
                 card_img = pyautogui.screenshot(region=card_rect)
             except Exception as e:
-                messagebox.showerror("截图", f"截屏失败: {e}")
+                messagebox.showerror("选图片", f"失败: {e}")
                 return
 
             # 保存推断 ROI（名称/中间/价格/整卡）到独立目录，并记录坐标
@@ -6832,9 +6470,9 @@ class App(tk.Tk):
 
             # OCR（Umi-OCR HTTP）
             try:
-                from ocr_reader import read_text  # type: ignore
+                from utils.ocr_utils import recognize_text, recognize_numbers  # type: ignore
             except Exception as e:
-                messagebox.showerror("OCR", f"加载 OCR 模块失败: {e}")
+                messagebox.showerror("选图片", f"失败: {e}")
                 return
 
             umi = (self.cfg or {}).get("umi_ocr", {}) if hasattr(self, "cfg") else {}
@@ -6843,14 +6481,17 @@ class App(tk.Tk):
             options = umi.get("options", {}) or {}
 
             try:
-                name_txt = read_text(name_img, engine="umi", umi_base_url=base_url, umi_timeout=timeout, umi_options=options)
+                _boxes = recognize_text(name_img, base_url=base_url, timeout=timeout, options=options)
+                name_txt = " ".join((b.text or "").strip() for b in _boxes if (b.text or "").strip())
             except Exception as e:
-                messagebox.showerror("OCR", f"名称识别失败（Umi-OCR）：{e}\n请确认 Umi-OCR HTTP 服务已启动。")
+                messagebox.showerror("选图片", f"失败: {e}")
                 name_txt = ""
             try:
-                price_txt = read_text(price_img, engine="umi", umi_base_url=base_url, umi_timeout=timeout, umi_options=options)
+                _nums = recognize_numbers(price_img, base_url=base_url, timeout=timeout, options=options)
+                _cand = max([n for n in _nums if getattr(n, "value", None) is not None], key=lambda n: int(n.value)) if _nums else None  # type: ignore[arg-type]
+                price_txt = (_cand.clean_text if _cand and getattr(_cand, "clean_text", None) else (_cand.text if _cand else ""))
             except Exception as e:
-                messagebox.showerror("OCR", f"价格识别失败（Umi-OCR）：{e}\n请确认 Umi-OCR HTTP 服务已启动。")
+                messagebox.showerror("选图片", f"失败: {e}")
                 price_txt = ""
 
             self.var_test_name.set((name_txt or "").strip())
@@ -6892,7 +6533,7 @@ class App(tk.Tk):
             try:
                 import pyautogui  # type: ignore
             except Exception as e:
-                messagebox.showerror("定位", f"缺少 pyautogui 依赖或不可用: {e}")
+                messagebox.showerror("选图片", f"失败: {e}")
                 return
             # 读取模板尺寸，用于区分是整卡模板还是中间区域模板
             tpl_w = tpl_h = None
@@ -6909,7 +6550,7 @@ class App(tk.Tk):
                     conf = 0.85
                 box = pyautogui.locateOnScreen(p, confidence=conf)
             except Exception as e:
-                messagebox.showerror("定位", f"调用 locateOnScreen 失败: {e}")
+                messagebox.showerror("选图片", f"失败: {e}")
                 return
             if not box:
                 messagebox.showwarning("定位", "未在屏幕上匹配到该图片，可尝试降低阈值或重新截图模板。")
@@ -6961,14 +6602,14 @@ class App(tk.Tk):
                 mid_img = pyautogui.screenshot(region=mid_rect)
                 card_img = pyautogui.screenshot(region=card_rect)
             except Exception as e:
-                messagebox.showerror("截图", f"截屏失败: {e}")
+                messagebox.showerror("选图片", f"失败: {e}")
                 return
 
             # OCR with Umi
             try:
-                from ocr_reader import read_text  # type: ignore
+                from utils.ocr_utils import recognize_text, recognize_numbers  # type: ignore
             except Exception as e:
-                messagebox.showerror("OCR", f"加载 OCR 模块失败: {e}")
+                messagebox.showerror("选图片", f"失败: {e}")
                 return
 
             umi = (self.cfg or {}).get("umi_ocr", {}) if hasattr(self, "cfg") else {}
@@ -6977,14 +6618,17 @@ class App(tk.Tk):
             options = umi.get("options", {}) or {}
 
             try:
-                name_txt = read_text(name_img, engine="umi", umi_base_url=base_url, umi_timeout=timeout, umi_options=options)
+                _boxes = recognize_text(name_img, base_url=base_url, timeout=timeout, options=options)
+                name_txt = " ".join((b.text or "").strip() for b in _boxes if (b.text or "").strip())
             except Exception as e:
-                messagebox.showerror("OCR", f"名称识别失败（Umi-OCR）：{e}")
+                messagebox.showerror("选图片", f"失败: {e}")
                 name_txt = ""
             try:
-                price_txt = read_text(price_img, engine="umi", umi_base_url=base_url, umi_timeout=timeout, umi_options=options)
+                _nums = recognize_numbers(price_img, base_url=base_url, timeout=timeout, options=options)
+                _cand = max([n for n in _nums if getattr(n, "value", None) is not None], key=lambda n: int(n.value)) if _nums else None  # type: ignore[arg-type]
+                price_txt = (_cand.clean_text if _cand and getattr(_cand, "clean_text", None) else (_cand.text if _cand else ""))
             except Exception as e:
-                messagebox.showerror("OCR", f"价格识别失败（Umi-OCR）：{e}")
+                messagebox.showerror("选图片", f"失败: {e}")
                 price_txt = ""
 
             self.var_test_name.set((name_txt or "").strip())
@@ -7060,6 +6704,11 @@ class App(tk.Tk):
         # 必备设置：最近购买 / 我的收藏 模板
         box_req = ttk.LabelFrame(frm, text="必备设置")
         box_req.pack(fill=tk.X, padx=4, pady=4)
+        # 确保单行模板配置可横向拉伸
+        try:
+            box_req.columnconfigure(0, weight=1)
+        except Exception:
+            pass
 
         # 工具：模板测试/截图/预览（本页私有）
         def _test_match(name: str, path: str, conf: float) -> None:
@@ -7078,7 +6727,7 @@ class App(tk.Tk):
                     return
                 _ = pyautogui.locateOnScreen(path, confidence=conf)
             except Exception as e:
-                messagebox.showerror("测试识别", f"调用失败: {e}")
+                messagebox.showerror("选图片", f"失败: {e}")
                 return
             messagebox.showwarning("测试识别", f"{name} 未匹配到。可降低置信度或重截图片。")
 
@@ -7092,7 +6741,7 @@ class App(tk.Tk):
                     import pyautogui  # type: ignore
                     img = pyautogui.screenshot(region=(x1, y1, w, h))
                 except Exception as e:
-                    messagebox.showerror("截图", f"截屏失败: {e}")
+                    messagebox.showerror("选图片", f"失败: {e}")
                     return
                 os.makedirs("images", exist_ok=True)
                 slug = self._template_slug(row.name)
@@ -7100,7 +6749,7 @@ class App(tk.Tk):
                 try:
                     img.save(p)
                 except Exception as e:
-                    messagebox.showerror("截图", f"保存失败: {e}")
+                    messagebox.showerror("选图片", f"失败: {e}")
                     return
                 row.var_path.set(p)
                 self._schedule_autosave()
@@ -7147,6 +6796,89 @@ class App(tk.Tk):
         ttk.Button(ctrl, text="清空全部商品购买记录", command=self._snipe_clear_records).pack(side=tk.LEFT, padx=6)
         ttk.Button(ctrl, text="配置任务", command=self._open_snipe_tasks_modal).pack(side=tk.LEFT, padx=(12, 0))
 
+        # 调试模式（专属于多商品抢购）
+        box_dbg = ttk.LabelFrame(frm, text="调试模式（仅本页面生效）")
+        box_dbg.pack(fill=tk.X, padx=4, pady=(0, 6))
+        dbg_cfg = self.cfg.get("debug", {}) if isinstance(self.cfg.get("debug"), dict) else {}
+        try:
+            self.var_debug_enabled = tk.BooleanVar(value=bool(dbg_cfg.get("enabled", False)))
+        except Exception:
+            self.var_debug_enabled = tk.BooleanVar(value=False)
+        try:
+            _ov = float(dbg_cfg.get("overlay_sec", 5.0))
+        except Exception:
+            _ov = 5.0
+        self.var_debug_overlay = tk.DoubleVar(value=_ov)
+        try:
+            _st = float(dbg_cfg.get("step_sleep", 0.0))
+        except Exception:
+            _st = 0.0
+        self.var_debug_step = tk.DoubleVar(value=_st)
+        try:
+            self.var_debug_save_imgs = tk.BooleanVar(value=bool(dbg_cfg.get("save_overlay_images", False)))
+        except Exception:
+            self.var_debug_save_imgs = tk.BooleanVar(value=False)
+        try:
+            _dir = str(dbg_cfg.get("overlay_dir", os.path.join("images", "debug", "可视化调试")))
+        except Exception:
+            _dir = os.path.join("images", "debug", "可视化调试")
+        self.var_debug_overlay_dir = tk.StringVar(value=_dir)
+
+        chk = ttk.Checkbutton(box_dbg, text="启用调试可视化（绘制ROI/模板）", variable=self.var_debug_enabled)
+        chk.grid(row=0, column=0, columnspan=2, sticky="w", padx=6, pady=(6, 2))
+        ttk.Label(box_dbg, text="蒙版时长(秒)").grid(row=1, column=0, sticky="e", padx=6, pady=6)
+        try:
+            sp_ov = ttk.Spinbox(box_dbg, from_=0.5, to=15.0, increment=0.5, width=8, textvariable=self.var_debug_overlay)
+        except Exception:
+            sp_ov = tk.Spinbox(box_dbg, from_=0.5, to=15.0, increment=0.5, width=8, textvariable=self.var_debug_overlay)
+        sp_ov.grid(row=1, column=1, sticky="w")
+        ttk.Label(box_dbg, text="步进延时(秒)").grid(row=1, column=2, sticky="e", padx=12)
+        try:
+            sp_st = ttk.Spinbox(box_dbg, from_=0.0, to=1.0, increment=0.01, width=8, textvariable=self.var_debug_step)
+        except Exception:
+            sp_st = tk.Spinbox(box_dbg, from_=0.0, to=1.0, increment=0.01, width=8, textvariable=self.var_debug_step)
+        sp_st.grid(row=1, column=3, sticky="w")
+        try:
+            ttk.Button(box_dbg, text="立即预览蒙版", command=self._debug_test_overlay).grid(row=1, column=4, padx=10)
+        except Exception:
+            pass
+        # Row 2: 保存开关
+        try:
+            chk_save = ttk.Checkbutton(box_dbg, text="保存可视化截图", variable=self.var_debug_save_imgs)
+        except Exception:
+            chk_save = tk.Checkbutton(box_dbg, text="保存可视化截图", variable=self.var_debug_save_imgs)
+        chk_save.grid(row=2, column=0, sticky="w", padx=6, pady=(0, 4))
+        # Row 2: 目录
+        ttk.Label(box_dbg, text="保存目录").grid(row=2, column=1, sticky="e", padx=6)
+        ent_dir = ttk.Entry(box_dbg, width=36, textvariable=self.var_debug_overlay_dir)
+        ent_dir.grid(row=2, column=2, columnspan=2, sticky="we", padx=4)
+        def _pick_overlay_dir():
+            try:
+                from tkinter import filedialog as _fd
+                p = _fd.askdirectory(title="选择保存目录")
+            except Exception:
+                p = None
+            if p:
+                try:
+                    self.var_debug_overlay_dir.set(p)
+                except Exception:
+                    pass
+        try:
+            ttk.Button(box_dbg, text="选择…", command=_pick_overlay_dir).grid(row=2, column=4, padx=6)
+        except Exception:
+            pass
+        for c in range(0, 5):
+            try:
+                box_dbg.columnconfigure(c, weight=0)
+            except Exception:
+                pass
+        # 自动保存（去抖）
+        for v in [self.var_debug_enabled, self.var_debug_overlay, self.var_debug_step, self.var_debug_save_imgs, self.var_debug_overlay_dir]:
+            try:
+                v.trace_add("write", lambda *_: self._schedule_autosave())
+            except Exception:
+                pass
+
         # 任务列表改为弹窗进行配置；此处仅提供预览与控制入口。
         # 选择商品预览：弹出与任务配置相同的“选择物品”弹窗；
         # 选择后在屏幕上定位卡片中间模板，依此推断价格区域并将鼠标先移动到“商品（中间图片）”位置，
@@ -7161,14 +6893,14 @@ class App(tk.Tk):
                 try:
                     import pyautogui  # type: ignore
                 except Exception as e:
-                    messagebox.showerror("预览", f"缺少依赖：{e}")
+                    messagebox.showerror("选图片", f"失败: {e}")
                     return
                 conf = 0.83
                 # 尝试定位中间模板
                 try:
                     box = pyautogui.locateOnScreen(path, confidence=float(conf))
                 except Exception as e:
-                    messagebox.showerror("预览", f"调用屏幕匹配失败：{e}")
+                    messagebox.showerror("选图片", f"失败: {e}")
                     return
                 if box is None:
                     messagebox.showwarning("预览", f"未能在屏幕找到：{name}。请打开‘我的收藏/最近购买’并确保卡片清晰可见。")
@@ -7573,12 +7305,18 @@ class App(tk.Tk):
     # ---- 多商品抢购：运行控制 ----
     def _snipe_start(self) -> None:
         if MultiSnipeRunner is None:
-            messagebox.showerror("启动", "模块缺失：multi_snipe_runner 未找到。")
+            detail = globals().get('_multi_import_error') or 'unknown'
+            messagebox.showerror("选图片", f"失败: {e}")
             return
         if self._snipe_thread and self._snipe_thread.is_alive():
             messagebox.showinfo("启动", "任务已在运行中。")
             return
         items_raw = list(self.snipe_tasks_data.get("items", []) or [])
+        # 仅传入启用任务，禁用任务不应被读取并参与执行
+        try:
+            items_raw = [x for x in items_raw if bool(x.get("enabled", True))]
+        except Exception:
+            items_raw = [x for x in items_raw if x.get("enabled", True) is True]
         if not items_raw:
             messagebox.showwarning("启动", "任务清单为空，请先通过‘配置任务’添加。")
             return
@@ -7586,10 +7324,10 @@ class App(tk.Tk):
         try:
             res = run_launch_flow(self.cfg, on_log=lambda s: self._append_multi_log(f"【INFO】{s}"))
             if not res.ok:
-                messagebox.showerror("启动", f"启动失败：{res.error or res.code}")
+                messagebox.showerror("选图片", f"失败: {e}")
                 return
         except Exception as e:
-            messagebox.showerror("启动", f"启动流程异常：{e}")
+            messagebox.showerror("选图片", f"失败: {e}")
             return
         # 确保进入市场页（若位于首页则点击进入）
         try:
@@ -7618,6 +7356,12 @@ class App(tk.Tk):
                 recs = res.get("recognized", []) or []
                 for r in recs:
                     it = r.get("item")
+                    # 避免日志打印禁用项（双保险）
+                    try:
+                        if not bool(getattr(it, 'enabled', True)):
+                            continue
+                    except Exception:
+                        pass
                     name = getattr(it, 'name', None) or (it.get('name') if isinstance(it, dict) else '')
                     raw_txt = (r.get("price_text") or "").strip()
                     val = r.get("price_value")
@@ -7758,7 +7502,7 @@ class App(tk.Tk):
                 self._save_snipe_tasks_data()
                 messagebox.showinfo("保存", "已保存。")
             except Exception as e:
-                messagebox.showerror("保存", f"解析失败：{e}")
+                messagebox.showerror("选图片", f"失败: {e}")
         ttk.Button(btnf, text="保存", command=_save).pack(side=tk.RIGHT)
         ttk.Button(btnf, text="关闭", command=top.destroy).pack(side=tk.RIGHT, padx=(0, 8))
 
@@ -8096,16 +7840,19 @@ class GoodsMarketUI(ttk.Frame):
         try:
             if not os.path.exists(path):
                 os.makedirs(os.path.dirname(path), exist_ok=True)
-                from PIL import Image, ImageDraw, ImageFont  # type: ignore
+                from PIL import Image, ImageDraw  # type: ignore
 
                 img = Image.new("RGBA", (160, 120), (240, 240, 240, 255))
                 dr = ImageDraw.Draw(img)
-                try:
-                    font = ImageFont.truetype("arial.ttf", 16)
-                except Exception:
-                    font = None
                 dr.rectangle([(0, 0), (159, 119)], outline=(200, 200, 200), width=2)
-                dr.text((20, 48), "No Image", fill=(120, 120, 120), font=font)
+                try:
+                    f = pil_font(16)
+                except Exception:
+                    f = None
+                if f is not None:
+                    dr.text((20, 48), "No Image", fill=(120, 120, 120), font=f)
+                else:
+                    dr.text((20, 48), "No Image", fill=(120, 120, 120))
                 img.save(path)
         except Exception:
             pass
@@ -8130,7 +7877,7 @@ class GoodsMarketUI(ttk.Frame):
 
                 img = pyautogui.screenshot(region=(x1, y1, w, h))
             except Exception as e:
-                messagebox.showerror("截图", f"截屏失败: {e}")
+                messagebox.showerror("选图片", f"失败: {e}")
                 return
 
             # decide save dir by big category
@@ -8142,7 +7889,7 @@ class GoodsMarketUI(ttk.Frame):
             try:
                 img.save(path)
             except Exception as e:
-                messagebox.showerror("截图", f"保存失败: {e}")
+                messagebox.showerror("选图片", f"失败: {e}")
                 return
             result_path = path
 
@@ -8467,8 +8214,12 @@ class GoodsMarketUI(ttk.Frame):
                 import matplotlib.ticker as mtick  # type: ignore
                 from datetime import datetime
                 import time as _time
+                try:
+                    setup_matplotlib_chinese()
+                except Exception:
+                    pass
             except Exception as e:
-                messagebox.showerror("历史价格", f"缺少 matplotlib 或后端不可用: {e}")
+                messagebox.showerror("选图片", f"失败: {e}")
                 return
             for w in figf.winfo_children():
                 try:
@@ -8630,7 +8381,7 @@ class GoodsMarketUI(ttk.Frame):
                 import pyautogui  # type: ignore
                 img = pyautogui.screenshot(region=(ix, iy, iw, ih))
             except Exception as e:
-                messagebox.showerror("截图", f"截屏失败: {e}")
+                messagebox.showerror("选图片", f"失败: {e}")
                 return
 
             # 保存到对应大类目录
@@ -8645,7 +8396,7 @@ class GoodsMarketUI(ttk.Frame):
             try:
                 img.save(path)
             except Exception as e:
-                messagebox.showerror("截图", f"保存失败: {e}")
+                messagebox.showerror("选图片", f"失败: {e}")
                 return
             result_path = path
 
@@ -8803,7 +8554,7 @@ class GoodsMarketUI(ttk.Frame):
                     import pyautogui  # type: ignore
                     img = pyautogui.screenshot(region=(ix, iy, int(iw), int(ih)))
                 except Exception as e:
-                    messagebox.showerror("截图", f"截屏失败: {e}")
+                    messagebox.showerror("选图片", f"失败: {e}")
                     return
 
                 # 保存到对应大类
@@ -8818,7 +8569,7 @@ class GoodsMarketUI(ttk.Frame):
                 try:
                     img.save(path)
                 except Exception as e:
-                    messagebox.showerror("截图", f"保存失败: {e}")
+                    messagebox.showerror("选图片", f"失败: {e}")
                     return
                 result_path = path
 
@@ -9195,7 +8946,14 @@ class GoodsMarketUI(ttk.Frame):
             cv.image = tkimg
             cv.create_image(10, 10, anchor=tk.NW, image=tkimg)
         except Exception as e:
-            cv.create_text(10, 10, anchor=tk.NW, text=f"加载失败: {e}", fill="#ddd")
+            try:
+                f = tk_font(self, 12)
+            except Exception:
+                f = None
+            if f is not None:
+                cv.create_text(10, 10, anchor=tk.NW, text=f"加载失败: {e}", fill="#ddd", font=f)
+            else:
+                cv.create_text(10, 10, anchor=tk.NW, text=f"加载失败: {e}", fill="#ddd")
 
 def main() -> None:
     app = App()
@@ -9204,3 +8962,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

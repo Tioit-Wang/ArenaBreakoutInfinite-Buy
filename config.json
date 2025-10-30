@@ -13,6 +13,7 @@
             "data.format": "text"
         }
     },
+    "ocr_allowlist": "0123456789KkMm",
     "hotkeys": {
         "toggle": "<Control-Alt-t>",
         "stop": "<Control-Alt-t>"
@@ -84,7 +85,7 @@
         },
         "btn_settings": {
             "path": "images\\btn_settings.png",
-            "confidence": 0.85
+            "confidence": 0.84
         },
         "btn_exit": {
             "path": "images\\btn_exit.png",
@@ -92,7 +93,7 @@
         },
         "btn_exit_confirm": {
             "path": "images\\btn_exit_confirm.png",
-            "confidence": 0.85
+            "confidence": 0.84
         },
         "recent_purchases_tab": {
             "path": "images\\recent_purchases_tab.png",
@@ -165,35 +166,18 @@
         "top_offset": 0,
         "bottom_offset": 0,
         "lr_pad": -15,
-        "ocr_engine": "umi",
         "scale": 1.3
     },
     "avg_price_area": {
         "distance_from_buy_top": 5,
         "height": 45,
-        "ocr_allowlist": "0123456789K",
-        "ocr_engine": "umi",
         "scale": 1.6
     },
-    "ocrlite": {
-        "exe_path": "bli\\win-BIN-x64\\OcrLiteOnnx.exe",
-        "models_dir": "bli\\models",
-        "det": "dbnet.onnx",
-        "cls": "angle_net.onnx",
-        "rec": "crnn_lite_lstm.onnx",
-        "keys": "keys.txt",
-        "num_thread": 0,
-        "padding": 50,
-        "max_side_len": 1024,
-        "box_score_thresh": 0.6,
-        "box_thresh": 0.3,
-        "un_clip_ratio": 2.0,
-        "do_angle": 1,
-        "most_angle": 1
-    },
     "debug": {
-        "enabled": true,
-        "overlay_sec": 8.5,
-        "step_sleep": 1.0
+        "enabled": false,
+        "overlay_sec": 1.0,
+        "step_sleep": 0.01,
+        "save_overlay_images": false,
+        "overlay_dir": "images\\debug\\可视化调试"
     }
 }

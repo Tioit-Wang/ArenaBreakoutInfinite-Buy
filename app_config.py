@@ -21,6 +21,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "data.format": "text"
         },
     },
+    # 全局 OCR 允许字符集（用于本地清洗/限制展示，传递到 Umi 端为尽力而为）
+    "ocr_allowlist": "0123456789KkMm",
     "hotkeys": {
         # Tk-style key sequences; prefer 'toggle'. Examples: "<Control-Alt-t>", "<F5>"
         "toggle": "<Control-Alt-t>",
@@ -74,10 +76,6 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # ROI width follows the Buy button width; these control vertical position/size
         "distance_from_buy_top": 5,
         "height": 45,
-        # Allowlist for PyTesseract preview (kept configurable for future tuning)
-        "ocr_allowlist": "0123456789K",
-        # OCR engine: 'tesseract' | 'umi' (default: umi)
-        "ocr_engine": "umi",
         # Scale factor applied before binarization/OCR
         "scale": 1.0,
     },
@@ -241,6 +239,27 @@ def load_config(
 
     if normalize_keys and _normalize_ascii_keys(cfg):
         changed = True
+    # 移除已弃用的 OCR 字段：avg_price_area/price_roi 下的 ocr_engine 与局部 ocr_allowlist
+    try:
+        avg = cfg.get("avg_price_area") or {}
+        if isinstance(avg, dict):
+            if "ocr_engine" in avg:
+                avg.pop("ocr_engine", None)
+                changed = True
+            # 迁移局部 allowlist 至全局（若全局未设置）
+            if "ocr_allowlist" in avg and not cfg.get("ocr_allowlist"):
+                cfg["ocr_allowlist"] = avg.pop("ocr_allowlist")
+                changed = True
+        roi = cfg.get("price_roi") or {}
+        if isinstance(roi, dict):
+            if "ocr_engine" in roi:
+                roi.pop("ocr_engine", None)
+                changed = True
+            if "ocr_allowlist" in roi and not cfg.get("ocr_allowlist"):
+                cfg["ocr_allowlist"] = roi.pop("ocr_allowlist")
+                changed = True
+    except Exception:
+        pass
     # Ensure new tolerant-launch defaults are present even for older config files
     try:
         g = cfg.setdefault("game", {}) if isinstance(cfg.get("game"), dict) else {}
