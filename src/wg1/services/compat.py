@@ -1,21 +1,5 @@
 """
-Runtime compatibility helpers.
-
-This module provides a small shim to make PyAutoGUI image search calls
-(`locateOnScreen`/`locateCenterOnScreen`) tolerate environments where
-OpenCV is not installed. PyAutoGUI (via pyscreeze) only accepts the
-`confidence` keyword when OpenCV is available; otherwise it raises:
-
-    "The confidence keyword argument is only available if OpenCV is installed."
-
-We patch those functions at runtime to silently drop the `confidence`
-keyword so users can still perform exact (pixel-perfect) matching without
-crashing. A one-time console warning is emitted to encourage installing
-dependencies via `uv sync`.
-
-Note: Without OpenCV the search becomes strict equality and may fail if
-the template does not match the screen pixels exactly. Installing OpenCV
-is still recommended for robust matching.
+运行时兼容性补丁。
 """
 
 from __future__ import annotations
@@ -35,22 +19,13 @@ def _has_opencv() -> bool:
 
 
 def ensure_pyautogui_confidence_compat() -> bool:
-    """Patch PyAutoGUI to ignore `confidence` when OpenCV is missing.
-
-    Returns True if OpenCV is available (patch not needed), otherwise False.
-    Safe to call multiple times.
-    """
-
+    """保证在缺少 OpenCV 时 PyAutoGUI 忽略 confidence 参数。"""
     if _has_opencv():
         return True
-
     try:
         import pyautogui  # type: ignore
     except Exception:
-        # PyAutoGUI not present; nothing to patch.
         return False
-
-    # Idempotency: only patch once per process
     if getattr(pyautogui, "_wg1_conf_patch", False):
         return False
 
@@ -77,8 +52,9 @@ def ensure_pyautogui_confidence_compat() -> bool:
         pyautogui.locateCenterOnScreen = _wrap(pyautogui.locateCenterOnScreen)  # type: ignore[attr-defined]
         setattr(pyautogui, "_wg1_conf_patch", True)
     except Exception:
-        # Best-effort; ignore failures silently
         pass
-
     return False
+
+
+__all__ = ["ensure_pyautogui_confidence_compat"]
 

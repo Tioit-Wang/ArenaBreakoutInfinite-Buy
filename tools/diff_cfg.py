@@ -1,15 +1,15 @@
 import json, os
 from pprint import pprint
-import app_config
 import copy
+from wg1.config import DEFAULT_CONFIG, load_config
 # Load current config
 with open('config.json','r',encoding='utf-8') as f:
     cfg = json.load(f)
 # Build defaults
 
-defc = copy.deepcopy(app_config.DEFAULT_CONFIG)
+defc = copy.deepcopy(DEFAULT_CONFIG)
 # Simulate load_config behavior to add tolerant defaults
-cfg_loaded = app_config.load_config('config.json')
+cfg_loaded = load_config('config.json')
 
 def get(d, path, default=None):
     cur=d

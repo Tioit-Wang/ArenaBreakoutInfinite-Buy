@@ -31,10 +31,10 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import base64
 import io
 import os
+import random
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import random
 
 try:
     from PIL import Image  # type: ignore
@@ -47,27 +47,10 @@ except Exception:
     ImageFont = None  # type: ignore
     ImageTk = None  # type: ignore
 
-# 中文字体工具（Matplotlib/PIL/Tk）
-try:
-    from font_util import draw_text, pil_font, tk_font  # type: ignore
-except Exception:
-    def draw_text(*_a, **_kw):  # type: ignore
-        try:
-            d = _a[0]
-            xy = _a[1]
-            text = _a[2]
-            fill = _kw.get("fill", (255, 255, 255))
-            d.text(xy, text, fill=fill)
-        except Exception:
-            pass
-    def pil_font(_size: int = 14):  # type: ignore
-        return None
-    def tk_font(_root, _size: int = 12):  # type: ignore
-        return None
-
-from task_runner import ScreenOps, _parse_price_text  # type: ignore
-from utils.ocr_utils import recognize_numbers  # type: ignore
-
+from wg1.core.common import parse_price_text as _parse_price_text
+from wg1.services.font_loader import draw_text, pil_font, tk_font
+from wg1.services.ocr import recognize_numbers
+from wg1.services.screen_ops import ScreenOps
 
 # 卡片与 ROI 固定参数（与“测试”页逻辑一致）
 CARD_W = 165
@@ -801,8 +784,8 @@ class MultiSnipeRunner:
 
     # ---------- 并发 OCR ----------
     def _umi_ocr_one(self, pil_image, *, allowlist: Optional[str] = None) -> str:
-        # 优先使用 utils.ocr_utils 作为统一识别实现
-        from utils.ocr_utils import recognize_text  # type: ignore
+        # 优先使用 wg1.services.ocr 作为统一识别实现
+        from wg1.services.ocr import recognize_text  # type: ignore
         umi = (self.cfg.get("umi_ocr", {}) or {})
         base_url = str(umi.get("base_url", "http://127.0.0.1:1224"))
         timeout = float(umi.get("timeout_sec", 5.0) or 5.0)

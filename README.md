@@ -4,17 +4,17 @@
 
 ## 运行
 
-使用 uv 管理依赖与脚本：
+使用 uv 管理依赖：
 
 ```bash
 uv sync
-uv run wg1-gui
+uv run wg1
 ```
 
-或直接：
+或直接运行模块：
 
 ```bash
-uv run python gui_app.py
+uv run python -m wg1
 ```
 
 ## 功能概览
@@ -45,13 +45,15 @@ uv run python gui_app.py
 
 ```
 wg1/
-├─ images/                  # 模板与调试截图
-├─ app_config.py            # 配置加载/保存
-├─ task_runner.py           # 任务运行器（模块化：启动/导航/购买/重启）
-├─ price_reader.py          # ROI 价格 OCR
-├─ gui_app.py               # 主 GUI 程序
+├─ src/wg1/
+│  ├─ core/                 # 任务调度、启动流程、多商品逻辑
+│  ├─ services/             # OCR、屏幕操作、历史记录、价格读取
+│  ├─ config/               # 默认配置与加载器
+│  ├─ ui/                   # Tk 界面与组件
+│  └─ resources/            # 内置模板与字体
+├─ tools/                   # 辅助脚本（如 diff_cfg）
 ├─ config.json              # GUI 配置（模板/坐标/任务）
-├─ pyproject.toml           # 依赖定义，包含脚本入口 wg1-gui
+├─ pyproject.toml           # 依赖定义，入口脚本 wg1
 └─ uv.lock                  # uv 锁定文件
 ```
 
@@ -60,7 +62,7 @@ wg1/
 - Windows 上建议以管理员权限运行，避免输入被阻止。
 - DPI 缩放影响坐标与模板匹配，建议设置为 100% 或在模板中统一截取。
 - 若 OCR 识别价格不稳定，可在“价格区域”调整 ROI 并多次保存快照验证。
- - 可选迁移：如需从旧版 `key_mapping.json` 导入坐标与 ROI，可在代码层启用迁移（app_config.load_config 的 migrate_legacy=True）；默认不迁移，建议在界面手动设置。
+ - 可选迁移：如需从旧版 `key_mapping.json` 导入坐标与 ROI，可在代码层启用迁移（wg1.config.load_config 的 migrate_legacy=True）；默认不迁移，建议在界面手动设置。
 
 ## 行为变更（2025-10-24）
 

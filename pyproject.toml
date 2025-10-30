@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.scripts]
-wg1-gui = "gui_app:main"
+wg1 = "wg1.__main__:main"
 
 [tool.uv]
 # Treat this repository as a package so uv installs
@@ -30,10 +30,10 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-py-modules = [
-  "gui_app",
-  "app_config",
-  "price_reader",
-  "history_store",
-  "task_runner",
-]
+package-dir = {"" = "src"}
+packages = ["wg1"]
+include-package-data = true
+
+[tool.setuptools.package-data]
+"wg1.resources.images" = ["**/*"]
+"wg1.resources.assets" = ["**/*"]

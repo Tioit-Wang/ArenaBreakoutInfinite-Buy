@@ -1,427 +1,43 @@
-"""任务运行器（task_runner.py）
-
-基于 purchase_flow.md 的严格实现与模块化重构。
-
-核心流程（与文档一致）：
-1. 统一启动流程（首页/市场标识即视为已启动；否则按规程启动，缺配置即失败停止）。
-2. 读取并校验任务；选择执行模式（轮询/时间窗口）。
-3. 购买流程分两部分：
-   - 模块一：进入搜索结果页面（优先处理阻碍性事件；按“首页/市场标识”分支执行并缓存商品坐标）。
-   - 模块二：购买循环（首次进入详情缓存按钮；读价→判断补货/普通→提交→结果处理→在同一详情内重复，直至价格不合适后关闭）。
-4. 周期性软重启：严格按照步进与等待时长执行；顺序执行模式下暂停片段计时，重启耗时不计入片段时长；重启后重建搜索上下文。
-5. 日志等级过滤与旧文案等级补齐；缓存与恢复策略按文档约定实现。
-"""
+"""任务运行器核心实现。"""
 from __future__ import annotations
 
 import json
 import os
 import threading
 import time
-import subprocess
-from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-# 可选依赖按需延迟导入（使用到时再导入）
+from wg1.config.loader import load_config
+from wg1.core.common import (
+    now_label as _now_label,
+    parse_price_text as _parse_price_text,
+    safe_int as _safe_int,
+    safe_sleep as _sleep,
+)
+from wg1.core.exceptions import FatalOcrError
+from wg1.core.logging import (
+    LOG_LEVELS,
+    ensure_level_tag as _ensure_level_tag,
+    extract_level_from_msg as _extract_level_from_msg,
+    level_name as _level_name,
+)
+from wg1.core.launcher import run_launch_flow
+from wg1.core.models import Goods
+from wg1.services.compat import ensure_pyautogui_confidence_compat
+from wg1.services.history import (
+    HistoryPaths,
+    append_price as _append_price,
+    append_purchase as _append_purchase,
+    resolve_paths as _resolve_history_paths,
+)
+from wg1.services.ocr import recognize_numbers, recognize_text
+from wg1.services.screen_ops import ScreenOps
 
-try:
-    # 兼容性：即使缺少 OpenCV 也确保 PyAutoGUI 的 confidence 参数可用
-    from compat import ensure_pyautogui_confidence_compat  # type: ignore
-
-    ensure_pyautogui_confidence_compat()
-except Exception:
-    pass
-
-from app_config import load_config  # type: ignore
-from utils.ocr_utils import recognize_numbers, recognize_text  # type: ignore
-
-
-class FatalOcrError(RuntimeError):
-    """当 OCR 引擎（Umi）出现致命错误时抛出，用于指示任务应终止。"""
-
-    pass
-
-
-# ------------------------------ 日志等级 ------------------------------
-
-LOG_LEVELS: Dict[str, int] = {"debug": 10, "info": 20, "error": 40}
-
-def _level_name(lv: str) -> str:
-    s = str(lv or "").lower()
-    return s if s in LOG_LEVELS else "info"
-
-def _extract_level_from_msg(msg: str) -> str:
-    try:
-        if "【ERROR】" in msg:
-            return "error"
-        if "【DEBUG】" in msg:
-            return "debug"
-        if "【INFO】" in msg:
-            return "info"
-        # 关键字启发：失败/错误/超时/未找到/缺少 → error
-        kw_err = ("失败", "错误", "超时", "未找到", "缺少")
-        if any(k in msg for k in kw_err):
-            return "error"
-        # 关键字启发：耗时/匹配/打开/cost/ms → debug
-        kw_dbg = ("耗时", "匹配", "打开", "cost=", "match=", "open=", "ms")
-        if any(k in msg for k in kw_dbg):
-            return "debug"
-    except Exception:
-        pass
-    return "info"
-
-def _ensure_level_tag(msg: str, level: str) -> str:
-    """若消息中缺少等级标签，则在第一个】后插入【LEVEL】。"""
-    if "【DEBUG】" in msg or "【INFO】" in msg or "【ERROR】" in msg:
-        return msg
-    try:
-        i = msg.find("】")
-        if i >= 0:
-            return msg[: i + 1] + f"【{level.upper()}】" + msg[i + 1 :]
-    except Exception:
-        pass
-    # 回退：前置一个时间与等级
-    return f"【{_now_label()}】【{level.upper()}】" + msg
-
-
-# ------------------------------ 工具函数 ------------------------------
-
-
-def _now_label() -> str:
-    return time.strftime("%H:%M:%S")
-
-
-def _safe_int(s: str, default: int = -1) -> int:
-    try:
-        return int(s)
-    except Exception:
-        return default
-
-
-def _parse_price_text(txt: str) -> Optional[int]:
-    """将 OCR 文本解析为整数价格。
-
-    支持纯数字与可选后缀 K/M（如 2.1K -> 2100）。
-    解析失败返回 None。
-    """
-    if not txt:
-        return None
-    s = txt.strip().upper().replace(",", "").replace(" ", "")
-    # 仅保留数字、小数点与后缀 K/M
-    import re
-
-    m = re.search(r"([0-9]+(?:\.[0-9]+)?)([MK])?", s)
-    if not m:
-        # 尝试提取连续数字作为兜底
-        d = "".join(ch for ch in s if ch.isdigit())
-        if d:
-            try:
-                return int(d)
-            except Exception:
-                return None
-        return None
-    num_s = m.group(1)
-    suffix = m.group(2)
-    try:
-        if "." in num_s:
-            val = float(num_s)
-        else:
-            val = int(num_s)
-    except Exception:
-        return None
-    if suffix == "K":
-        val = float(val) * 1000.0
-    elif suffix == "M":
-        val = float(val) * 1_000_000.0
-    try:
-        return int(round(val))
-    except Exception:
-        return None
-
-
-def _sleep(s: float) -> None:
-    """统一的安全休眠封装。
-
-    用途：
-    - 给 UI/动画/输入法 留出“沉淀时间”，避免连贯操作导致误判；
-    - 控制轮询频率，降低 CPU 占用，避免忙等；
-    - 规避负数/类型异常带来的随机错误。
-
-    调参建议：
-    - ≤0.03s：点击/键入后的微等待；
-    - 0.2~0.8s：轮询/暂停的节奏；
-    - ≥5s：页面/进程级切换（如重启/加载）。
-    """
-    try:
-        time.sleep(max(0.0, float(s)))
-    except Exception:
-        # 休眠失败不致命：忽略异常以保证主流程连续
-        pass
+ensure_pyautogui_confidence_compat()
 
 
 # ------------------------------ 图像/点击辅助 ------------------------------
-
-
-class ScreenOps:
-    """基于 pyautogui 与 OpenCV 模板匹配的轻量封装。
-
-    提供运行器所需的最小能力：查找/点击/截图。
-    """
-
-    def __init__(self, cfg: Dict[str, Any], step_delay: float = 0.01) -> None:
-        self.cfg = cfg
-        self.step_delay = float(step_delay or 0.01)
-
-        try:  # 导入阶段可选引入 pyautogui（缺失时给出友好提示）
-            import pyautogui  # type: ignore
-
-            # 若不支持 confidence 参数则尽早失败
-            _ = getattr(pyautogui, "locateOnScreen")
-        except Exception as e:  # pragma: no cover - runtime guard
-            raise RuntimeError(
-                "缺少 pyautogui 或其依赖，请安装 pyautogui + opencv-python。"
-            ) from e
-
-    # 惰性属性，避免重复 getattr 开销
-    @property
-    def _pg(self):  # type: ignore
-        import pyautogui  # type: ignore
-
-        return pyautogui
-
-    def _tpl(self, key: str) -> Tuple[str, float]:
-        t = (self.cfg.get("templates", {}) or {}).get(key) or {}
-        path = str(t.get("path", ""))
-        conf = float(t.get("confidence", 0.85) or 0.85)
-        return path, conf
-
-    def locate(
-        self,
-        tpl_key: str,
-        region: Optional[Tuple[int, int, int, int]] = None,
-        timeout: float = 0.0,
-    ) -> Optional[Tuple[int, int, int, int]]:
-        """返回 (left, top, width, height)，找不到返回 None。"""
-        path, conf = self._tpl(tpl_key)
-        if not path or not os.path.exists(path):
-            return None
-        end = time.time() + max(0.0, float(timeout or 0.0))
-        while True:
-            try:
-                box = self._pg.locateOnScreen(path, confidence=conf, region=region)
-                if box is not None:
-                    # pyautogui.Box -> tuple 元组
-                    return (
-                        int(box.left),
-                        int(box.top),
-                        int(box.width),
-                        int(box.height),
-                    )
-            except Exception:
-                pass
-            if time.time() >= end:
-                return None
-            # 小步轮询：让屏幕刷新/模板匹配有时间完成，避免 CPU 忙等
-            _sleep(self.step_delay)
-
-    def click_center(
-        self, box: Tuple[int, int, int, int], clicks: int = 1, interval: float = 0.02
-    ) -> None:
-        l, t, w, h = box
-        x = int(l + w / 2)
-        y = int(t + h / 2)
-        try:
-            self._pg.moveTo(x, y)
-            for i in range(max(1, int(clicks))):
-                self._pg.click(x, y)
-                if i + 1 < clicks:
-                    # 多击之间的间隔：避免系统将多次点击合并或丢失
-                    _sleep(interval)
-        except Exception:
-            pass
-        # 点击后的小步沉淀：等待焦点/状态变化生效
-        _sleep(self.step_delay)
-
-    def type_text(self, s: str, clear_first: bool = True) -> None:
-        try:
-            if clear_first:
-                # 全选后删除（Ctrl+A -> Backspace）
-                self._pg.hotkey("ctrl", "a")
-                # 让选择态更新到位
-                _sleep(0.02)
-                self._pg.press("backspace")
-                # 给删除动作一点处理时间
-                _sleep(0.02)
-            # 逐字输入，使用 step_delay 防止过快导致漏键
-            self._pg.typewrite(str(s), interval=max(0.0, self.step_delay))
-        except Exception:
-            pass
-        # 输入结束后的沉淀：等待文本渲染/光标稳定
-        _sleep(self.step_delay)
-
-    def screenshot_region(self, region: Tuple[int, int, int, int]):
-        l, t, w, h = region
-        try:
-            img = self._pg.screenshot(region=(int(l), int(t), int(w), int(h)))
-            return img
-        except Exception:
-            return None
-
-
-# ------------------------------ 购买逻辑 ------------------------------
-
-
-@dataclass
-class Goods:
-    id: str
-    name: str
-    search_name: str
-    image_path: str
-    big_category: str
-    sub_category: str = ""
-    exchangeable: bool = False
-
-
-# ------------------------------ 统一启动流程 ------------------------------
-
-
-@dataclass
-class LaunchResult:
-    ok: bool
-    code: str
-    error: Optional[str] = None
-    details: Optional[Dict[str, Any]] = None
-
-
-def run_launch_flow(
-    cfg: Dict[str, Any],
-    *,
-    on_log: Optional[Callable[[str], None]] = None,
-    click_delay_override: Optional[float] = None,
-) -> LaunchResult:
-    """统一启动流程（预览与任务共用）。
-
-    步骤：
-    0）快速路径：若屏幕已存在首页/市场标识，则跳过启动；
-    1）配置与模板校验：exe_path、templates.home_indicator、templates.btn_launch；
-    2）启动启动器进程；
-    3）等待出现 'btn_launch'（launcher_timeout_sec）；
-    4）按延迟（launch_click_delay_sec）后点击一次；
-    5）等待进入首页/市场（startup_timeout_sec）。
-    """
-
-    def _log(s: str) -> None:
-        try:
-            if on_log:
-                on_log(s)
-        except Exception:
-            pass
-
-    g = cfg.get("game") or {}
-    exe = str(g.get("exe_path", "")).strip()
-    args = str(g.get("launch_args", "")).strip()
-    try:
-        launcher_to = float(g.get("launcher_timeout_sec", 60) or 60)
-    except Exception:
-        launcher_to = 60.0
-    try:
-        click_delay = float(click_delay_override if click_delay_override is not None else (g.get("launch_click_delay_sec", 20) or 20))
-    except Exception:
-        click_delay = 20.0
-    try:
-        startup_to = float(g.get("startup_timeout_sec", 180) or 180)
-    except Exception:
-        startup_to = 180.0
-
-    # 模板与路径校验
-    tpls = (cfg.get("templates", {}) or {})
-    def _tpl_path(key: str) -> str:
-        t = tpls.get(key) or {}
-        return str(t.get("path", "")).strip()
-    home_key = "home_indicator"
-    home_path = _tpl_path(home_key)
-    market_key = "market_indicator"
-    market_path = _tpl_path(market_key)
-    launch_path = _tpl_path("btn_launch")
-
-    # 提前创建 ScreenOps 以支持快速路径检测
-    screen = ScreenOps(cfg, step_delay=0.02)
-
-    # 0）快速路径：检测到首页或市场即视为已启动
-    try:
-        if (home_path and os.path.exists(home_path) and screen.locate(home_key, timeout=0.4) is not None) or \
-           (market_path and os.path.exists(market_path) and screen.locate(market_key, timeout=0.4) is not None):
-            _log("[启动流程] 已检测到首页/市场标识，跳过启动。")
-            return LaunchResult(True, code="ok", details={"skipped": True, "reason": "home_or_market_present"})
-    except Exception:
-        pass
-
-    # 1）严格校验：启动器路径必须配置且存在
-    if not exe:
-        return LaunchResult(False, code="missing_config", error="未配置启动器路径")
-    if not os.path.exists(exe):
-        return LaunchResult(False, code="exe_missing", error="启动器路径不存在")
-    # 监听“启动”按钮模板必须存在
-    if not (launch_path and os.path.exists(launch_path)):
-        return LaunchResult(False, code="missing_launch_template", error="未配置或找不到“启动”按钮模板文件")
-    # 至少应提供一个首页/市场标识模板，用于进入完成判定
-    if not ((home_path and os.path.exists(home_path)) or (market_path and os.path.exists(market_path))):
-        return LaunchResult(False, code="missing_indicator_template", error="未配置首页/市场标识模板，无法判定启动完成")
-
-    # 创建 ScreenOps 实例
-    screen = ScreenOps(cfg, step_delay=0.02)
-
-    # 启动启动器进程
-    try:
-        wd = os.path.dirname(exe)
-        cmd: List[str]
-        if args:
-            try:
-                import shlex as _shlex
-
-                cmd = [exe] + _shlex.split(args, posix=False)
-            except Exception:
-                cmd = [exe] + args.split()
-        else:
-            cmd = [exe]
-        creationflags = 0
-        if os.name == "nt":
-            creationflags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-        subprocess.Popen(cmd, cwd=wd or None, creationflags=creationflags)  # noqa: S603,S607
-        _log(f"[启动流程] 已执行: {exe} {' '+args if args else ''}")
-    except Exception as e:
-        return LaunchResult(False, code="launch_error", error=str(e))
-
-    # 等待出现 'btn_launch'
-    end_launch = time.time() + max(1.0, float(launcher_to))
-    launch_box: Optional[Tuple[int, int, int, int]] = None
-    while time.time() < end_launch:
-        box = screen.locate("btn_launch", timeout=0.2)
-        if box is not None:
-            launch_box = box
-            break
-        # 以 200ms 节奏轮询，避免忙等并兼顾响应
-        _sleep(0.2)
-    if launch_box is None:
-        return LaunchResult(False, code="launch_button_timeout", error="等待启动按钮超时")
-
-    # 等待点击延迟后执行点击
-    if float(click_delay) > 0:
-        t_end_click = time.time() + float(click_delay)
-        while time.time() < t_end_click:
-            # 按文档延迟点击“启动”，等待资源准备就绪
-            _sleep(0.2)
-    screen.click_center(launch_box)
-    _log("[启动流程] 已点击启动按钮")
-
-    # 等待出现 'home_indicator'（或市场标识）
-    end_home = time.time() + max(1.0, float(startup_to))
-    while time.time() < end_home:
-        if (screen.locate(home_key, timeout=0.3) is not None) or (screen.locate(market_key, timeout=0.3) is not None):
-            return LaunchResult(True, code="ok")
-        # 进入游戏加载较慢：300ms 轮询，减少 CPU 占用
-        _sleep(0.3)
-    return LaunchResult(False, code="home_timeout", error="等待首页标识超时")
-
 
 class Buyer:
     """单个商品的统一购买流程（严格对齐 purchase_flow.md）。
@@ -433,11 +49,17 @@ class Buyer:
     """
 
     def __init__(
-        self, cfg: Dict[str, Any], screen: ScreenOps, on_log: Callable[[str], None]
+        self,
+        cfg: Dict[str, Any],
+        screen: ScreenOps,
+        on_log: Callable[[str], None],
+        *,
+        history_paths: HistoryPaths,
     ) -> None:
         self.cfg = cfg
         self.screen = screen
         self.on_log = on_log
+        self.history_paths = history_paths
         # 商品列表项坐标缓存（临时坐标缓存）
         self._pos_cache: Dict[str, Tuple[int, int, int, int]] = {}
         # 详情按钮首次缓存（跨详情会话复用）
@@ -859,12 +481,12 @@ class Buyer:
                 f"平均价 OCR 成功 值={val} ROI=({x_left},{y_top},{x_left + width},{y_top + mid_h}) 缩放={sc:.2f} btn耗时={btn_ms}ms",
             )
             try:
-                from history_store import append_price  # type: ignore
-                append_price(
+                _append_price(
                     item_id=goods.id,
                     item_name=goods.name or goods.search_name or str(item_disp),
                     price=int(val),
                     category=(goods.big_category or "") or None,
+                    paths=self.history_paths,
                 )
             except Exception:
                 pass
@@ -922,12 +544,12 @@ class Buyer:
         )
         # 记录价格历史（按物品），供历史价格与分钟聚合使用
         try:
-            from history_store import append_price  # type: ignore
-            append_price(
+            _append_price(
                 item_id=goods.id,
                 item_name=goods.name or goods.search_name or str(item_disp),
                 price=int(val),
                 category=(goods.big_category or "") or None,
+                paths=self.history_paths,
             )
         except Exception:
             pass
@@ -1059,16 +681,18 @@ class Buyer:
                 bought += int(inc)
                 # 记录购买历史（关联任务与物品）
                 try:
-                    from history_store import append_purchase  # type: ignore
-                    append_purchase(
+                    _append_purchase(
                         item_id=goods.id,
-                        item_name=goods.name or goods.search_name or str(task.get("item_name", "")),
+                        item_name=goods.name
+                        or goods.search_name
+                        or str(task.get("item_name", "")),
                         price=int(unit_price or 0),
                         qty=int(inc),
                         task_id=str(task.get("id", "")) if task.get("id") else None,
                         task_name=str(task.get("item_name", "")) or None,
                         category=(goods.big_category or "") or None,
                         used_max=bool(used_max),
+                        paths=self.history_paths,
                     )
                 except Exception:
                     pass
@@ -1140,6 +764,7 @@ class TaskRunner:
         tasks_data: Dict[str, Any],
         cfg_path: str = "config.json",
         goods_path: str = "goods.json",
+        output_dir: Optional[str | Path] = None,
         on_log: Optional[Callable[[str], None]] = None,
         on_task_update: Optional[Callable[[int, Dict[str, Any]], None]] = None,
     ) -> None:
@@ -1153,13 +778,23 @@ class TaskRunner:
         self.cfg = load_config(cfg_path)
         self.tasks_data = json.loads(json.dumps(tasks_data or {"tasks": []}))
         self.goods_map: Dict[str, Goods] = self._load_goods(goods_path)
+        paths_cfg = self.cfg.get("paths", {}) or {}
+        if not isinstance(paths_cfg, dict):
+            paths_cfg = {}
+        out_dir = Path(output_dir) if output_dir is not None else Path(paths_cfg.get("output_dir", "output"))
+        self.history_paths = _resolve_history_paths(out_dir)
 
         # 派生辅助对象
         step_delay = float(
             ((self.tasks_data.get("step_delays") or {}).get("default", 0.01)) or 0.01
         )
         self.screen = ScreenOps(self.cfg, step_delay=step_delay)
-        self.buyer = Buyer(self.cfg, self.screen, self._relay_log)
+        self.buyer = Buyer(
+            self.cfg,
+            self.screen,
+            self._relay_log,
+            history_paths=self.history_paths,
+        )
 
         # 模式、日志与重启
         self.mode = str(self.tasks_data.get("task_mode", "time"))

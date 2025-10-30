@@ -2,499 +2,27 @@ import os
 import threading
 import time
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
 import uuid
+from pathlib import Path
+from tkinter import filedialog, messagebox, ttk
 from typing import Any, Dict, List, Optional
 
-# 中文字体工具（Matplotlib/PIL/Tk）
-try:
-    from font_util import pil_font, setup_matplotlib_chinese, tk_font, draw_text  # type: ignore
-except Exception:
-    def pil_font(_size: int = 14):  # type: ignore
-        return None
-    def setup_matplotlib_chinese() -> None:  # type: ignore
-        return
-    def tk_font(_root, _size: int = 12):  # type: ignore
-        return None
-    def draw_text(draw, xy, text: str, fill=(255, 255, 255), size: int = 14):  # type: ignore
-        try:
-            draw.text(xy, text, fill=fill)
-        except Exception:
-            pass
+from wg1.config import ConfigPaths, ensure_default_config, load_config, save_config
+from wg1.core.launcher import run_launch_flow
+from wg1.core.multi_snipe import MultiSnipeRunner, SnipeItem
+from wg1.core.task_runner import TaskRunner
+from wg1.services.compat import ensure_pyautogui_confidence_compat
+from wg1.services.font_loader import (
+    draw_text,
+    pil_font,
+    setup_matplotlib_chinese,
+    tk_font,
+)
+from wg1.services.screen_ops import ScreenOps
+from wg1.ui.widgets.selectors import FixedSizeSelector, RegionSelector
 
-from app_config import ensure_default_config, load_config, save_config
-try:
-    # Ensure PyAutoGUI calls won’t crash if OpenCV is missing
-    from compat import ensure_pyautogui_confidence_compat
-
-    ensure_pyautogui_confidence_compat()
-except Exception:
-    pass
-from task_runner import TaskRunner, run_launch_flow, ScreenOps
-# 尝试稳健加载 multi_snipe_runner：优先常规导入；失败时回退到按文件路径加载，并记录错误信息
+ensure_pyautogui_confidence_compat()
 _multi_import_error: str | None = None
-try:
-    from multi_snipe_runner import MultiSnipeRunner, SnipeItem  # type: ignore
-except ImportError as e:
-    try:
-        import importlib.util as _ilu  # type: ignore
-        _here = os.path.dirname(os.path.abspath(__file__))
-        _path = os.path.join(_here, 'multi_snipe_runner.py')
-        if os.path.exists(_path):
-            _spec = _ilu.spec_from_file_location('multi_snipe_runner', _path)
-            if _spec and _spec.loader:
-                _mod = _ilu.module_from_spec(_spec)
-                _spec.loader.exec_module(_mod)  # type: ignore
-                MultiSnipeRunner = getattr(_mod, 'MultiSnipeRunner', None)  # type: ignore
-                SnipeItem = getattr(_mod, 'SnipeItem', None)  # type: ignore
-                if MultiSnipeRunner is None or SnipeItem is None:
-                    _multi_import_error = f"模块加载不完整：{_path}"
-        else:
-            _multi_import_error = f"文件不存在：{_path}"
-    except Exception as e2:
-        _multi_import_error = f"导入失败：{e!r}; 回退失败：{e2!r}"
-        MultiSnipeRunner = None  # type: ignore
-        SnipeItem = None  # type: ignore
-except Exception as e:
-    # 非 ImportError（如语法/运行时错误），保留详细异常用于 UI 提示
-    _multi_import_error = f"导入异常：{e!r}"
-    MultiSnipeRunner = None  # type: ignore
-    SnipeItem = None  # type: ignore
-
-
-class _RegionSelector:
-    """Overlay to select a screen region by dragging.
-
-    Calls on_done((x1,y1,x2,y2)) after overlay is closed, or on_done(None) on cancel.
-    """
-
-    def __init__(self, root: tk.Tk, on_done):
-        self.root = root
-        self.on_done = on_done
-        self.top: tk.Toplevel | None = None
-        self.canvas: tk.Canvas | None = None
-        self.start: tuple[int, int] | None = None
-        self.rect = None
-
-    def show(self) -> None:
-        top = tk.Toplevel(self.root)
-        self.top = top
-        # Fullscreen-like overlay (geometry avoids some -fullscreen quirks)
-        w = self.root.winfo_screenwidth()
-        h = self.root.winfo_screenheight()
-        top.geometry(f"{w}x{h}+0+0")
-        try:
-            top.attributes("-alpha", 0.25)
-        except Exception:
-            pass
-        try:
-            top.attributes("-topmost", True)
-        except Exception:
-            pass
-        top.configure(bg="black")
-        top.overrideredirect(True)
-        cv = tk.Canvas(top, bg="black", highlightthickness=0)
-        cv.pack(fill=tk.BOTH, expand=True)
-        self.canvas = cv
-        try:
-            f = tk_font(self.root, 12)
-        except Exception:
-            f = None
-        try:
-            if f is not None:
-                cv.create_text(w // 2, 30, text="拖拽选择区域，Esc/右键取消", fill="white", font=f)
-            else:
-                cv.create_text(w // 2, 30, text="拖拽选择区域，Esc/右键取消", fill="white")
-        except Exception:
-            pass
-        cv.bind("<ButtonPress-1>", self._on_press)
-        cv.bind("<B1-Motion>", self._on_drag)
-        cv.bind("<ButtonRelease-1>", self._on_release)
-        cv.bind("<ButtonPress-3>", self._on_cancel)
-        cv.bind("<Escape>", self._on_cancel)
-        try:
-            cv.focus_force()
-        except Exception:
-            cv.focus_set()
-        try:
-            top.grab_set()
-        except Exception:
-            pass
-
-    def _on_press(self, e):
-        self.start = (e.x_root, e.y_root)
-        if self.canvas is not None and self.rect is None:
-            self.rect = self.canvas.create_rectangle(0, 0, 1, 1, outline="red", width=2)
-
-    def _on_drag(self, e):
-        if not self.start or self.canvas is None or self.rect is None:
-            return
-        x0, y0 = self.start
-        x1, y1 = e.x_root, e.y_root
-        self.canvas.coords(self.rect, x0, y0, x1, y1)
-
-    def _on_release(self, e):
-        if not self.start:
-            self._finish(None)
-            return
-        x0, y0 = self.start
-        x1, y1 = e.x_root, e.y_root
-        if abs(x1 - x0) < 3 or abs(y1 - y0) < 3:
-            self._finish(None)
-            return
-        self._finish((min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)))
-
-    def _on_cancel(self, _):
-        self._finish(None)
-
-    def _finish(self, bounds):
-        if self.top is not None:
-            try:
-                try:
-                    self.top.grab_release()
-                except Exception:
-                    pass
-                self.top.destroy()
-            except Exception:
-                pass
-        self.on_done(bounds)
-
-
-class _FixedSizeSelector:
-    """Overlay to position a fixed-size capture box that follows the mouse.
-
-    - Size fixed to (w, h) pixels.
-    - Moves with mouse motion; left click confirms; right click/Esc cancels.
-    Calls on_done((x1, y1, x2, y2)) on confirm, or on_done(None) on cancel.
-    """
-
-    def __init__(self, root: tk.Tk, w: int, h: int, on_done):
-        self.root = root
-        self.w = int(max(1, w))
-        self.h = int(max(1, h))
-        self.on_done = on_done
-        self.top: tk.Toplevel | None = None
-        self.canvas: tk.Canvas | None = None
-        self.rect = None
-        self._x = 0
-        self._y = 0
-
-    def show(self) -> None:
-        top = tk.Toplevel(self.root)
-        self.top = top
-        W = self.root.winfo_screenwidth()
-        H = self.root.winfo_screenheight()
-        top.geometry(f"{W}x{H}+0+0")
-        try:
-            top.attributes("-alpha", 0.25)
-        except Exception:
-            pass
-        try:
-            top.attributes("-topmost", True)
-        except Exception:
-            pass
-        top.configure(bg="black")
-        top.overrideredirect(True)
-        cv = tk.Canvas(top, bg="black", highlightthickness=0)
-        cv.pack(fill=tk.BOTH, expand=True)
-        self.canvas = cv
-        try:
-            f = tk_font(self.root, 12)
-        except Exception:
-            f = None
-        try:
-            if f is not None:
-                cv.create_text(W // 2, 30, text=f"移动鼠标定位，左键确认（{self.w}x{self.h}），右键/ESC取消", fill="white", font=f)
-            else:
-                cv.create_text(W // 2, 30, text=f"移动鼠标定位，左键确认（{self.w}x{self.h}），右键/ESC取消", fill="white")
-        except Exception:
-            pass
-        self.rect = cv.create_rectangle(0, 0, 1, 1, outline="red", width=2)
-        cv.bind("<Motion>", self._on_motion)
-        cv.bind("<Button-1>", self._on_confirm)
-        cv.bind("<Button-3>", self._on_cancel)
-        cv.bind("<Escape>", self._on_cancel)
-        try:
-            cv.focus_force()
-            top.grab_set()
-        except Exception:
-            pass
-
-    def _on_motion(self, e):
-        self._x, self._y = int(e.x_root), int(e.y_root)
-        self._redraw()
-
-    def _redraw(self):
-        if not (self.canvas and self.rect):
-            return
-        x1 = self._x - self.w // 2
-        y1 = self._y - self.h // 2
-        x2 = x1 + self.w
-        y2 = y1 + self.h
-        self.canvas.coords(self.rect, x1, y1, x2, y2)
-
-    def _on_confirm(self, _e):
-        if self.top is None:
-            return
-        x1 = self._x - self.w // 2
-        y1 = self._y - self.h // 2
-        x2 = x1 + self.w
-        y2 = y1 + self.h
-        try:
-            self.top.grab_release()
-        except Exception:
-            pass
-        try:
-            self.top.destroy()
-        except Exception:
-            pass
-        self.on_done((x1, y1, x2, y2))
-
-    def _on_cancel(self, _e):
-        if self.top is not None:
-            try:
-                self.top.grab_release()
-            except Exception:
-                pass
-            try:
-                self.top.destroy()
-            except Exception:
-                pass
-        self.on_done(None)
-
-
-class _CardSelector:
-    """固定 165x212 的跟随定位选择器，按卡片样式渲染三段色块与图片区域虚线框。
-
-    - 顶部 20（蓝色）、底部 30（绿色）、中间剩余（黄色）。
-    - 图片区域：居中，左右与上下各缩进 30（如需仅左右缩进，可将 margin_tb 设为 0）。
-    - 左键确认；右键/ESC 取消。
-    - 回调 on_done((x1,y1,x2,y2)) 或 on_done(None)。
-    """
-
-    def __init__(
-        self,
-        root: tk.Tk,
-        on_done,
-        *,
-        w: int = 165,
-        h: int = 212,
-        top_h: int = 20,
-        bottom_h: int = 30,
-        margin_lr: int = 30,
-        margin_tb: int = 30,
-    ) -> None:
-        self.root = root
-        self.on_done = on_done
-        self.w = int(max(1, w))
-        self.h = int(max(1, h))
-        self.top_h = int(max(0, top_h))
-        self.bottom_h = int(max(0, bottom_h))
-        self.margin_lr = int(max(0, margin_lr))
-        self.margin_tb = int(max(0, margin_tb))
-        self.top: tk.Toplevel | None = None
-        self.canvas: tk.Canvas | None = None
-        self._x = 0
-        self._y = 0
-        # Canvas item ids
-        self.item_top = None
-        self.item_mid = None
-        self.item_bot = None
-        self.item_outline = None
-        self.item_img_rect = None
-
-    def show(self) -> None:
-        top = tk.Toplevel(self.root)
-        self.top = top
-        W = self.root.winfo_screenwidth()
-        H = self.root.winfo_screenheight()
-        top.geometry(f"{W}x{H}+0+0")
-        try:
-            top.attributes("-alpha", 0.25)
-        except Exception:
-            pass
-        try:
-            top.attributes("-topmost", True)
-        except Exception:
-            pass
-        top.configure(bg="black")
-        top.overrideredirect(True)
-        cv = tk.Canvas(top, bg="black", highlightthickness=0)
-        cv.pack(fill=tk.BOTH, expand=True)
-        self.canvas = cv
-        try:
-            f = tk_font(self.root, 12)
-        except Exception:
-            f = None
-        try:
-            if f is not None:
-                cv.create_text(
-                    W // 2,
-                    30,
-                    text=f"移动鼠标定位，左键确认（{self.w}x{self.h}），右键/ESC取消",
-                    fill="white",
-                    font=f,
-                )
-            else:
-                cv.create_text(
-                    W // 2,
-                    30,
-                    text=f"移动鼠标定位，左键确认（{self.w}x{self.h}），右键/ESC取消",
-                    fill="white",
-                )
-        except Exception:
-            pass
-        # Pre-create items for fast redraw
-        self.item_top = cv.create_rectangle(0, 0, 1, 1, fill="#2d7cff", outline="")
-        self.item_mid = cv.create_rectangle(0, 0, 1, 1, fill="#ffd84d", outline="")
-        self.item_bot = cv.create_rectangle(0, 0, 1, 1, fill="#2ea043", outline="")
-        # 外部浅灰色边框，宽度尽量接近 0.5px（Tk 允许小数宽度；若不支持则退化为 1px）
-        try:
-            self.item_outline = cv.create_rectangle(0, 0, 1, 1, outline="#cccccc", width=0.5)
-        except Exception:
-            self.item_outline = cv.create_rectangle(0, 0, 1, 1, outline="#cccccc", width=1)
-        self.item_img_rect = cv.create_rectangle(0, 0, 1, 1, outline="#333", dash=(4, 2))
-
-        cv.bind("<Motion>", self._on_motion)
-        cv.bind("<Button-1>", self._on_confirm)
-        cv.bind("<Button-3>", self._on_cancel)
-        cv.bind("<Escape>", self._on_cancel)
-        try:
-            cv.focus_force()
-            top.grab_set()
-        except Exception:
-            pass
-
-    def _on_motion(self, e) -> None:
-        self._x, self._y = int(e.x_root), int(e.y_root)
-        self._redraw()
-
-    def _redraw(self) -> None:
-        if not self.canvas:
-            return
-        x1 = self._x - self.w // 2
-        y1 = self._y - self.h // 2
-        x2 = x1 + self.w
-        y2 = y1 + self.h
-        # Sections
-        top_h = self.top_h
-        bot_h = self.bottom_h
-        mid_top = y1 + top_h
-        mid_btm = y2 - bot_h
-        # Update shapes
-        if self.item_top is not None:
-            self.canvas.coords(self.item_top, x1, y1, x2, y1 + top_h)
-        if self.item_mid is not None:
-            self.canvas.coords(self.item_mid, x1, mid_top, x2, mid_btm)
-        if self.item_bot is not None:
-            self.canvas.coords(self.item_bot, x1, y2 - bot_h, x2, y2)
-        if self.item_outline is not None:
-            self.canvas.coords(self.item_outline, x1 + 1, y1 + 1, x2 - 1, y2 - 1)
-        # Inner image rect inside middle area with margins
-        ix1 = x1 + self.margin_lr
-        ix2 = x2 - self.margin_lr
-        iy1 = mid_top + self.margin_tb
-        iy2 = mid_btm - self.margin_tb
-        if self.item_img_rect is not None:
-            self.canvas.coords(self.item_img_rect, ix1, iy1, ix2, iy2)
-
-    def _on_confirm(self, _e) -> None:
-        if self.top is None:
-            return
-        x1 = self._x - self.w // 2
-        y1 = self._y - self.h // 2
-        x2 = x1 + self.w
-        y2 = y1 + self.h
-        try:
-            self.top.grab_release()
-        except Exception:
-            pass
-        try:
-            self.top.destroy()
-        except Exception:
-            pass
-        self.on_done((x1, y1, x2, y2))
-
-    def _on_cancel(self, _e) -> None:
-        if self.top is not None:
-            try:
-                self.top.grab_release()
-            except Exception:
-                pass
-            try:
-                self.top.destroy()
-            except Exception:
-                pass
-        self.on_done(None)
-
-class TemplateRow(ttk.Frame):
-    def __init__(self, master, name: str, data: Dict[str, Any], on_test, on_capture, on_preview, on_change=None):
-        super().__init__(master)
-        self.name = name
-        self.var_path = tk.StringVar(value=data.get("path", ""))
-        self.var_conf = tk.DoubleVar(value=float(data.get("confidence", 0.85)))
-        self.on_test = on_test
-        self.on_capture = on_capture
-        self.on_preview = on_preview
-        self.on_change = on_change
-
-        # 状态列（红/绿圆点）
-        self.path_status = tk.Label(self, text="", width=2, anchor="center")
-        self.path_status.grid(row=0, column=0, sticky="w", padx=(2, 4))
-
-        # 名称列
-        ttk.Label(self, text=name, width=12).grid(row=0, column=1, sticky="w", padx=4, pady=2)
-        # 当路径变量变化时，更新状态文案（并检测文件是否存在）
-        def _update_path_status() -> None:
-            p = self.get_path()
-            if not p:
-                self.path_status.configure(text="●", fg="#d74c4c")  # red
-            elif os.path.exists(p):
-                self.path_status.configure(text="●", fg="#2ea043")  # green
-            else:
-                self.path_status.configure(text="●", fg="#d74c4c")  # red
-        def _on_path_change(*_):
-            _update_path_status()
-            if self.on_change:
-                try:
-                    self.on_change()
-                except Exception:
-                    pass
-        try:
-            self.var_path.trace_add("write", _on_path_change)
-        except Exception:
-            pass
-        _update_path_status()
-
-        ttk.Label(self, text="置信度").grid(row=0, column=2, padx=4)
-        # 数值输入框 0-1，步长 0.01
-        try:
-            sp = ttk.Spinbox(self, from_=0.0, to=1.0, increment=0.01, textvariable=self.var_conf, width=6, format="%.2f")
-        except Exception:
-            sp = tk.Spinbox(self, from_=0.0, to=1.0, increment=0.01, textvariable=self.var_conf, width=6)
-        sp.grid(row=0, column=3, sticky="w", padx=4)
-        # autosave on change
-        if self.on_change:
-            try:
-                self.var_conf.trace_add("write", lambda *_: self.on_change())
-            except Exception:
-                pass
-        ttk.Button(self, text="点击测试", command=lambda: self.on_test(self.name, self.get_path(), self.get_confidence())).grid(row=0, column=4, padx=4)
-        ttk.Button(self, text="模板捕获", command=lambda: self.on_capture(self)).grid(row=0, column=5, padx=4)
-        ttk.Button(self, text="模版预览", command=lambda: self.on_preview(self.get_path(), f"预览 - {self.name}")).grid(row=0, column=6, padx=4)
-
-        # 保持布局稳定
-        for c in range(0, 7):
-            self.columnconfigure(c, weight=0)
-
-    def get_path(self) -> str:
-        return self.var_path.get().strip()
-
-    def get_confidence(self) -> float:
-        try:
-            return float(self.var_conf.get())
-        except Exception:
-            return 0.85
 
 
 class App(tk.Tk):
@@ -506,11 +34,15 @@ class App(tk.Tk):
         self._autosave_after_id: str | None = None
         self._autosave_delay_ms: int = 300
 
-        # Config
-        ensure_default_config("config.json")
-        self.cfg: Dict[str, Any] = load_config("config.json")
+        # Config paths
+        self.paths = ConfigPaths.from_root(Path.cwd())
+        ensure_default_config(self.paths)
+        self.config_path = self.paths.config_file
+        self.images_dir = self.paths.images_dir
+        self.images_dir.mkdir(parents=True, exist_ok=True)
+        self.cfg: Dict[str, Any] = load_config(paths=self.paths)
         # Independent tasks store (not reusing auto-buy purchase_items)
-        self.tasks_path = "buy_tasks.json"
+        self.tasks_path = self.paths.root / "buy_tasks.json"
         self.tasks_data: Dict[str, Any] = self._load_tasks_data(self.tasks_path)
         # Index of the task currently being edited (None if not editing)
         self._editing_task_index: int | None = None
@@ -548,7 +80,7 @@ class App(tk.Tk):
         nb.add(self.tab_profit, text="利润计算")
 
         # 初始化多商品抢购任务状态（需在构建多商品页前完成）
-        self.snipe_tasks_path = "snipe_tasks.json"
+        self.snipe_tasks_path = self.paths.root / "snipe_tasks.json"
         self.snipe_tasks_data: Dict[str, Any] = self._load_snipe_tasks_data(self.snipe_tasks_path)
         self._snipe_thread = None
         self._snipe_stop = threading.Event()
@@ -562,11 +94,12 @@ class App(tk.Tk):
         self._build_tab_test()
         self._build_tab_multi()
         self._build_tab_profit()
+
         try:
             nb2 = self.tab1.nametowidget(self.tab1.winfo_parent())
             self.tab_goods = ttk.Frame(nb2)
             nb2.add(self.tab_goods, text="物品市场")
-            self.goods_ui = GoodsMarketUI(self.tab_goods)
+            self.goods_ui = GoodsMarketUI(self.tab_goods, images_dir=self.images_dir, goods_path=self.paths.root / "goods.json")
         except Exception:
             pass
         # 旧自动购买运行状态已移除
@@ -643,6 +176,14 @@ class App(tk.Tk):
         self._runner: TaskRunner | None = None
 
         # 多商品抢购：任务与运行状态已在构建标签页前初始化
+
+    # ---------- 基础工具 ----------
+
+    def _images_path(self, *parts: str, ensure_parent: bool = False) -> str:
+        path = self.images_dir.joinpath(*parts)
+        if ensure_parent:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        return str(path)
 
     # ---------- Mouse wheel binding helper ----------
     def _bind_mousewheel(self, area, target=None) -> None:
@@ -744,11 +285,12 @@ class App(tk.Tk):
                 pass
 
     # ---------- Tasks data I/O ----------
-    def _load_tasks_data(self, path: str) -> Dict[str, Any]:
+    def _load_tasks_data(self, path: Path) -> Dict[str, Any]:
         try:
             import json
-            if os.path.exists(path):
-                with open(path, "r", encoding="utf-8") as f:
+            path = Path(path)
+            if path.exists():
+                with path.open("r", encoding="utf-8") as f:
                     data = json.load(f)
                 if isinstance(data, dict):
                     if not isinstance(data.get("tasks"), list):
@@ -777,7 +319,7 @@ class App(tk.Tk):
     def _save_tasks_data(self) -> None:
         try:
             import json
-            with open(self.tasks_path, "w", encoding="utf-8") as f:
+            with Path(self.tasks_path).open("w", encoding="utf-8") as f:
                 json.dump(self.tasks_data, f, ensure_ascii=False, indent=4)
         except Exception:
             pass
@@ -2099,9 +1641,8 @@ class App(tk.Tk):
                 except Exception as e:
                     messagebox.showerror("选图片", f"失败: {e}")
                     return
-                os.makedirs("images", exist_ok=True)
                 slug = self._template_slug(row.name)
-                path = os.path.join("images", f"{slug}.png")
+                path = self._images_path(f"{slug}.png", ensure_parent=True)
                 try:
                     img.save(path)
                 except Exception as e:
@@ -2440,8 +1981,7 @@ class App(tk.Tk):
                 except Exception as e:
                     messagebox.showerror("选图片", f"失败: {e}")
                     return
-                os.makedirs("images", exist_ok=True)
-                path = os.path.join("images", f"{slug}.png")
+                path = self._images_path(f"{slug}.png", ensure_parent=True)
                 try:
                     img.save(path)
                 except Exception as e:
@@ -2712,12 +2252,12 @@ class App(tk.Tk):
             except Exception:
                 _dir = ""
             if not _dir:
-                _dir = os.path.join("images", "debug", "可视化调试")
+                _dir = self._images_path("debug", "可视化调试", ensure_parent=True)
             self.cfg["debug"]["overlay_dir"] = _dir
         except Exception:
             pass
 
-        save_config(self.cfg, "config.json")
+        save_config(self.cfg, path=self.config_path)
         if not silent:
             messagebox.showinfo("配置", "已保存")
 
@@ -2824,7 +2364,6 @@ class App(tk.Tk):
             y_bot = min(h - 1, y_top + 3)
 
         # Save outputs and OCR preview（与“平均单价区域”一致的处理：放大+二值化+可选引擎）
-        os.makedirs("images", exist_ok=True)
         crop_bgr = img_bgr[y_top:y_bot, x_left:x_right]
         # Scale from price_roi, clamp
         try:
@@ -2848,7 +2387,7 @@ class App(tk.Tk):
         except Exception:
             thb = None
         # Save preview crop (binary if available)
-        crop_path = os.path.join("images", "_price_roi.png")
+        crop_path = self._images_path("_price_roi.png", ensure_parent=True)
         try:
             if thb is not None:
                 _cv2.imwrite(crop_path, thb)
@@ -2866,7 +2405,7 @@ class App(tk.Tk):
             import time as _time
             from PIL import Image as _Image  # type: ignore
             import numpy as _np  # type: ignore
-            from utils.ocr_utils import recognize_text  # type: ignore
+            from wg1.services.ocr import recognize_text  # type: ignore
             # Compose PIL image from bin/crop
             img = None
             if thb is not None:
@@ -3011,8 +2550,7 @@ class App(tk.Tk):
         except Exception as e:
             messagebox.showerror("选图片", f"失败: {e}")
             return
-        os.makedirs("images", exist_ok=True)
-        path = os.path.join("images", "_qty_input_roi.png")
+        path = self._images_path("_qty_input_roi.png", ensure_parent=True)
         try:
             img.save(path)
         except Exception as e:
@@ -3053,7 +2591,7 @@ class App(tk.Tk):
             import time as _time
             import numpy as _np  # type: ignore
             from PIL import Image as _Image  # type: ignore
-            from utils.ocr_utils import recognize_text  # type: ignore
+            from wg1.services.ocr import recognize_text  # type: ignore
             # 构造 PIL.Image
             img = None
             if bin_img is not None:
@@ -3100,20 +2638,20 @@ class App(tk.Tk):
 
     # ---------- Template helpers (shared by preview launch/exit) ----------
     def _get_tpl_path_conf(self, key: str) -> tuple[str, float]:
-        """Return (path, confidence) for template key, with images/<key>.png fallback."""
+        """Return (path, confidence) for template key, fallback到用户模板目录。"""
         try:
             tpls = self.cfg.get("templates", {}) if isinstance(self.cfg.get("templates"), dict) else {}
             d = tpls.get(key, {}) if isinstance(tpls, dict) else {}
             p = str((d or {}).get("path", ""))
             if not p:
-                p = os.path.join("images", f"{key}.png")
+                p = self._images_path(f"{key}.png")
             try:
                 conf = float((d or {}).get("confidence", 0.85))
             except Exception:
                 conf = 0.85
             return p, conf
         except Exception:
-            return os.path.join("images", f"{key}.png"), 0.85
+            return self._images_path(f"{key}.png"), 0.85
 
     def _wait_template(self, key: str, timeout_sec: int) -> bool:
         """Wait until a template appears on screen within timeout (no click)."""
@@ -3399,7 +2937,7 @@ class App(tk.Tk):
 
     # ---------- Region selection & Modal image preview ----------
     def _select_region(self, on_done):
-        sel = _RegionSelector(self, on_done)
+        sel = RegionSelector(self, on_done)
         sel.show()
 
     def _template_slug(self, name: str) -> str:
@@ -3463,7 +3001,7 @@ class App(tk.Tk):
         try:
             import time as _time
             from PIL import Image as _Image  # type: ignore
-            from utils.ocr_utils import recognize_text  # type: ignore
+            from wg1.services.ocr import recognize_text  # type: ignore
             imgp = _Image.open(crop_path)
             umi = (self.cfg.get("umi_ocr", {}) if hasattr(self, "cfg") else {}) or {}
             base_url = str(umi.get("base_url", "http://127.0.0.1:1224"))
@@ -3773,9 +3311,8 @@ class App(tk.Tk):
         bin_bot = _bin(img_bot)
 
         # Save both images
-        os.makedirs("images", exist_ok=True)
-        path_top = os.path.join("images", "_avg_price_roi_top.png")
-        path_bot = os.path.join("images", "_avg_price_roi_bottom.png")
+        path_top = self._images_path("_avg_price_roi_top.png", ensure_parent=True)
+        path_bot = self._images_path("_avg_price_roi_bottom.png", ensure_parent=True)
         try:
             bin_top.save(path_top)
             bin_bot.save(path_bot)
@@ -3792,7 +3329,7 @@ class App(tk.Tk):
             raw = ""; ms = -1.0
             t0 = _time.perf_counter()
             try:
-                from utils.ocr_utils import recognize_text  # type: ignore
+                from wg1.services.ocr import recognize_text  # type: ignore
                 ocfg = self.cfg.get("umi_ocr") or {}
                 boxes = recognize_text(
                     pil_img,
@@ -4106,8 +3643,9 @@ class App(tk.Tk):
         # Instantiate runner with current tasks_data snapshot
         self._runner = TaskRunner(
             tasks_data=dict(self.tasks_data),
-            cfg_path="config.json",
-            goods_path="goods.json",
+            cfg_path=self.config_path,
+            goods_path=self.paths.root / "goods.json",
+            output_dir=self.paths.output_dir,
             on_log=self._append_exec_log,
             on_task_update=self._on_task_exec_update,
         )
@@ -4627,7 +4165,7 @@ def _lab_save_annotated(self) -> None:
 
         # Build variants once
         try:
-            from price_reader import _preprocess_variants_for_digits as _pre_v  # type: ignore
+            from wg1.services.price_reader import _preprocess_variants_for_digits as _pre_v  # type: ignore
         except Exception:
             _pre_v = None
 
@@ -4899,8 +4437,8 @@ def _lab_save_annotated(self) -> None:
             messagebox.showerror("选图片", f"失败: {e}")
             return
         ts = time.strftime("%Y%m%d_%H%M%S")
-        out_dir = os.path.join("images", f"proc_{ts}")
-        os.makedirs(out_dir, exist_ok=True)
+        out_dir = self._images_path(f"proc_{ts}")
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
         # Branch by mode
         if bool(getattr(self, "var_lab_chart_mode", tk.BooleanVar(value=False)).get()):
             # Chart-mode dump
@@ -5056,7 +4594,7 @@ def _lab_save_annotated(self) -> None:
         dumps: list[tuple[str, Any]] = []
         try:
             # run once and collect via a local inner collector mimicking steps
-            from price_reader import _preprocess_variants_for_digits as _pre_v  # type: ignore
+            from wg1.services.price_reader import _preprocess_variants_for_digits as _pre_v  # type: ignore
         except Exception:
             _pre_v = None
         # Raw
@@ -5095,7 +4633,7 @@ def _lab_save_annotated(self) -> None:
             pass
         # Best/selected variant annotated result; compute locally to avoid UI state dependency
         try:
-            from price_reader import _preprocess_variants_for_digits as _pre_v  # type: ignore
+            from wg1.services.price_reader import _preprocess_variants_for_digits as _pre_v  # type: ignore
             locals_variants = [("raw", pil.copy())]
             try:
                 arrs = _pre_v(pil)
@@ -5452,7 +4990,7 @@ def _lab_save_annotated(self) -> None:
             _ = clear_purchase_history(str(items[idx].get("id", "")))
         except Exception:
             pass
-        save_config(self.cfg, "config.json")
+        save_config(self.cfg, path=self.config_path)
         # Refresh one row and selected progress
         try:
             mode_disp = "固定" if str(items[idx].get("price_mode", "fixed")).lower() != "average" else "平均"
@@ -5761,7 +5299,7 @@ def _lab_save_annotated(self) -> None:
             else:
                 items[idx].update(item)
                 new_idx = idx
-            save_config(self.cfg, "config.json")
+            save_config(self.cfg, path=self.config_path)
             self._load_items_from_cfg()
             try:
                 self.tree.selection_set(str(new_idx))
@@ -5782,7 +5320,7 @@ def _lab_save_annotated(self) -> None:
             if not messagebox.askokcancel("删除", f"确定删除商品 [{name}] 吗？此操作不可撤销。"):
                 return
             del items[idx]
-            save_config(self.cfg, "config.json")
+            save_config(self.cfg, path=self.config_path)
             self._load_items_from_cfg()
 
     def _toggle_item_enable(self) -> None:
@@ -5793,7 +5331,7 @@ def _lab_save_annotated(self) -> None:
         items = self.cfg.get("purchase_items", [])
         if 0 <= idx < len(items):
             items[idx]["enabled"] = not bool(items[idx].get("enabled", True))
-            save_config(self.cfg, "config.json")
+            save_config(self.cfg, path=self.config_path)
             self._load_items_from_cfg()
 
     def _on_item_update(self, idx: int, it: dict) -> None:
@@ -5868,7 +5406,7 @@ def _lab_save_annotated(self) -> None:
                 it["id"] = str(uuid.uuid4())
                 changed = True
         if changed:
-            save_config(self.cfg, "config.json")
+            save_config(self.cfg, path=self.config_path)
 
     # ---------- History UI ----------
     def _get_item_by_index(self, idx: int | None) -> Dict[str, Any] | None:
@@ -6339,7 +5877,7 @@ def _lab_save_annotated(self) -> None:
 
         def _choose_tpl() -> None:
             try:
-                initdir = os.path.join(os.getcwd(), "images")
+                initdir = str(self.images_dir)
             except Exception:
                 initdir = None  # type: ignore
             path = filedialog.askopenfilename(
@@ -6430,16 +5968,12 @@ def _lab_save_annotated(self) -> None:
             try:
                 import json
                 ts = time.strftime("%Y%m%d_%H%M%S")
-                out_dir = os.path.join(os.getcwd(), "images", "test", f"roi_{ts}_{uuid.uuid4().hex[:6]}")
-                os.makedirs(out_dir, exist_ok=True)
-                p_name = os.path.join(out_dir, "name.png")
-                p_price = os.path.join(out_dir, "price.png")
-                p_mid = os.path.join(out_dir, "middle.png")
-                p_card = os.path.join(out_dir, "card.png")
-                name_img.save(p_name)
-                price_img.save(p_price)
-                mid_img.save(p_mid)
-                card_img.save(p_card)
+                out_path = self.images_dir / "test" / f"roi_{ts}_{uuid.uuid4().hex[:6]}"
+                out_path.mkdir(parents=True, exist_ok=True)
+                name_img.save(out_path / "name.png")
+                price_img.save(out_path / "price.png")
+                mid_img.save(out_path / "middle.png")
+                card_img.save(out_path / "card.png")
                 def _to_dict(r):
                     x, y, w, h = r
                     return {"x": int(x), "y": int(y), "w": int(w), "h": int(h)}
@@ -6451,12 +5985,12 @@ def _lab_save_annotated(self) -> None:
                     "margins": {"lr": 30, "tb": 20},
                     "sections": {"top": 20, "bottom": 30},
                 }
-                with open(os.path.join(out_dir, "roi.json"), "w", encoding="utf-8") as f:
+                with (out_path / "roi.json").open("w", encoding="utf-8") as f:
                     json.dump(meta, f, ensure_ascii=False, indent=2)
                 # 更新模板路径为中间图便于预览
-                self.var_test_tpl.set(p_mid)
+                self.var_test_tpl.set(str(out_path / "middle.png"))
                 try:
-                    messagebox.showinfo("保存", f"ROI 已保存到:\n{out_dir}")
+                    messagebox.showinfo("保存", f"ROI 已保存到:\n{out_path}")
                 except Exception:
                     pass
             except Exception:
@@ -6470,7 +6004,7 @@ def _lab_save_annotated(self) -> None:
 
             # OCR（Umi-OCR HTTP）
             try:
-                from utils.ocr_utils import recognize_text, recognize_numbers  # type: ignore
+                from wg1.services.ocr import recognize_text, recognize_numbers  # type: ignore
             except Exception as e:
                 messagebox.showerror("选图片", f"失败: {e}")
                 return
@@ -6495,17 +6029,14 @@ def _lab_save_annotated(self) -> None:
                 price_txt = ""
 
             self.var_test_name.set((name_txt or "").strip())
-            # 价格清洗：与 task_runner._parse_price_text 保持一致
-            try:
-                from task_runner import _parse_price_text  # type: ignore
-            except Exception:
-                _parse_price_text = None  # type: ignore
+            # 价格清洗：与 TaskRunner 逻辑保持一致
+            from wg1.core.common import parse_price_text
+
             val = None
-            if _parse_price_text is not None:
-                try:
-                    val = _parse_price_text(price_txt or "")
-                except Exception:
-                    val = None
+            try:
+                val = parse_price_text(price_txt or "")
+            except Exception:
+                val = None
             if val is None:
                 self.var_test_price.set((price_txt or "").strip())
             else:
@@ -6607,7 +6138,7 @@ def _lab_save_annotated(self) -> None:
 
             # OCR with Umi
             try:
-                from utils.ocr_utils import recognize_text, recognize_numbers  # type: ignore
+                from wg1.services.ocr import recognize_text, recognize_numbers  # type: ignore
             except Exception as e:
                 messagebox.showerror("选图片", f"失败: {e}")
                 return
@@ -6632,17 +6163,14 @@ def _lab_save_annotated(self) -> None:
                 price_txt = ""
 
             self.var_test_name.set((name_txt or "").strip())
-            # 价格清洗：与 task_runner._parse_price_text 保持一致
-            try:
-                from task_runner import _parse_price_text  # type: ignore
-            except Exception:
-                _parse_price_text = None  # type: ignore
+            # 价格清洗：与核心逻辑保持一致
+            from wg1.core.common import parse_price_text
+
             val = None
-            if _parse_price_text is not None:
-                try:
-                    val = _parse_price_text(price_txt or "")
-                except Exception:
-                    val = None
+            try:
+                val = parse_price_text(price_txt or "")
+            except Exception:
+                val = None
             if val is None:
                 self.var_test_price.set((price_txt or "").strip())
             else:
@@ -6652,16 +6180,12 @@ def _lab_save_annotated(self) -> None:
             try:
                 import json
                 ts = time.strftime("%Y%m%d_%H%M%S")
-                out_dir = os.path.join(os.getcwd(), "images", "test", f"roi_{ts}_{uuid.uuid4().hex[:6]}")
-                os.makedirs(out_dir, exist_ok=True)
-                p_name = os.path.join(out_dir, "name.png")
-                p_price = os.path.join(out_dir, "price.png")
-                p_mid = os.path.join(out_dir, "middle.png")
-                p_card = os.path.join(out_dir, "card.png")
-                name_img.save(p_name)
-                price_img.save(p_price)
-                mid_img.save(p_mid)
-                card_img.save(p_card)
+                out_path = self.images_dir / "test" / f"roi_{ts}_{uuid.uuid4().hex[:6]}"
+                out_path.mkdir(parents=True, exist_ok=True)
+                name_img.save(out_path / "name.png")
+                price_img.save(out_path / "price.png")
+                mid_img.save(out_path / "middle.png")
+                card_img.save(out_path / "card.png")
                 def _to_dict(r):
                     x, y, w, h = r
                     return {"x": int(x), "y": int(y), "w": int(w), "h": int(h)}
@@ -6673,16 +6197,16 @@ def _lab_save_annotated(self) -> None:
                     "margins": {"lr": 30, "tb": 20},
                     "sections": {"top": 20, "bottom": 35},
                 }
-                with open(os.path.join(out_dir, "roi.json"), "w", encoding="utf-8") as f:
+                with (out_path / "roi.json").open("w", encoding="utf-8") as f:
                     json.dump(meta, f, ensure_ascii=False, indent=2)
                 # 更新测试模板为中间图并重绘
-                self.var_test_tpl.set(p_mid)
+                self.var_test_tpl.set(str(out_path / "middle.png"))
                 try:
                     _render_selector()
                 except Exception:
                     pass
                 try:
-                    messagebox.showinfo("保存", f"ROI 已保存到:\n{out_dir}")
+                    messagebox.showinfo("保存", f"ROI 已保存到:\n{out_path}")
                 except Exception:
                     pass
             except Exception:
@@ -6743,9 +6267,8 @@ def _lab_save_annotated(self) -> None:
                 except Exception as e:
                     messagebox.showerror("选图片", f"失败: {e}")
                     return
-                os.makedirs("images", exist_ok=True)
                 slug = self._template_slug(row.name)
-                p = os.path.join("images", f"{slug}.png")
+                p = self._images_path(f"{slug}.png", ensure_parent=True)
                 try:
                     img.save(p)
                 except Exception as e:
@@ -6819,9 +6342,9 @@ def _lab_save_annotated(self) -> None:
         except Exception:
             self.var_debug_save_imgs = tk.BooleanVar(value=False)
         try:
-            _dir = str(dbg_cfg.get("overlay_dir", os.path.join("images", "debug", "可视化调试")))
+            _dir = str(dbg_cfg.get("overlay_dir", self._images_path("debug", "可视化调试")))
         except Exception:
-            _dir = os.path.join("images", "debug", "可视化调试")
+            _dir = self._images_path("debug", "可视化调试")
         self.var_debug_overlay_dir = tk.StringVar(value=_dir)
 
         chk = ttk.Checkbutton(box_dbg, text="启用调试可视化（绘制ROI/模板）", variable=self.var_debug_enabled)
@@ -6961,11 +6484,12 @@ def _lab_save_annotated(self) -> None:
         self.multi_txt.configure(state=tk.DISABLED)
 
     # ---- 多商品抢购：数据加载/保存 ----
-    def _load_snipe_tasks_data(self, path: str) -> Dict[str, Any]:
+    def _load_snipe_tasks_data(self, path: Path) -> Dict[str, Any]:
         try:
-            if os.path.exists(path):
-                import json
-                with open(path, "r", encoding="utf-8") as f:
+            import json
+            path = Path(path)
+            if path.exists():
+                with path.open("r", encoding="utf-8") as f:
                     data = json.load(f)
                 if isinstance(data, dict):
                     data.setdefault("items", [])
@@ -6977,7 +6501,7 @@ def _lab_save_annotated(self) -> None:
     def _save_snipe_tasks_data(self) -> None:
         try:
             import json
-            with open(self.snipe_tasks_path, "w", encoding="utf-8") as f:
+            with Path(self.snipe_tasks_path).open("w", encoding="utf-8") as f:
                 json.dump(self.snipe_tasks_data, f, ensure_ascii=False, indent=2)
         except Exception:
             pass
@@ -7699,11 +7223,13 @@ class GoodsMarketUI(ttk.Frame):
     图片：`images/goods/<category_en>/<uuid>.png`
     """
 
-    def __init__(self, master) -> None:
+    def __init__(self, master, *, images_dir: Path, goods_path: Path) -> None:
         super().__init__(master)
         self.pack(fill=tk.BOTH, expand=True)
 
-        self.goods_path = "goods.json"
+        self.images_dir = Path(images_dir)
+        self.images_dir.mkdir(parents=True, exist_ok=True)
+        self.goods_path = Path(goods_path)
         self.goods: list[dict[str, object]] = []
 
         # 显示与存储的分类映射
@@ -7812,8 +7338,8 @@ class GoodsMarketUI(ttk.Frame):
     def _load_goods(self) -> None:
         try:
             import json
-            if os.path.exists(self.goods_path):
-                with open(self.goods_path, "r", encoding="utf-8") as f:
+            if self.goods_path.exists():
+                with self.goods_path.open("r", encoding="utf-8") as f:
                     data = json.load(f)
                 if isinstance(data, list):
                     self.goods = data
@@ -7829,17 +7355,17 @@ class GoodsMarketUI(ttk.Frame):
     def _save_goods(self) -> None:
         try:
             import json
-            with open(self.goods_path, "w", encoding="utf-8") as f:
+            with self.goods_path.open("w", encoding="utf-8") as f:
                 json.dump(self.goods, f, ensure_ascii=False, indent=4)
         except Exception:
             pass
 
     # ---------- Utils ----------
     def _ensure_default_img(self) -> str:
-        path = os.path.join("images", "goods", "_default.png")
+        path = self.images_dir / "goods" / "_default.png"
         try:
-            if not os.path.exists(path):
-                os.makedirs(os.path.dirname(path), exist_ok=True)
+            if not path.exists():
+                path.parent.mkdir(parents=True, exist_ok=True)
                 from PIL import Image, ImageDraw  # type: ignore
 
                 img = Image.new("RGBA", (160, 120), (240, 240, 240, 255))
@@ -7856,11 +7382,13 @@ class GoodsMarketUI(ttk.Frame):
                 img.save(path)
         except Exception:
             pass
-        return path
+        return str(path)
 
     def _category_dir(self, big_cat: str) -> str:
         slug = self.cat_map_en.get(big_cat) or "misc"
-        return os.path.join("images", "goods", slug)
+        path = self.images_dir / "goods" / slug
+        path.mkdir(parents=True, exist_ok=True)
+        return str(path)
 
     def _capture_image(self) -> str | None:
         root = self.winfo_toplevel()
@@ -7893,7 +7421,7 @@ class GoodsMarketUI(ttk.Frame):
                 return
             result_path = path
 
-        sel = _RegionSelector(root, _done)
+        sel = RegionSelector(root, _done)
         try:
             sel.show()
         except Exception:
@@ -8963,3 +8491,15 @@ def main() -> None:
 if __name__ == "__main__":
     main()
 
+
+def run_app() -> None:
+    app = App()
+    app.mainloop()
+
+
+def main() -> None:
+    run_app()
+
+
+if __name__ == "__main__":
+    run_app()
