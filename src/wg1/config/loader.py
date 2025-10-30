@@ -14,6 +14,8 @@ from .migrations import (
     deep_merge,
     migrate_from_key_mapping,
     normalize_template_keys,
+    migrate_template_paths_to_resources,
+    migrate_debug_overlay_dir_to_output,
 )
 
 
@@ -59,6 +61,7 @@ def load_config(
     paths: Optional[ConfigPaths] = None,
     migrate_legacy: bool = False,
     normalize_keys: bool = True,
+    migrate_paths: bool = True,
 ) -> Dict[str, Any]:
     """加载配置文件并按需处理兼容逻辑。"""
     cfg_path = Path(path) if path is not None else (paths.config_file if paths else Path("config.json"))
@@ -81,6 +84,14 @@ def load_config(
         changed = changed or migrated
     if normalize_keys:
         changed = normalize_template_keys(cfg) or changed
+    if migrate_paths:
+        try:
+            # 迁移模板路径到包内资源；迁移调试目录到 output/debug
+            changed = migrate_template_paths_to_resources(cfg, base_dir=cfg_path.parent) or changed
+            out_dir = (cfg.get("paths") or {}).get("output_dir") if isinstance(cfg.get("paths"), dict) else None
+            changed = migrate_debug_overlay_dir_to_output(cfg, output_dir=out_dir or (paths.output_dir if paths else "output")) or changed
+        except Exception:
+            pass
 
     if changed:
         try:

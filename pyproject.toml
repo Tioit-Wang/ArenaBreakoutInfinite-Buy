@@ -37,3 +37,7 @@ include-package-data = true
 [tool.setuptools.package-data]
 "wg1.resources.images" = ["**/*"]
 "wg1.resources.assets" = ["**/*"]
+
+[tool.ruff.format]
+# 保持 CRLF 行结尾，避免格式化后改变换行符（ruff 0.14 语法为 cr-lf）
+line-ending = "cr-lf"

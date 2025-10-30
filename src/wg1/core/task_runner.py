@@ -452,8 +452,8 @@ class Buyer:
                 bin_top = img_top
             try:
                 bin_bot = img_bot.convert("L").point(lambda p: 255 if p > 128 else 0)  # type: ignore
-        except Exception:
-            bin_bot = img_bot
+            except Exception:
+                bin_bot = img_bot
         # 使用 utils.ocr_utils 进行数字识别（优先路径）
         try:
             ocfg = self.cfg.get("umi_ocr") or {}

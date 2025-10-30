@@ -169,6 +169,19 @@ class MultiSnipeRunner:
                     dd = 0.2
                 base_delay = dd
             self.screen = ScreenOps(cfg, step_delay=float(base_delay))
+            # 将调试叠加图目录规范为 output_dir/debug，避免写入 images/
+            try:
+                _paths = (self.cfg.get("paths") or {})
+            except Exception:
+                _paths = {}
+            _out_root = str((_paths.get("output_dir") if isinstance(_paths, dict) else None) or "output")
+            try:
+                if not os.path.isabs(self._debug_overlay_dir):
+                    p_norm = str(self._debug_overlay_dir or "").replace("\\", "/")
+                    if p_norm.startswith("images/debug") or p_norm.startswith("images/\\debug"):
+                        self._debug_overlay_dir = os.path.join(_out_root, "debug", os.path.basename(self._debug_overlay_dir))
+            except Exception:
+                pass
         except Exception:
             self.screen = ScreenOps(cfg, step_delay=0.02)
 
@@ -1061,7 +1074,12 @@ class MultiSnipeRunner:
                 pass
             # 保存调试用的价格 ROI 图片（文件名包含结果与时间）
             try:
-                dbg_dir = os.path.join("debug")
+                _paths = (self.cfg.get("paths") or {})
+            except Exception:
+                _paths = {}
+            _out_root = str((_paths.get("output_dir") if isinstance(_paths, dict) else None) or "output")
+            try:
+                dbg_dir = os.path.join(_out_root, "debug")
                 os.makedirs(dbg_dir, exist_ok=True)
                 ts = time.strftime("%Y%m%d_%H%M%S")
                 vdisp = (str(int(val)) if isinstance(val, int) else (price_txt or "NA").replace("/", "-").replace("\\", "-"))
