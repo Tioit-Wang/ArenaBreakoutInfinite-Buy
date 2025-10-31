@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from .light_tip import LightTipManager
 from .template_row import TemplateRow
 
-__all__ = ["TemplateRow"]
+__all__ = ["TemplateRow", "LightTipManager"]

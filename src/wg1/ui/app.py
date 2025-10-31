@@ -14,6 +14,7 @@ from wg1.ui.goods_market import GoodsMarketUI
 from wg1.ui.tabs.init_config import InitConfigTab
 from wg1.ui.tabs.multi_snipe import MultiSnipeTab
 from wg1.ui.tabs.profit import ProfitTab
+from wg1.ui.widgets import LightTipManager
 from wg1.ui.tabs.tasks import SingleFastBuyTab
 
 ensure_pyautogui_confidence_compat()
@@ -25,6 +26,7 @@ class App(tk.Tk):
         super().__init__()
         self.title("基于图像识别的自动购买助手")
         self.geometry("1120x740")
+        self.tip_manager = LightTipManager(self)
         # Autosave scheduler
         self._autosave_after_id: str | None = None
         self._autosave_delay_ms: int = 300

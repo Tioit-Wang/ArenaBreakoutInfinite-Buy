@@ -86,15 +86,15 @@
       "confidence": 0.85
     },
     "btn_settings": {
-      "path": "C:\\Code\\PythonProjects\\ArenaBreakoutInfinite-Buy\\src\\wg1\\resources\\images\\btn_settings.png",
+      "path": "images/btn_settings.png",
       "confidence": 0.84
     },
     "btn_exit": {
-      "path": "C:\\Code\\PythonProjects\\ArenaBreakoutInfinite-Buy\\src\\wg1\\resources\\images\\btn_exit.png",
+      "path": "images/btn_exit.png",
       "confidence": 0.85
     },
     "btn_exit_confirm": {
-      "path": "C:\\Code\\PythonProjects\\ArenaBreakoutInfinite-Buy\\src\\wg1\\resources\\images\\btn_exit_confirm.png",
+      "path": "images/btn_exit_confirm.png",
       "confidence": 0.84
     },
     "recent_purchases_tab": {

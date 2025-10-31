@@ -4,7 +4,10 @@ import os
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, ttk
-from typing import Callable, Dict, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Callable, Dict, Optional, Tuple, Union
+
+if TYPE_CHECKING:
+    from .light_tip import LightTipManager
 
 __all__ = ["TemplateRow"]
 
@@ -46,6 +49,7 @@ class TemplateRow(ttk.Frame):
         self._toast_win: tk.Toplevel | None = None
         self._toast_after_id: str | None = None
         self._status_text = ""
+        self._light_tip_manager: LightTipManager | None = self._resolve_light_tip_manager()
 
         base = data or {}
         default_conf = 0.85
@@ -290,6 +294,22 @@ class TemplateRow(ttk.Frame):
             self._tooltip_win = None
 
     def _toast(self, message: str, kind: str = "info") -> None:
+        manager = self._light_tip_manager or self._resolve_light_tip_manager()
+        if manager is not None:
+            manager.show(message, kind=kind, duration=self._estimate_tip_duration(kind))
+            return
+        self._toast_legacy(message, kind)
+
+    def _hide_toast(self) -> None:
+        if self._toast_win is not None:
+            try:
+                self._toast_win.destroy()
+            except Exception:
+                pass
+        self._toast_win = None
+        self._toast_after_id = None
+
+    def _toast_legacy(self, message: str, kind: str) -> None:
         colors = {
             "success": ("#1e8e3e", "#ffffff"),
             "error": ("#b3261e", "#ffffff"),
@@ -322,14 +342,15 @@ class TemplateRow(ttk.Frame):
         self._toast_after_id = self.after(1400, self._hide_toast)
         self._toast_win = top
 
-    def _hide_toast(self) -> None:
-        if self._toast_win is not None:
-            try:
-                self._toast_win.destroy()
-            except Exception:
-                pass
-        self._toast_win = None
-        self._toast_after_id = None
+    def _estimate_tip_duration(self, kind: str) -> float:
+        kind = (kind or "info").lower()
+        table = {
+            "success": 2.2,
+            "error": 3.0,
+            "warn": 2.6,
+            "info": 2.4,
+        }
+        return table.get(kind, 2.4)
 
     @staticmethod
     def _normalize_test_result(result: TestResult) -> Tuple[bool, str]:
@@ -363,3 +384,17 @@ class TemplateRow(ttk.Frame):
             if color:
                 return color
         return "#f0f0f0"
+
+    def _resolve_light_tip_manager(self) -> "LightTipManager | None":
+        """尝试获取顶层窗口挂载的轻提示管理器。"""
+        try:
+            top = self.winfo_toplevel()
+        except Exception:
+            return None
+        manager = getattr(top, "tip_manager", None)
+        if manager is None:
+            return None
+        show_method = getattr(manager, "show", None)
+        if callable(show_method):
+            return manager
+        return None
