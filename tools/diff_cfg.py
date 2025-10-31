@@ -1,7 +1,7 @@
 import json, os
 from pprint import pprint
 import copy
-from wg1.config import DEFAULT_CONFIG, load_config
+from super_buyer.config import DEFAULT_CONFIG, load_config
 # Load current config
 with open('config.json','r',encoding='utf-8') as f:
     cfg = json.load(f)
