@@ -1,0 +1,1298 @@
+[{
+	"resource": "/f:/Python/wg1/src/wg1/services/price_reader.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "F821",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/undefined-name",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 8,
+	"message": "Undefined name `np`",
+	"source": "Ruff",
+	"startLineNumber": 122,
+	"startColumn": 52,
+	"endLineNumber": 122,
+	"endColumn": 54,
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/services/price_reader.py",
+	"owner": "Pylance",
+	"code": {
+		"value": "reportUndefinedVariable",
+		"target": {
+			"$mid": 1,
+			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportUndefinedVariable.md",
+			"scheme": "https",
+			"authority": "github.com"
+		}
+	},
+	"severity": 4,
+	"message": "未定义“np”",
+	"source": "Pylance",
+	"startLineNumber": 122,
+	"startColumn": 52,
+	"endLineNumber": 122,
+	"endColumn": 54,
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/init_config.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "F821",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/undefined-name",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 8,
+	"message": "Undefined name `save_config`",
+	"source": "Ruff",
+	"startLineNumber": 955,
+	"startColumn": 9,
+	"endLineNumber": 955,
+	"endColumn": 20,
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/init_config.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "F401",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/unused-import",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 4,
+	"message": "`uuid` imported but unused",
+	"source": "Ruff",
+	"startLineNumber": 8,
+	"startColumn": 8,
+	"endLineNumber": 8,
+	"endColumn": 12,
+	"tags": [
+		1
+	],
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/init_config.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "F401",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/unused-import",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 4,
+	"message": "`pathlib.Path` imported but unused",
+	"source": "Ruff",
+	"startLineNumber": 9,
+	"startColumn": 21,
+	"endLineNumber": 9,
+	"endColumn": 25,
+	"tags": [
+		1
+	],
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/init_config.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "F401",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/unused-import",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 4,
+	"message": "`typing.Any` imported but unused",
+	"source": "Ruff",
+	"startLineNumber": 10,
+	"startColumn": 35,
+	"endLineNumber": 10,
+	"endColumn": 38,
+	"tags": [
+		1
+	],
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/init_config.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "F401",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/unused-import",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 4,
+	"message": "`typing.List` imported but unused",
+	"source": "Ruff",
+	"startLineNumber": 10,
+	"startColumn": 46,
+	"endLineNumber": 10,
+	"endColumn": 50,
+	"tags": [
+		1
+	],
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/init_config.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "F401",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/unused-import",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 4,
+	"message": "`typing.Optional` imported but unused",
+	"source": "Ruff",
+	"startLineNumber": 10,
+	"startColumn": 52,
+	"endLineNumber": 10,
+	"endColumn": 60,
+	"tags": [
+		1
+	],
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/init_config.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "F401",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/unused-import",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 4,
+	"message": "`wg1.services.font_loader.draw_text` imported but unused",
+	"source": "Ruff",
+	"startLineNumber": 15,
+	"startColumn": 38,
+	"endLineNumber": 15,
+	"endColumn": 47,
+	"tags": [
+		1
+	],
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/init_config.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "F401",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/unused-import",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 4,
+	"message": "`wg1.services.font_loader.pil_font` imported but unused",
+	"source": "Ruff",
+	"startLineNumber": 15,
+	"startColumn": 49,
+	"endLineNumber": 15,
+	"endColumn": 57,
+	"tags": [
+		1
+	],
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/init_config.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "F401",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/unused-import",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 4,
+	"message": "`wg1.services.font_loader.setup_matplotlib_chinese` imported but unused",
+	"source": "Ruff",
+	"startLineNumber": 15,
+	"startColumn": 59,
+	"endLineNumber": 15,
+	"endColumn": 83,
+	"tags": [
+		1
+	],
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/init_config.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "F401",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/unused-import",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 4,
+	"message": "`wg1.services.screen_ops.ScreenOps` imported but unused",
+	"source": "Ruff",
+	"startLineNumber": 16,
+	"startColumn": 37,
+	"endLineNumber": 16,
+	"endColumn": 46,
+	"tags": [
+		1
+	],
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/init_config.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "F401",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/unused-import",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 4,
+	"message": "`wg1.ui.widgets.selectors.FixedSizeSelector` imported but unused",
+	"source": "Ruff",
+	"startLineNumber": 17,
+	"startColumn": 38,
+	"endLineNumber": 17,
+	"endColumn": 55,
+	"tags": [
+		1
+	],
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/init_config.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "F841",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/unused-variable",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 4,
+	"message": "Local variable `box` is assigned to but never used",
+	"source": "Ruff",
+	"startLineNumber": 261,
+	"startColumn": 17,
+	"endLineNumber": 261,
+	"endColumn": 20,
+	"tags": [
+		1
+	],
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/init_config.py",
+	"owner": "Pylance",
+	"code": {
+		"value": "reportUndefinedVariable",
+		"target": {
+			"$mid": 1,
+			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportUndefinedVariable.md",
+			"scheme": "https",
+			"authority": "github.com"
+		}
+	},
+	"severity": 4,
+	"message": "未定义“save_config”",
+	"source": "Pylance",
+	"startLineNumber": 955,
+	"startColumn": 9,
+	"endLineNumber": 955,
+	"endColumn": 20,
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/init_config.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "F841",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/unused-variable",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 4,
+	"message": "Local variable `bh` is assigned to but never used",
+	"source": "Ruff",
+	"startLineNumber": 1026,
+	"startColumn": 13,
+	"endLineNumber": 1026,
+	"endColumn": 15,
+	"tags": [
+		1
+	],
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/init_config.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "E741",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/ambiguous-variable-name",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 4,
+	"message": "Ambiguous variable name: `l`",
+	"source": "Ruff",
+	"startLineNumber": 1592,
+	"startColumn": 31,
+	"endLineNumber": 1592,
+	"endColumn": 32,
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/init_config.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "F841",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/unused-variable",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 4,
+	"message": "Local variable `e` is assigned to but never used",
+	"source": "Ruff",
+	"startLineNumber": 1710,
+	"startColumn": 29,
+	"endLineNumber": 1710,
+	"endColumn": 30,
+	"tags": [
+		1
+	],
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/init_config.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "F401",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/unused-import",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 4,
+	"message": "`PIL.Image` imported but unused",
+	"source": "Ruff",
+	"startLineNumber": 1835,
+	"startColumn": 29,
+	"endLineNumber": 1835,
+	"endColumn": 34,
+	"tags": [
+		1
+	],
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/init_config.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "E401",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/multiple-imports-on-one-line",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 4,
+	"message": "Multiple imports on one line",
+	"source": "Ruff",
+	"startLineNumber": 1992,
+	"startColumn": 17,
+	"endLineNumber": 1992,
+	"endColumn": 49,
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/init_config.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "E702",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/multiple-statements-on-one-line-semicolon",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 4,
+	"message": "Multiple statements on one line (semicolon)",
+	"source": "Ruff",
+	"startLineNumber": 2021,
+	"startColumn": 21,
+	"endLineNumber": 2021,
+	"endColumn": 22,
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/init_config.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "E701",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/multiple-statements-on-one-line-colon",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 4,
+	"message": "Multiple statements on one line (colon)",
+	"source": "Ruff",
+	"startLineNumber": 2035,
+	"startColumn": 22,
+	"endLineNumber": 2035,
+	"endColumn": 23,
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/init_config.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "E702",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/multiple-statements-on-one-line-semicolon",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 4,
+	"message": "Multiple statements on one line (semicolon)",
+	"source": "Ruff",
+	"startLineNumber": 2036,
+	"startColumn": 37,
+	"endLineNumber": 2036,
+	"endColumn": 38,
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/init_config.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "E702",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/multiple-statements-on-one-line-semicolon",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 4,
+	"message": "Multiple statements on one line (semicolon)",
+	"source": "Ruff",
+	"startLineNumber": 2037,
+	"startColumn": 40,
+	"endLineNumber": 2037,
+	"endColumn": 41,
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/init_config.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "E701",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/multiple-statements-on-one-line-colon",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 4,
+	"message": "Multiple statements on one line (colon)",
+	"source": "Ruff",
+	"startLineNumber": 2038,
+	"startColumn": 31,
+	"endLineNumber": 2038,
+	"endColumn": 32,
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/init_config.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "E702",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/multiple-statements-on-one-line-semicolon",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 4,
+	"message": "Multiple statements on one line (semicolon)",
+	"source": "Ruff",
+	"startLineNumber": 2038,
+	"startColumn": 49,
+	"endLineNumber": 2038,
+	"endColumn": 50,
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/init_config.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "E701",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/multiple-statements-on-one-line-colon",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 4,
+	"message": "Multiple statements on one line (colon)",
+	"source": "Ruff",
+	"startLineNumber": 2039,
+	"startColumn": 33,
+	"endLineNumber": 2039,
+	"endColumn": 34,
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/init_config.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "E702",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/multiple-statements-on-one-line-semicolon",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 4,
+	"message": "Multiple statements on one line (semicolon)",
+	"source": "Ruff",
+	"startLineNumber": 2039,
+	"startColumn": 47,
+	"endLineNumber": 2039,
+	"endColumn": 48,
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/multi_snipe.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "F821",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/undefined-name",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 8,
+	"message": "Undefined name `e`",
+	"source": "Ruff",
+	"startLineNumber": 646,
+	"startColumn": 48,
+	"endLineNumber": 646,
+	"endColumn": 49,
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/multi_snipe.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "F821",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/undefined-name",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 8,
+	"message": "Undefined name `e`",
+	"source": "Ruff",
+	"startLineNumber": 664,
+	"startColumn": 52,
+	"endLineNumber": 664,
+	"endColumn": 53,
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/multi_snipe.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "F401",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/unused-import",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 4,
+	"message": "`threading` imported but unused",
+	"source": "Ruff",
+	"startLineNumber": 5,
+	"startColumn": 8,
+	"endLineNumber": 5,
+	"endColumn": 17,
+	"tags": [
+		1
+	],
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/multi_snipe.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "F401",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/unused-import",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 4,
+	"message": "`wg1.core.multi_snipe.SnipeItem` imported but unused",
+	"source": "Ruff",
+	"startLineNumber": 15,
+	"startColumn": 52,
+	"endLineNumber": 15,
+	"endColumn": 61,
+	"tags": [
+		1
+	],
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/multi_snipe.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "F841",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/unused-variable",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 4,
+	"message": "Local variable `top_rect` is assigned to but never used",
+	"source": "Ruff",
+	"startLineNumber": 261,
+	"startColumn": 25,
+	"endLineNumber": 261,
+	"endColumn": 33,
+	"tags": [
+		1
+	],
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/multi_snipe.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "F841",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/unused-variable",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 4,
+	"message": "Local variable `detail` is assigned to but never used",
+	"source": "Ruff",
+	"startLineNumber": 645,
+	"startColumn": 13,
+	"endLineNumber": 645,
+	"endColumn": 19,
+	"tags": [
+		1
+	],
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/tasks.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "F821",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/undefined-name",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 8,
+	"message": "Undefined name `_relayout`",
+	"source": "Ruff",
+	"startLineNumber": 504,
+	"startColumn": 9,
+	"endLineNumber": 504,
+	"endColumn": 18,
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/tasks.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "F401",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/unused-import",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 4,
+	"message": "`typing.Optional` imported but unused",
+	"source": "Ruff",
+	"startLineNumber": 7,
+	"startColumn": 46,
+	"endLineNumber": 7,
+	"endColumn": 54,
+	"tags": [
+		1
+	],
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/tasks.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "E702",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/multiple-statements-on-one-line-semicolon",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 4,
+	"message": "Multiple statements on one line (semicolon)",
+	"source": "Ruff",
+	"startLineNumber": 370,
+	"startColumn": 30,
+	"endLineNumber": 370,
+	"endColumn": 31,
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/tasks.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "E702",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/multiple-statements-on-one-line-semicolon",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 4,
+	"message": "Multiple statements on one line (semicolon)",
+	"source": "Ruff",
+	"startLineNumber": 400,
+	"startColumn": 30,
+	"endLineNumber": 400,
+	"endColumn": 31,
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/tasks.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "E702",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/multiple-statements-on-one-line-semicolon",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 4,
+	"message": "Multiple statements on one line (semicolon)",
+	"source": "Ruff",
+	"startLineNumber": 404,
+	"startColumn": 30,
+	"endLineNumber": 404,
+	"endColumn": 31,
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/tasks.py",
+	"owner": "Pylance",
+	"code": {
+		"value": "reportUndefinedVariable",
+		"target": {
+			"$mid": 1,
+			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportUndefinedVariable.md",
+			"scheme": "https",
+			"authority": "github.com"
+		}
+	},
+	"severity": 4,
+	"message": "未定义“_relayout”",
+	"source": "Pylance",
+	"startLineNumber": 504,
+	"startColumn": 9,
+	"endLineNumber": 504,
+	"endColumn": 18,
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/tasks.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "E702",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/multiple-statements-on-one-line-semicolon",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 4,
+	"message": "Multiple statements on one line (semicolon)",
+	"source": "Ruff",
+	"startLineNumber": 686,
+	"startColumn": 69,
+	"endLineNumber": 686,
+	"endColumn": 70,
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/tasks.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "E702",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/multiple-statements-on-one-line-semicolon",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 4,
+	"message": "Multiple statements on one line (semicolon)",
+	"source": "Ruff",
+	"startLineNumber": 687,
+	"startColumn": 69,
+	"endLineNumber": 687,
+	"endColumn": 70,
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/tasks.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "E702",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/multiple-statements-on-one-line-semicolon",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 4,
+	"message": "Multiple statements on one line (semicolon)",
+	"source": "Ruff",
+	"startLineNumber": 721,
+	"startColumn": 72,
+	"endLineNumber": 721,
+	"endColumn": 73,
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/tasks.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "E702",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/multiple-statements-on-one-line-semicolon",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 4,
+	"message": "Multiple statements on one line (semicolon)",
+	"source": "Ruff",
+	"startLineNumber": 725,
+	"startColumn": 64,
+	"endLineNumber": 725,
+	"endColumn": 65,
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/tasks.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "E702",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/multiple-statements-on-one-line-semicolon",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 4,
+	"message": "Multiple statements on one line (semicolon)",
+	"source": "Ruff",
+	"startLineNumber": 726,
+	"startColumn": 52,
+	"endLineNumber": 726,
+	"endColumn": 53,
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/tasks.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "E702",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/multiple-statements-on-one-line-semicolon",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 4,
+	"message": "Multiple statements on one line (semicolon)",
+	"source": "Ruff",
+	"startLineNumber": 729,
+	"startColumn": 66,
+	"endLineNumber": 729,
+	"endColumn": 67,
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/tasks.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "E702",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/multiple-statements-on-one-line-semicolon",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 4,
+	"message": "Multiple statements on one line (semicolon)",
+	"source": "Ruff",
+	"startLineNumber": 731,
+	"startColumn": 69,
+	"endLineNumber": 731,
+	"endColumn": 70,
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/tasks.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "E702",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/multiple-statements-on-one-line-semicolon",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 4,
+	"message": "Multiple statements on one line (semicolon)",
+	"source": "Ruff",
+	"startLineNumber": 733,
+	"startColumn": 68,
+	"endLineNumber": 733,
+	"endColumn": 69,
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/tasks.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "E702",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/multiple-statements-on-one-line-semicolon",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 4,
+	"message": "Multiple statements on one line (semicolon)",
+	"source": "Ruff",
+	"startLineNumber": 736,
+	"startColumn": 70,
+	"endLineNumber": 736,
+	"endColumn": 71,
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/tasks.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "E702",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/multiple-statements-on-one-line-semicolon",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 4,
+	"message": "Multiple statements on one line (semicolon)",
+	"source": "Ruff",
+	"startLineNumber": 760,
+	"startColumn": 46,
+	"endLineNumber": 760,
+	"endColumn": 47,
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/tasks.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "E702",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/multiple-statements-on-one-line-semicolon",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 4,
+	"message": "Multiple statements on one line (semicolon)",
+	"source": "Ruff",
+	"startLineNumber": 772,
+	"startColumn": 46,
+	"endLineNumber": 772,
+	"endColumn": 47,
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/tasks.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "E702",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/multiple-statements-on-one-line-semicolon",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 4,
+	"message": "Multiple statements on one line (semicolon)",
+	"source": "Ruff",
+	"startLineNumber": 902,
+	"startColumn": 51,
+	"endLineNumber": 902,
+	"endColumn": 52,
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/tasks.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "E702",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/multiple-statements-on-one-line-semicolon",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 4,
+	"message": "Multiple statements on one line (semicolon)",
+	"source": "Ruff",
+	"startLineNumber": 903,
+	"startColumn": 51,
+	"endLineNumber": 903,
+	"endColumn": 52,
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/tasks.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "E702",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/multiple-statements-on-one-line-semicolon",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 4,
+	"message": "Multiple statements on one line (semicolon)",
+	"source": "Ruff",
+	"startLineNumber": 908,
+	"startColumn": 37,
+	"endLineNumber": 908,
+	"endColumn": 38,
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/tasks.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "E702",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/multiple-statements-on-one-line-semicolon",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 4,
+	"message": "Multiple statements on one line (semicolon)",
+	"source": "Ruff",
+	"startLineNumber": 926,
+	"startColumn": 36,
+	"endLineNumber": 926,
+	"endColumn": 37,
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/tasks.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "E702",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/multiple-statements-on-one-line-semicolon",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 4,
+	"message": "Multiple statements on one line (semicolon)",
+	"source": "Ruff",
+	"startLineNumber": 932,
+	"startColumn": 36,
+	"endLineNumber": 932,
+	"endColumn": 37,
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/tasks.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "E702",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/multiple-statements-on-one-line-semicolon",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 4,
+	"message": "Multiple statements on one line (semicolon)",
+	"source": "Ruff",
+	"startLineNumber": 944,
+	"startColumn": 31,
+	"endLineNumber": 944,
+	"endColumn": 32,
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/tasks.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "E702",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/multiple-statements-on-one-line-semicolon",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 4,
+	"message": "Multiple statements on one line (semicolon)",
+	"source": "Ruff",
+	"startLineNumber": 962,
+	"startColumn": 43,
+	"endLineNumber": 962,
+	"endColumn": 44,
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/ui/tabs/tasks.py",
+	"owner": "Ruff",
+	"code": {
+		"value": "E702",
+		"target": {
+			"$mid": 1,
+			"path": "/ruff/rules/multiple-statements-on-one-line-semicolon",
+			"scheme": "https",
+			"authority": "docs.astral.sh"
+		}
+	},
+	"severity": 4,
+	"message": "Multiple statements on one line (semicolon)",
+	"source": "Ruff",
+	"startLineNumber": 1069,
+	"startColumn": 26,
+	"endLineNumber": 1069,
+	"endColumn": 27,
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/services/ocr.py",
+	"owner": "Pylance",
+	"code": {
+		"value": "reportInvalidTypeForm",
+		"target": {
+			"$mid": 1,
+			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportInvalidTypeForm.md",
+			"scheme": "https",
+			"authority": "github.com"
+		}
+	},
+	"severity": 4,
+	"message": "类型表达式中不允许使用变量",
+	"source": "Pylance",
+	"startLineNumber": 39,
+	"startColumn": 37,
+	"endLineNumber": 39,
+	"endColumn": 42,
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/services/ocr.py",
+	"owner": "Pylance",
+	"code": {
+		"value": "reportInvalidTypeForm",
+		"target": {
+			"$mid": 1,
+			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportInvalidTypeForm.md",
+			"scheme": "https",
+			"authority": "github.com"
+		}
+	},
+	"severity": 4,
+	"message": "类型表达式中不允许使用变量",
+	"source": "Pylance",
+	"startLineNumber": 62,
+	"startColumn": 30,
+	"endLineNumber": 62,
+	"endColumn": 35,
+	"origin": "extHost1"
+},{
+	"resource": "/f:/Python/wg1/src/wg1/services/ocr.py",
+	"owner": "Pylance",
+	"code": {
+		"value": "reportInvalidTypeForm",
+		"target": {
+			"$mid": 1,
+			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportInvalidTypeForm.md",
+			"scheme": "https",
+			"authority": "github.com"
+		}
+	},
+	"severity": 4,
+	"message": "类型表达式中不允许使用变量",
+	"source": "Pylance",
+	"startLineNumber": 87,
+	"startColumn": 15,
+	"endLineNumber": 87,
+	"endColumn": 20,
+	"origin": "extHost1"
+}]

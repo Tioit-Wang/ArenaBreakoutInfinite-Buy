@@ -4,5 +4,6 @@
 
 from __future__ import annotations
 
-__all__: list[str] = []
+from .template_row import TemplateRow
 
+__all__ = ["TemplateRow"]

@@ -1,14 +1,157 @@
 from __future__ import annotations
 
+import time
+import os
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from collections.abc import Callable
 
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import messagebox, ttk
 
-from wg1.services.font_loader import pil_font, setup_matplotlib_chinese
+from wg1.services.font_loader import pil_font, setup_matplotlib_chinese, tk_font
 from wg1.ui.widgets.selectors import RegionSelector
+
+
+class _CardSelector:
+    """固定 165x212 卡片样式选择器，复刻历史截图蒙版效果。"""
+
+    def __init__(
+        self,
+        root: tk.Tk,
+        on_done: Callable[[tuple[int, int, int, int] | None], None],
+        *,
+        w: int = 165,
+        h: int = 212,
+        top_h: int = 20,
+        bottom_h: int = 30,
+        margin_lr: int = 30,
+        margin_tb: int = 30,
+    ) -> None:
+        self.root = root
+        self.on_done = on_done
+        self.w = int(max(1, w))
+        self.h = int(max(1, h))
+        self.top_h = int(max(0, top_h))
+        self.bottom_h = int(max(0, bottom_h))
+        self.margin_lr = int(max(0, margin_lr))
+        self.margin_tb = int(max(0, margin_tb))
+        self.top: tk.Toplevel | None = None
+        self.canvas: tk.Canvas | None = None
+        self._x = 0
+        self._y = 0
+        self.item_top: int | None = None
+        self.item_mid: int | None = None
+        self.item_bot: int | None = None
+        self.item_outline: int | None = None
+        self.item_img_rect: int | None = None
+
+    def show(self) -> None:
+        top = tk.Toplevel(self.root)
+        self.top = top
+        W = self.root.winfo_screenwidth()
+        H = self.root.winfo_screenheight()
+        top.geometry(f"{W}x{H}+0+0")
+        for attr, val in (("-alpha", 0.25), ("-topmost", True)):
+            try:
+                top.attributes(attr, val)
+            except Exception:
+                pass
+        top.configure(bg="black")
+        top.overrideredirect(True)
+        cv = tk.Canvas(top, bg="black", highlightthickness=0)
+        cv.pack(fill=tk.BOTH, expand=True)
+        self.canvas = cv
+        try:
+            font = tk_font(self.root, 12)
+        except Exception:
+            font = None
+        try:
+            text = f"移动鼠标定位，左键确认（{self.w}x{self.h}），右键/ESC取消"
+            if font is not None:
+                cv.create_text(W // 2, 30, text=text, fill="white", font=font)
+            else:
+                cv.create_text(W // 2, 30, text=text, fill="white")
+        except Exception:
+            pass
+        self.item_top = cv.create_rectangle(0, 0, 1, 1, fill="#2d7cff", outline="")
+        self.item_mid = cv.create_rectangle(0, 0, 1, 1, fill="#ffd84d", outline="")
+        self.item_bot = cv.create_rectangle(0, 0, 1, 1, fill="#2ea043", outline="")
+        try:
+            self.item_outline = cv.create_rectangle(0, 0, 1, 1, outline="#cccccc", width=0.5)
+        except Exception:
+            self.item_outline = cv.create_rectangle(0, 0, 1, 1, outline="#cccccc", width=1)
+        self.item_img_rect = cv.create_rectangle(0, 0, 1, 1, outline="#333333", dash=(4, 2))
+
+        cv.bind("<Motion>", self._on_motion)
+        cv.bind("<Button-1>", self._on_confirm)
+        cv.bind("<Button-3>", self._on_cancel)
+        cv.bind("<Escape>", self._on_cancel)
+        try:
+            cv.focus_force()
+            top.grab_set()
+        except Exception:
+            pass
+
+    def _on_motion(self, event: tk.Event) -> None:
+        self._x = int(getattr(event, "x_root", 0))
+        self._y = int(getattr(event, "y_root", 0))
+        self._redraw()
+
+    def _redraw(self) -> None:
+        if not self.canvas:
+            return
+        x1 = self._x - self.w // 2
+        y1 = self._y - self.h // 2
+        x2 = x1 + self.w
+        y2 = y1 + self.h
+        mid_top = y1 + self.top_h
+        mid_bot = y2 - self.bottom_h
+        if self.item_top is not None:
+            self.canvas.coords(self.item_top, x1, y1, x2, mid_top)
+        if self.item_mid is not None:
+            self.canvas.coords(self.item_mid, x1, mid_top, x2, mid_bot)
+        if self.item_bot is not None:
+            self.canvas.coords(self.item_bot, x1, mid_bot, x2, y2)
+        if self.item_outline is not None:
+            self.canvas.coords(self.item_outline, x1 + 1, y1 + 1, x2 - 1, y2 - 1)
+        ix1 = x1 + self.margin_lr
+        ix2 = x2 - self.margin_lr
+        iy1 = mid_top + self.margin_tb
+        iy2 = mid_bot - self.margin_tb
+        if iy2 < iy1:
+            iy2 = iy1
+        if self.item_img_rect is not None:
+            self.canvas.coords(self.item_img_rect, ix1, iy1, ix2, iy2)
+
+    def _on_confirm(self, _event: tk.Event | None) -> None:
+        if self.top is None:
+            return
+        x1 = self._x - self.w // 2
+        y1 = self._y - self.h // 2
+        x2 = x1 + self.w
+        y2 = y1 + self.h
+        try:
+            self.top.grab_release()
+        except Exception:
+            pass
+        try:
+            self.top.destroy()
+        except Exception:
+            pass
+        self.on_done((x1, y1, x2, y2))
+
+    def _on_cancel(self, _event: tk.Event | None) -> None:
+        if self.top is not None:
+            try:
+                self.top.grab_release()
+            except Exception:
+                pass
+            try:
+                self.top.destroy()
+            except Exception:
+                pass
+        self.on_done(None)
 
 
 class GoodsMarketUI(ttk.Frame):
@@ -122,6 +265,8 @@ class GoodsMarketUI(ttk.Frame):
         self._current_big_cat: str | None = None
         self._current_sub_cat: str | None = None
         self._card_width = 220  # 单卡近似宽度（含边距）
+        self._img_preview_photo: tk.PhotoImage | None = None
+        self._preview_modal_photo: tk.PhotoImage | None = None
 
         # 画廊刷新与分批构建的调度控制，降低频繁重建导致的卡顿
         self._gallery_refresh_after: str | None = None
@@ -229,7 +374,79 @@ class GoodsMarketUI(ttk.Frame):
         # Provide a small polling to wait until overlay closes
         # but keep UI responsive.
         root.wait_window(sel.top) if getattr(sel, "top", None) else None
+        if result_path:
+            try:
+                result_path = Path(result_path).resolve().relative_to(self.images_dir.parent).as_posix()
+            except Exception:
+                result_path = os.path.abspath(result_path)
         return result_path
+
+    def _bind_mousewheel(self, area: tk.Widget, target: tk.Widget | None = None) -> None:
+        """绑定滚轮事件到指定目标控件，兼容 Windows/macOS/Linux。"""
+        if target is None:
+            target = area
+
+        def _y_scroll(units: int) -> None:
+            try:
+                target.yview_scroll(int(units), "units")
+            except Exception:
+                pass
+
+        def _x_scroll(units: int) -> None:
+            try:
+                target.xview_scroll(int(units), "units")
+            except Exception:
+                pass
+
+        def _on_mousewheel(e):
+            try:
+                delta = int(e.delta)
+            except Exception:
+                delta = 0
+            if delta == 0:
+                return
+            step = -1 if delta > 0 else 1
+            _y_scroll(step)
+
+        def _on_shift_mousewheel(e):
+            try:
+                delta = int(getattr(e, "delta", 0))
+            except Exception:
+                delta = 0
+            if delta == 0:
+                return
+            step = -1 if delta > 0 else 1
+            _x_scroll(step)
+
+        def _on_linux_up(_e):
+            _y_scroll(-1)
+
+        def _on_linux_down(_e):
+            _y_scroll(1)
+
+        def _bind_all(_e=None):
+            try:
+                area.bind_all("<MouseWheel>", _on_mousewheel)
+                area.bind_all("<Shift-MouseWheel>", _on_shift_mousewheel)
+                area.bind_all("<Button-4>", _on_linux_up)
+                area.bind_all("<Button-5>", _on_linux_down)
+            except Exception:
+                pass
+
+        def _unbind_all(_e=None):
+            try:
+                area.unbind_all("<MouseWheel>")
+                area.unbind_all("<Shift-MouseWheel>")
+                area.unbind_all("<Button-4>")
+                area.unbind_all("<Button-5>")
+            except Exception:
+                pass
+
+        try:
+            area.bind("<Enter>", _bind_all)
+            area.bind("<Leave>", _unbind_all)
+        except Exception:
+            pass
 
     # ---------- UI: views ----------
     def _build_views(self) -> None:
@@ -360,7 +577,7 @@ class GoodsMarketUI(ttk.Frame):
 
     def _filtered_goods_for_gallery(self) -> list[dict]:
         q = (self.var_browse_q.get() or "").strip().lower()
-        items = list(self.goods or [])
+        items = [it for it in (self.goods or []) if isinstance(it, dict)]
         res: list[dict] = []
         for it in items:
             if self._current_big_cat and str(it.get("big_category", "")) != self._current_big_cat:
@@ -439,6 +656,9 @@ class GoodsMarketUI(ttk.Frame):
         _build(0)
 
     def _build_card(self, parent, it: dict) -> ttk.Frame:
+        if not isinstance(it, dict):
+            return ttk.Frame(parent)
+
         frm = ttk.Frame(parent, relief=tk.SOLID, borderwidth=1)
 
         # 头部：操作按钮（编辑/删除）
@@ -637,7 +857,7 @@ class GoodsMarketUI(ttk.Frame):
         btnf.pack(fill=tk.X, padx=8, pady=(0, 8))
         ttk.Button(btnf, text="关闭", command=top.destroy).pack(side=tk.RIGHT)
 
-    def _thumb_for_item(self, it: dict) -> Optional[tk.PhotoImage]:
+    def _thumb_for_item(self, it: dict) -> tk.PhotoImage | None:
         iid = str(it.get("id", ""))
         path = str(it.get("image_path", "")) or self._ensure_default_img()
         if not iid:
@@ -680,7 +900,6 @@ class GoodsMarketUI(ttk.Frame):
                 return
             # 卡片整体坐标（根据卡片样式 165x212 推导中间图片区域）
             x1, y1, x2, y2 = bounds
-            card_w, card_h = max(1, int(x2 - x1)), max(1, int(y2 - y1))
             # 固定样式：若用户改变了外框大小，仍按 165x212 的比例与边距推导中间区域
             CARD_W, CARD_H = 165, 212
             TOP_H, BTM_H = 20, 30
@@ -792,7 +1011,7 @@ class GoodsMarketUI(ttk.Frame):
         return hi, lo, avg
 
     # ---------- 管理模态框 ----------
-    def _open_item_modal(self, item: Optional[dict]) -> None:
+    def _open_item_modal(self, item: dict | None) -> None:
         top = tk.Toplevel(self)
         top.title("物品管理")
         top.geometry("560x420")
@@ -836,14 +1055,8 @@ class GoodsMarketUI(ttk.Frame):
                 tkimg = ImageTk.PhotoImage(im)
             except Exception:
                 return
-            cnv.image = tkimg
+            self._preview_modal_photo = tkimg
             cnv.create_image(0, 0, anchor=tk.NW, image=tkimg)
-
-        def _choose_file():
-            p = filedialog.askopenfilename(title="选择图片", filetypes=[["Images", "*.png;*.jpg;*.jpeg;*.bmp"]])
-            if p:
-                var_img.set(p)
-                _update_preview()
 
         def _capture_to_cat():
             # 卡片样式截取（165x212；上 20 / 下 30；中间图片区域左右 30、上下 20）
@@ -906,10 +1119,13 @@ class GoodsMarketUI(ttk.Frame):
                 pass
             root.wait_window(sel.top) if getattr(sel, "top", None) else None
             if result_path:
-                var_img.set(result_path)
+                try:
+                    rel = Path(result_path).resolve().relative_to(self.images_dir.parent)
+                    var_img.set(rel.as_posix())
+                except Exception:
+                    var_img.set(result_path)
                 _update_preview()
 
-        ttk.Button(row0, text="选择图片", command=_choose_file).pack(side=tk.LEFT)
         ttk.Button(row0, text="截图", command=_capture_to_cat).pack(side=tk.LEFT, padx=6)
 
         ttk.Label(frm, text="名称").grid(row=1, column=0, sticky="e", padx=4, pady=6)
@@ -1237,7 +1453,7 @@ class GoodsMarketUI(ttk.Frame):
             tkimg = ImageTk.PhotoImage(im)
         except Exception:
             return
-        self.img_preview_canvas.image = tkimg
+        self._img_preview_photo = tkimg
         self.img_preview_canvas.create_image(0, 0, anchor=tk.NW, image=tkimg)
 
     def _on_capture_img(self) -> None:
@@ -1261,3 +1477,19 @@ class GoodsMarketUI(ttk.Frame):
         except Exception:
             pass
         cv = tk.Canvas(top, bg="#222", highlightthickness=0)
+        cv.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        try:
+            from PIL import Image, ImageTk  # type: ignore
+
+            img = Image.open(p)
+            img.thumbnail((520, 380))
+            tkimg = ImageTk.PhotoImage(img)
+        except Exception as e:
+            top.destroy()
+            messagebox.showerror("预览", f"失败: {e}")
+            return
+        self._preview_modal_photo = tkimg
+        img_w, img_h = tkimg.width(), tkimg.height()
+        cv.configure(scrollregion=(0, 0, img_w, img_h))
+        cv.create_image(0, 0, anchor=tk.NW, image=tkimg)
+        ttk.Button(top, text="关闭", command=top.destroy).pack(pady=(0, 8))

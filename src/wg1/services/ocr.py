@@ -10,7 +10,7 @@ import os
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
-ImageLike = Union["Image.Image", "np.ndarray", str]
+ImageLike = Union["Image.Image", "numpy.ndarray", str]
 
 try:
     from PIL import Image  # type: ignore
@@ -187,4 +187,3 @@ def recognize_numbers(
 
 
 __all__ = ["OcrBox", "NumberBox", "recognize_numbers", "recognize_text"]
-

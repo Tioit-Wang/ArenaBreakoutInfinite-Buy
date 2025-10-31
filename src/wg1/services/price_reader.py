@@ -119,9 +119,9 @@ def read_price_and_stock_from_roi(
     return price, qty
 
 
-def preprocess_variants_for_digits(image) -> List["np.ndarray"]:
+def preprocess_variants_for_digits(image) -> List["numpy.ndarray"]:
     """生成若干二值化候选图，辅助手动 OCR 调试。"""
-    variants: List["np.ndarray"] = []
+    variants: List["numpy.ndarray"] = []
     try:
         import cv2  # type: ignore
         import numpy as np  # type: ignore
