@@ -9,3 +9,10 @@ wheels/
 # Virtual environments
 .venv
 .claude/
+
+# Runtime data (generated at startup)
+/data/
+/config.json
+/buy_tasks.json
+/snipe_tasks.json
+/images/

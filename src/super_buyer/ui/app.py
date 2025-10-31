@@ -3,6 +3,7 @@ import time
 import tkinter as tk
 import uuid
 import sys
+import shutil
 from pathlib import Path
 from tkinter import messagebox, ttk
 from typing import Any, Dict, List
@@ -36,6 +37,17 @@ class App(tk.Tk):
 
         # Config paths：数据固定存放于“执行目录”下的 data/
         self.paths = ConfigPaths.from_root(self._resolve_data_root())
+        # 首启：播种包内资源到 data/
+        try:
+            self._seed_images_to_data()
+        except Exception:
+            pass
+        # 首启：确保默认 config.json 存在（从包内 defaults 复制）
+        try:
+            self._ensure_default_config_file(self.paths.config_file)
+        except Exception:
+            pass
+        # 兜底：若复制失败则写入内置 DEFAULT_CONFIG
         ensure_default_config(self.paths)
         self.config_path = self.paths.config_file
         self.images_dir = self.paths.images_dir
@@ -219,20 +231,74 @@ class App(tk.Tk):
                 return
         except Exception:
             pass
-        # 开发态回退：若工作目录存在根 goods.json，则复制之
-        try:
-            cwd_goods = Path.cwd() / "goods.json"
-            if cwd_goods.exists():
-                path.write_bytes(cwd_goods.read_bytes())
-                return
-        except Exception:
-            pass
         # 回退：写入空数组
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             with path.open("w", encoding="utf-8") as f:
                 json.dump([], f, ensure_ascii=False, indent=4)
         except Exception:
+            pass
+
+    def _ensure_default_config_file(self, path: Path) -> None:
+        """确保 data/config.json 存在；若缺失则从包内 defaults 复制。"""
+        path = Path(path)
+        if path.exists():
+            return
+        try:
+            with pkg_resources.as_file(
+                pkg_resources.files("super_buyer.resources.defaults") / "config.json"
+            ) as src:
+                try:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                except Exception:
+                    pass
+                path.write_bytes(src.read_bytes())
+        except Exception:
+            # 忽略，交由 ensure_default_config 兜底写入
+            pass
+
+    def _seed_images_to_data(self) -> None:
+        """首启播种：将包内 images 复制到 data/images（仅一次）。"""
+        seed_flag = self.paths.images_dir / ".seeded"
+        if seed_flag.exists():
+            return
+        try:
+            self.paths.images_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        try:
+            with pkg_resources.as_file(
+                pkg_resources.files("super_buyer.resources.images")
+            ) as src_root:
+                src_path = Path(src_root)
+                for p in src_path.rglob("*"):
+                    rel = p.relative_to(src_path)
+                    dst = self.paths.images_dir / rel
+                    if p.is_dir():
+                        try:
+                            dst.mkdir(parents=True, exist_ok=True)
+                        except Exception:
+                            pass
+                    else:
+                        try:
+                            dst.parent.mkdir(parents=True, exist_ok=True)
+                        except Exception:
+                            pass
+                        try:
+                            shutil.copy2(p, dst)
+                        except Exception:
+                            # 尝试二进制方式复制
+                            try:
+                                dst.write_bytes(p.read_bytes())
+                            except Exception:
+                                pass
+            # 标记已播种
+            try:
+                seed_flag.write_text("seeded", encoding="utf-8")
+            except Exception:
+                pass
+        except Exception:
+            # 允许跳过，后续若模板缺失，界面会提示
             pass
 
     def _images_path(self, *parts: str, ensure_parent: bool = False) -> str:

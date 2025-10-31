@@ -98,7 +98,43 @@ def load_config(
             save_config(cfg, path=cfg_path)
         except Exception:
             pass
+    # 仅内存态解析相对路径为绝对路径（相对于配置文件所在目录）
+    try:
+        _resolve_relative_paths_in_memory(cfg, base_dir=cfg_path.parent)
+    except Exception:
+        pass
     return cfg
+
+
+def _resolve_relative_paths_in_memory(cfg: Dict[str, Any], *, base_dir: str | Path) -> None:
+    """将配置中相对路径解析为绝对路径（仅内存态，不落盘）。
+
+    - 解析 templates.*.path 与 price_roi.{top_template,bottom_template}
+    - 相对路径以配置文件夹为基准；已为绝对路径的保持不变。
+    """
+    base = Path(base_dir).resolve()
+    # templates
+    tmpls = cfg.get("templates")
+    if isinstance(tmpls, dict):
+        for _k, v in tmpls.items():
+            if not isinstance(v, dict):
+                continue
+            p = v.get("path")
+            if not isinstance(p, str) or not p:
+                continue
+            pp = Path(p)
+            if not pp.is_absolute():
+                v["path"] = str((base / pp).resolve())
+    # price_roi
+    roi = cfg.get("price_roi")
+    if isinstance(roi, dict):
+        for key in ("top_template", "bottom_template"):
+            p = roi.get(key)
+            if not isinstance(p, str) or not p:
+                continue
+            pp = Path(p)
+            if not pp.is_absolute():
+                roi[key] = str((base / pp).resolve())
 
 
 def save_config(

@@ -1,0 +1,62 @@
+{
+  "game": {
+    "exe_path": "",
+    "launch_args": "",
+    "startup_timeout_sec": 180
+  },
+  "umi_ocr": {
+    "base_url": "http://127.0.0.1:1224",
+    "timeout_sec": 2.5,
+    "options": {
+      "data.format": "text"
+    }
+  },
+  "ocr_allowlist": "0123456789KkMm",
+  "paths": {
+    "output_dir": "output"
+  },
+  "hotkeys": {
+    "toggle": "<Control-Alt-t>",
+    "stop": "<Control-Alt-t>"
+  },
+  "templates": {
+    "btn_launch": {"path": "images/btn_launch.png", "confidence": 0.85},
+    "home_indicator": {"path": "images/home_indicator.png", "confidence": 0.85},
+    "market_indicator": {"path": "images/market_indicator.png", "confidence": 0.85},
+    "btn_market": {"path": "images/btn_market.png", "confidence": 0.85},
+    "btn_home": {"path": "images/btn_home.png", "confidence": 0.85},
+    "input_search": {"path": "images/input_search.png", "confidence": 0.85},
+    "btn_search": {"path": "images/btn_search.png", "confidence": 0.85},
+    "btn_buy": {"path": "images/btn_buy.png", "confidence": 0.88},
+    "buy_ok": {"path": "images/buy_ok.png", "confidence": 0.9},
+    "buy_fail": {"path": "images/buy_fail.png", "confidence": 0.9},
+    "btn_close": {"path": "images/btn_close.png", "confidence": 0.85},
+    "btn_refresh": {"path": "images/btn_refresh.png", "confidence": 0.85},
+    "btn_back": {"path": "images/btn_back.png", "confidence": 0.85},
+    "btn_max": {"path": "images/btn_max.png", "confidence": 0.85},
+    "qty_minus": {"path": "images/qty_minus.png", "confidence": 0.85},
+    "qty_plus": {"path": "images/qty_plus.png", "confidence": 0.85}
+  },
+  "purchase": {
+    "item_name": "",
+    "price_threshold": 0,
+    "target_total": 0,
+    "max_per_order": 120,
+    "default_buy_qty": 1
+  },
+  "purchase_items": [],
+  "price_roi": {
+    "top_template": "images/buy_data_top.png",
+    "top_threshold": 0.55,
+    "bottom_template": "images/buy_data_btm.png",
+    "bottom_threshold": 0.55,
+    "top_offset": 0,
+    "bottom_offset": 0,
+    "lr_pad": 0
+  },
+  "avg_price_area": {
+    "distance_from_buy_top": 5,
+    "height": 45,
+    "scale": 1.0
+  }
+}
