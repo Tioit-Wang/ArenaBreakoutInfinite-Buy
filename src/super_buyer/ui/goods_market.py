@@ -277,6 +277,29 @@ class GoodsMarketUI(ttk.Frame):
         self._load_goods()
         self._build_views()
 
+    # ---------- Path helpers ----------
+    def _resolve_image_path(self, p: str) -> str:
+        """将 goods.image_path 等相对路径解析为绝对路径。
+
+        - 相对路径以 `data/` 根目录为基准（即 `self.images_dir.parent`）。
+        - 同时兼容 Windows 反斜杠分隔的相对路径（统一替换为 `/`）。
+        """
+        p = (p or "").strip()
+        if not p:
+            return ""
+        try:
+            pp = Path(p)
+            if pp.is_absolute():
+                return str(pp)
+        except Exception:
+            pass
+        try:
+            norm = p.replace("\\", "/")
+        except Exception:
+            norm = p
+        base = self.images_dir.parent  # data/
+        return str((base / norm).resolve())
+
     # ---------- Storage ----------
     def _load_goods(self) -> None:
         try:
@@ -666,8 +689,10 @@ class GoodsMarketUI(ttk.Frame):
         head.pack(side=tk.TOP, fill=tk.X)
         # 右上：快速截图（仅默认图时显示）+ 编辑/删除
         try:
-            img_path = str(it.get("image_path", "")).strip()
-            is_default_img = (not img_path) or (img_path == self._ensure_default_img())
+            img_path_raw = str(it.get("image_path", "")).strip()
+            # 视为“默认图”的条件：未配置 或 解析后等于默认占位图
+            img_abs = self._resolve_image_path(img_path_raw) if img_path_raw else ""
+            is_default_img = (not img_path_raw) or (img_abs == self._ensure_default_img())
         except Exception:
             is_default_img = False
         if is_default_img:
@@ -859,7 +884,8 @@ class GoodsMarketUI(ttk.Frame):
 
     def _thumb_for_item(self, it: dict) -> tk.PhotoImage | None:
         iid = str(it.get("id", ""))
-        path = str(it.get("image_path", "")) or self._ensure_default_img()
+        path_raw = str(it.get("image_path", "")) or self._ensure_default_img()
+        path = self._resolve_image_path(path_raw)
         if not iid:
             return None
         if iid in self._thumb_cache:
@@ -875,7 +901,13 @@ class GoodsMarketUI(ttk.Frame):
             im.thumbnail((180, 130))
             tkimg = ImageTk.PhotoImage(im)
         except Exception:
-            return None
+            # 回退默认图（确保有缩略图可显示）
+            try:
+                im = Image.open(self._ensure_default_img())
+                im.thumbnail((180, 130))
+                tkimg = ImageTk.PhotoImage(im)
+            except Exception:
+                return None
         self._thumb_cache[iid] = tkimg
         self._img_cache_by_path[path] = tkimg
         return tkimg
@@ -1044,9 +1076,11 @@ class GoodsMarketUI(ttk.Frame):
 
         def _update_preview():
             cnv.delete("all")
-            p = (var_img.get() or "").strip()
+            p_raw = (var_img.get() or "").strip()
+            p = self._resolve_image_path(p_raw)
             if not p or not os.path.exists(p):
-                return
+                # 统一回退默认占位图
+                p = self._ensure_default_img()
             try:
                 from PIL import Image, ImageTk  # type: ignore
 
@@ -1218,7 +1252,7 @@ class GoodsMarketUI(ttk.Frame):
             return
         if not messagebox.askokcancel("删除", f"确认删除 [{it.get('name','')}]？"):
             return
-        img_path = str(it.get("image_path", ""))
+        img_path = self._resolve_image_path(str(it.get("image_path", "")))
         self.goods = [x for x in self.goods if str(x.get("id")) != iid]
         self._save_goods()
         self._refresh_gallery()
@@ -1419,7 +1453,7 @@ class GoodsMarketUI(ttk.Frame):
             return
         if not messagebox.askokcancel("删除", f"确认删除 [{it.get('name','')}]？"):
             return
-        img_path = str(it.get("image_path", ""))
+        img_path = self._resolve_image_path(str(it.get("image_path", "")))
         self.goods = [x for x in self.goods if str(x.get("id")) != iid]
         self._save_goods()
         self._refresh_list()
@@ -1442,9 +1476,10 @@ class GoodsMarketUI(ttk.Frame):
 
     def _update_img_preview(self) -> None:
         self.img_preview_canvas.delete("all")
-        path = (self.var_img.get() or "").strip()
+        path = self._resolve_image_path((self.var_img.get() or "").strip())
         if not path or not os.path.exists(path):
-            return
+            # 统一回退默认占位图
+            path = self._ensure_default_img()
         try:
             from PIL import Image, ImageTk  # type: ignore
 
@@ -1464,10 +1499,10 @@ class GoodsMarketUI(ttk.Frame):
 
     # ---------- Local image preview ----------
     def _preview_image(self, path: str, title: str = "预览") -> None:
-        p = (path or "").strip()
+        p = self._resolve_image_path((path or "").strip())
         if not p or not os.path.exists(p):
-            messagebox.showwarning("预览", "图片不存在或路径为空。")
-            return
+            # 统一回退默认占位图，而不是直接报错
+            p = self._ensure_default_img()
         top = tk.Toplevel(self)
         top.title(title)
         top.geometry("560x420")

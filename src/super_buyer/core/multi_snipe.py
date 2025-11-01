@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
+from pathlib import Path
 
 import base64
 import io
@@ -118,6 +119,41 @@ class MultiSnipeRunner:
         self._pause = threading.Event()
         self._pause.clear()
 
+        # 解析相对路径为 data 根（由 paths.output_dir 的上级）下的绝对路径
+        def _resolve_rel(p: str) -> str:
+            p = (p or "").strip()
+            if not p:
+                return ""
+            try:
+                pp = os.path.abspath(p) if os.path.isabs(p) else None
+            except Exception:
+                pp = None
+            if pp:
+                return pp
+            try:
+                _paths = (self.cfg.get("paths") or {}) if isinstance(self.cfg.get("paths"), dict) else {}
+            except Exception:
+                _paths = {}
+            out_root = str(_paths.get("output_dir", "output") or "output")
+            base = Path(out_root).resolve().parent  # data/
+            try:
+                norm = p.replace("\\", "/")
+            except Exception:
+                norm = p
+            return str((base / norm).resolve())
+
+        for i, it in enumerate(self.items):
+            try:
+                if getattr(it, "image_path", None):
+                    it.image_path = _resolve_rel(str(it.image_path))
+            except Exception:
+                pass
+            try:
+                if getattr(it, "template", None):
+                    it.template = _resolve_rel(str(it.template))
+            except Exception:
+                pass
+
         # 坐标缓存：item.id -> card_rect (x,y,w,h)
         self._card_cache: Dict[str, Tuple[int, int, int, int]] = {}
         # 中间模板框缓存：item.id -> mid_rect (x,y,w,h)，用于更稳的点击进入详情
@@ -190,6 +226,8 @@ class MultiSnipeRunner:
         # - post_click_wait_sec: 点击标签后的额外等待（非 debug，默认 0.2）
         # - roi_pre_capture_wait_sec: 截 ROI 前的短等待（非 debug，默认 0.05）
         # - ocr_max_workers: OCR 并发度（默认 4，原为 6 以降低 CPU 压力）
+        # - buy_result_timeout_sec: 等待购买结果的时长（默认 0.8s）
+        # - relocate_after_fail: 同一物品连续失败 N 次后清空缓存强制重定位（默认 3）
         tuning = (self.cfg.get("multi_snipe_tuning", {}) or {})
         try:
             self._probe_step_sec = float(tuning.get("probe_step_sec", 0.06) or 0.06)
@@ -207,6 +245,17 @@ class MultiSnipeRunner:
             self._ocr_max_workers = int(tuning.get("ocr_max_workers", 4) or 4)
         except Exception:
             self._ocr_max_workers = 4
+        try:
+            self._buy_result_timeout_sec = float(tuning.get("buy_result_timeout_sec", 0.8) or 0.8)
+        except Exception:
+            self._buy_result_timeout_sec = 0.8
+        try:
+            self._relocate_after_fail = int(tuning.get("relocate_after_fail", 3) or 3)
+        except Exception:
+            self._relocate_after_fail = 3
+
+        # 连续失败计数器：item.id -> count
+        self._fail_counts: Dict[str, int] = {}
 
     # ---------- Utils ----------
     def _log(self, s: str) -> None:
@@ -225,8 +274,73 @@ class MultiSnipeRunner:
         self._log(f"【ERROR】{s}")
 
     def _tpl(self, key: str) -> Tuple[str, float]:
+        """读取模板配置并解析相对路径为可用的绝对路径。
+
+        优先级：
+        1) 已是绝对路径（POSIX）→ 直接返回；
+        2) Windows 盘符形式（如 C:\path）→ 原样返回；
+        3) 相对路径：按以下 base 依次拼接并选择第一个存在的路径：
+           - data 根（paths.output_dir 的上级）
+           - cwd/data
+           - cwd
+        若都不存在，返回 data 根拼接的路径（用于后续 exists 判断与日志）。
+        """
         t = (self.cfg.get("templates", {}) or {}).get(key) or {}
-        return str(t.get("path", "")), float(t.get("confidence", 0.85) or 0.85)
+        raw = str(t.get("path", "")).strip()
+        conf = float(t.get("confidence", 0.85) or 0.85)
+        if not raw:
+            return "", conf
+        # 已是 POSIX 绝对路径
+        try:
+            if os.path.isabs(raw):
+                return os.path.abspath(raw), conf
+        except Exception:
+            pass
+        # Windows 盘符（在 POSIX 下 os.path.isabs 可能为 False）
+        try:
+            import re as _re
+            if _re.match(r"^[a-zA-Z]:[\\/]", raw):
+                return raw, conf
+        except Exception:
+            pass
+        # 相对路径：统一分隔符
+        try:
+            norm = raw.replace("\\", "/")
+        except Exception:
+            norm = raw
+        # base1: data 根（由 output_dir 推导）
+        try:
+            _paths = (self.cfg.get("paths") or {}) if isinstance(self.cfg.get("paths"), dict) else {}
+        except Exception:
+            _paths = {}
+        out_root = str(_paths.get("output_dir", "output") or "output")
+        bases = []
+        try:
+            bases.append(Path(out_root).resolve().parent)
+        except Exception:
+            pass
+        # base2: cwd/data
+        try:
+            bases.append((Path.cwd() / "data").resolve())
+        except Exception:
+            pass
+        # base3: cwd
+        try:
+            bases.append(Path.cwd().resolve())
+        except Exception:
+            pass
+        for b in bases:
+            try:
+                cand = (b / norm).resolve()
+                if cand.exists():
+                    return str(cand), conf
+            except Exception:
+                continue
+        # 回退：返回 data 根拼接的路径（即便不存在也保留可读路径）
+        try:
+            return str((bases[0] / norm).resolve()), conf if bases else (norm, conf)
+        except Exception:
+            return norm, conf
 
     # ---------- Debug helpers ----------
     def _debug_active(self) -> bool:
@@ -336,19 +450,54 @@ class MultiSnipeRunner:
                 pass
             # 使用中文字体绘制标题
             draw_text(draw, (cx - tw // 2, top), t, fill=(255, 255, 255, 255), size=16)
-        # 在左上角贴上模板图片缩略图
+        # 将模板原图贴在“目标ROI”旁边（右侧优先，不够则左侧）
         if template_path and os.path.exists(template_path):
             try:
-                tpl = Image.open(template_path).convert("RGBA")
-                maxw = 240
-                ratio = min(1.0, maxw / max(1, tpl.width))
-                tpl = tpl.resize((max(1, int(tpl.width * ratio)), max(1, int(tpl.height * ratio))))
-                # 放在 16, 60 处
-                x_off, y_off = 16, 60
-                # 边框底板
-                draw.rectangle([x_off - 6, y_off - 24, x_off + tpl.width + 6, y_off + tpl.height + 6], fill=(0, 0, 0, 180))
-                draw_text(draw, (x_off, y_off - 18), "模板预览", fill=(255, 255, 255, 255), size=14)
-                img.alpha_composite(tpl, dest=(x_off, y_off))
+                # 选择目标 ROI：优先 label 含“模板”，否则第一个
+                target_rect = None
+                for ov in overlays:
+                    lb = str(ov.get("label") or "")
+                    if "模板" in lb:
+                        target_rect = ov.get("rect")
+                        break
+                if target_rect is None and overlays:
+                    target_rect = overlays[0].get("rect")
+                if target_rect:
+                    rx1, ry1, rx2, ry2 = self._to_xyxy(target_rect)
+                    tpl = Image.open(template_path).convert("RGBA")
+                    maxw = 200
+                    ratio = min(1.0, maxw / max(1, tpl.width))
+                    tw, th = max(1, int(tpl.width * ratio)), max(1, int(tpl.height * ratio))
+                    try:
+                        tpl = tpl.resize((tw, th))
+                    except Exception:
+                        pass
+                    # 计算相邻位置：右侧优先
+                    px = rx2 + 10
+                    py = ry1
+                    if px + tw > W - 8:
+                        px = rx1 - 10 - tw
+                    if px < 8:
+                        px = max(8, min(W - tw - 8, rx1))
+                    py = max(8, min(H - th - 8, py))
+                    # 背景与标题
+                    try:
+                        draw.rectangle([px - 6, py - 24, px + tw + 6, py + th + 6], fill=(0, 0, 0, 180))
+                    except Exception:
+                        pass
+                    draw_text(draw, (px, py - 18), "模板原图", fill=(255, 255, 255, 255), size=14)
+                    img.alpha_composite(tpl, dest=(px, py))
+                else:
+                    # 回退：仍贴左上角
+                    tpl = Image.open(template_path).convert("RGBA")
+                    maxw = 200
+                    ratio = min(1.0, maxw / max(1, tpl.width))
+                    tw, th = max(1, int(tpl.width * ratio)), max(1, int(tpl.height * ratio))
+                    tpl = tpl.resize((tw, th))
+                    x_off, y_off = 16, 60
+                    draw.rectangle([x_off - 6, y_off - 24, x_off + tw + 6, y_off + th + 6], fill=(0, 0, 0, 180))
+                    draw_text(draw, (x_off, y_off - 18), "模板原图", fill=(255, 255, 255, 255), size=14)
+                    img.alpha_composite(tpl, dest=(x_off, y_off))
             except Exception:
                 pass
         return img.convert("RGB")
@@ -453,6 +602,11 @@ class MultiSnipeRunner:
                         cv.delete("all")
                     except Exception:
                         pass
+                # 清空上一轮图片引用以避免泄漏
+                try:
+                    self._ov_img_refs = []
+                except Exception:
+                    self._ov_img_refs = []
 
                 # 绘制标题（优先使用中文字体）
                 try:
@@ -507,6 +661,62 @@ class MultiSnipeRunner:
                         except Exception:
                             pass
 
+                # 在“目标ROI”旁展示模板原图（若提供了 template_path）
+                if template_path and os.path.exists(template_path):
+                    try:
+                        # 选择目标 ROI：优先 label 含“模板”，否则第一个
+                        target_rect = None
+                        for ov in overlays:
+                            lb = str(ov.get("label") or "")
+                            if "模板" in lb:
+                                target_rect = ov.get("rect")
+                                break
+                        if target_rect is None and overlays:
+                            target_rect = overlays[0].get("rect")
+                        if target_rect:
+                            rx1, ry1, rx2, ry2 = self._to_xyxy(target_rect)
+                            # 读取与缩放
+                            if Image is not None and ImageTk is not None:
+                                tpl = Image.open(template_path).convert("RGB")
+                                maxw = 200
+                                ratio = min(1.0, maxw / max(1, tpl.width))
+                                tw, th = max(1, int(tpl.width * ratio)), max(1, int(tpl.height * ratio))
+                                try:
+                                    tpl = tpl.resize((tw, th))
+                                except Exception:
+                                    pass
+                                # 计算位置：右侧优先，不够则左侧
+                                px = rx2 + 10
+                                py = ry1
+                                if px + tw > W - 8:
+                                    px = rx1 - 10 - tw
+                                if px < 8:
+                                    px = max(8, min(W - tw - 8, rx1))
+                                py = max(8, min(H - th - 8, py))
+                                # 背景板与标题
+                                try:
+                                    cv.create_rectangle(px - 6, py - 24, px + tw + 6, py + th + 6, fill="#000000", outline="")
+                                    try:
+                                        f = tk_font(root, 11)
+                                    except Exception:
+                                        f = None
+                                    title = "模板原图"
+                                    if f is not None:
+                                        cv.create_text(px, py - 12, text=title, fill="#ffffff", anchor="w", font=f)
+                                    else:
+                                        cv.create_text(px, py - 12, text=title, fill="#ffffff", anchor="w")
+                                except Exception:
+                                    pass
+                                # 贴图
+                                try:
+                                    ph = ImageTk.PhotoImage(tpl)
+                                    self._ov_img_refs.append(ph)  # 避免被回收
+                                    cv.create_image(px, py, image=ph, anchor="nw")
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
+
                 # 可选：保存真实屏幕截图（含叠加）
                 if bool(getattr(self, "_debug_save_overlay_images", False)):
                     def _capture_and_save():
@@ -549,47 +759,87 @@ class MultiSnipeRunner:
         if not rp_path or not os.path.exists(rp_path) or not fav_path or not os.path.exists(fav_path):
             # 刷新失败归为 Info：提示用户关键缺失
             self._log_info("[刷新] 模板缺失：请在‘多商品抢购模式’内配置‘最近购买’与‘我的收藏’模板。")
+            # 追加调试信息：输出解析后的路径，便于定位路径解析问题
+            try:
+                self._log_debug(f"[刷新] 路径检查 rp='{rp_path}' exists={os.path.exists(rp_path) if rp_path else False} | fav='{fav_path}' exists={os.path.exists(fav_path) if fav_path else False}")
+            except Exception:
+                pass
             return False
         self._log_debug(f"[刷新] 开始：最近购买→我的收藏 rp_conf={rp_conf:.2f} fav_conf={fav_conf:.2f}")
-        # 第一步：点击最近购买（使其进入选中态）
+        def _do_once() -> bool:
+            # 第一步：点击最近购买（使其进入选中态）
+            try:
+                box = self.screen._pg.locateOnScreen(rp_path, confidence=rp_conf)
+                if box is not None:
+                    rect = (int(box.left), int(box.top), int(box.width), int(box.height))
+                    self.screen.click_center(rect)
+                    self._log_debug(f"[刷新] 点击最近购买 rect={rect}")
+                    # Debug 可视化：最近购买模板与位置
+                    self._debug_show_overlay([
+                        {"rect": rect, "label": "最近购买", "fill": (45, 124, 255, 90), "outline": (45, 124, 255)},
+                    ], stage="刷新：最近购买", template_path=rp_path, save_name="overlay_refresh_rp.png")
+                    time.sleep(0.05)
+                    self._debug_pause("after_click_rp")
+            except Exception:
+                pass
+            # 第二步：点击我的收藏（此时应为未选中态，可匹配）
+            try:
+                box = self.screen._pg.locateOnScreen(fav_path, confidence=fav_conf)
+                if box is not None:
+                    rect = (int(box.left), int(box.top), int(box.width), int(box.height))
+                    self.screen.click_center(rect)
+                    self._log_debug(f"[刷新] 点击我的收藏 rect={rect}")
+                    # Debug 可视化：我的收藏模板与位置
+                    self._debug_show_overlay([
+                        {"rect": rect, "label": "我的收藏", "fill": (46, 160, 67, 90), "outline": (46, 160, 67)},
+                    ], stage="刷新：我的收藏", template_path=fav_path, save_name="overlay_refresh_fav.png")
+                    time.sleep(0.05)
+                    # 计算收藏网格区域（限定商品模板搜索范围）
+                    try:
+                        sw, sh = self.screen._pg.size()
+                    except Exception:
+                        try:
+                            import pyautogui as _pg  # type: ignore
+                            _sz = _pg.size()
+                            sw, sh = int(_sz[0]), int(_sz[1])
+                        except Exception:
+                            sw, sh = 0, 0
+                    try:
+                        left = max(8, int(self._grid_left_margin))
+                        right = max(left + 1, sw - max(8, int(self._grid_right_margin)))
+                        top = int(rect[1] + rect[3] + max(0, int(self._grid_top_margin)))
+                        top = max(8, min(top, sh - 8))
+                        bottom = max(top + 1, sh - max(8, int(self._grid_bottom_margin)))
+                        w = max(1, right - left)
+                        h = max(1, bottom - top)
+                        region = (left, top, w, h)
+                        # 粗校验尺寸
+                        if sw > 0 and sh > 0 and (w >= 40 and h >= 40):
+                            self._grid_region = region
+                            self._log_debug(f"[区域] 收藏网格区域={region} 屏幕=({sw},{sh})")
+                    except Exception:
+                        pass
+                    # 进入收藏后，等待内容就绪
+                    try:
+                        got = self._wait_favorites_content_ready(probe_step=float(getattr(self, "_probe_step_sec", 0.06)))
+                        self._log_debug(f"[刷新] 收藏内容就绪={got}")
+                    except Exception:
+                        pass
+                    self._log_info("[刷新] 已执行：最近购买 -> 我的收藏")
+                    return True
+            except Exception:
+                pass
+            return False
+
+        if _do_once():
+            return True
+        # 兜底：短暂停后重试一次
         try:
-            box = self.screen._pg.locateOnScreen(rp_path, confidence=rp_conf)
-            if box is not None:
-                rect = (int(box.left), int(box.top), int(box.width), int(box.height))
-                self.screen.click_center(rect)
-                self._log_debug(f"[刷新] 点击最近购买 rect={rect}")
-                # Debug 可视化：最近购买模板与位置
-                self._debug_show_overlay([
-                    {"rect": rect, "label": "最近购买", "fill": (45, 124, 255, 90), "outline": (45, 124, 255)},
-                ], stage="刷新：最近购买", template_path=rp_path, save_name="overlay_refresh_rp.png")
-                time.sleep(0.05)
-                self._debug_pause("after_click_rp")
+            time.sleep(0.3)
         except Exception:
             pass
-        # 第二步：点击我的收藏（此时应为未选中态，可匹配）
-        try:
-            box = self.screen._pg.locateOnScreen(fav_path, confidence=fav_conf)
-            if box is not None:
-                rect = (int(box.left), int(box.top), int(box.width), int(box.height))
-                self.screen.click_center(rect)
-                self._log_debug(f"[刷新] 点击我的收藏 rect={rect}")
-                # Debug 可视化：我的收藏模板与位置
-                self._debug_show_overlay([
-                    {"rect": rect, "label": "我的收藏", "fill": (46, 160, 67, 90), "outline": (46, 160, 67)},
-                ], stage="刷新：我的收藏", template_path=fav_path, save_name="overlay_refresh_fav.png")
-                time.sleep(0.05)
-                # 进入收藏后，随机挑选一个任务的中间模板等待匹配成功，避免内容尚未加载完就截 ROI
-                try:
-                    got = self._wait_favorites_content_ready(probe_step=float(getattr(self, "_probe_step_sec", 0.06)))
-                    self._log_debug(f"[刷新] 收藏内容就绪={got}")
-                except Exception:
-                    pass
-                # 刷新成功使用 Info 简报
-                self._log_info("[刷新] 已执行：最近购买 -> 我的收藏")
-                return True
-        except Exception:
-            pass
-        # 刷新失败（未匹配到收藏标签）同样使用 Info 简报
+        if _do_once():
+            return True
         self._log_info("[刷新] 未能完成：请检查标签模板是否清晰、阈值是否合适。")
         return False
 
@@ -644,7 +894,10 @@ class MultiSnipeRunner:
             except Exception:
                 box = None
             if box is not None:
-                rect = (int(box.left), int(box.top), int(box.width), int(box.height))
+                try:
+                    rect = (int(box[0]), int(box[1]), int(box[2]), int(box[3]))
+                except Exception:
+                    rect = (int(getattr(box, 'left', 0)), int(getattr(box, 'top', 0)), int(getattr(box, 'width', 0)), int(getattr(box, 'height', 0)))
                 self._log_debug(f"[就绪等待] 命中 {it.name} rect={rect}")
                 # 可视化：命中的那个中间模板
                 try:
@@ -758,16 +1011,14 @@ class MultiSnipeRunner:
             except Exception:
                 pass
             if not self._ensure_card_cached(it):
+                try:
+                    self._log_debug(f"[截图][{it.name}] 跳过：未定位到中间模板（未缓存 mid/card）。")
+                except Exception:
+                    pass
                 continue
             card = self._card_cache.get(it.id)
             if not card:
                 continue
-            # 非调试：在定位命中后，截取 ROI 之前稍作等待，提升文字稳定性
-            try:
-                if not self._debug_active():
-                    time.sleep(max(0.0, float(getattr(self, "_roi_pre_capture_wait_sec", 0.05))))
-            except Exception:
-                pass
             # 非调试：在定位命中后，截取 ROI 前短暂等待，提升文字稳定性
             try:
                 if not self._debug_active():
@@ -1010,6 +1261,17 @@ class MultiSnipeRunner:
                 )
             except Exception:
                 cands = []
+            # 记录数字候选统计日志（仅 Debug）
+            try:
+                vals = []
+                for c in (cands or []):
+                    v = getattr(c, 'value', None)
+                    t = getattr(c, 'clean_text', None) or getattr(c, 'text', None) or ''
+                    if v is not None:
+                        vals.append(f"{int(v)}:{str(t)[:8]}")
+                self._log_debug(f"[数字OCR][{it.name}] 候选={len(cands or [])} 列表=[{', '.join(vals[:5])}]")
+            except Exception:
+                pass
             try:
                 cand = max([c for c in cands if getattr(c, "value", None) is not None], key=lambda c: int(c.value)) if cands else None  # type: ignore[arg-type]
             except Exception:
@@ -1186,6 +1448,20 @@ class MultiSnipeRunner:
                 self._log_debug(f"[购买][{it.name}] 复核未通过 用时={int((time.time()-t0)*1000)}ms")
             except Exception:
                 pass
+            # 连续失败计数 + 强制重定位（超过阈值）
+            try:
+                _id = str(it.id)
+                self._fail_counts[_id] = int(self._fail_counts.get(_id, 0)) + 1
+                if int(self._fail_counts[_id]) >= max(1, int(getattr(self, "_relocate_after_fail", 3))):
+                    try:
+                        self._card_cache.pop(_id, None)
+                        self._mid_cache.pop(_id, None)
+                    except Exception:
+                        pass
+                    self._fail_counts[_id] = 0
+                    self._log_debug(f"[恢复][{it.name}] 连续复核失败，已清空缓存强制重定位")
+            except Exception:
+                pass
             return False, 0
         # 购买数量/Max 逻辑
         mode = str(getattr(it, "purchase_mode", "normal") or "normal").lower()
@@ -1217,6 +1493,20 @@ class MultiSnipeRunner:
                 self._log_debug(f"[购买][{it.name}] 未找到购买按钮 用时={int((time.time()-t0)*1000)}ms")
             except Exception:
                 pass
+            # 连续失败计数 + 强制重定位
+            try:
+                _id = str(it.id)
+                self._fail_counts[_id] = int(self._fail_counts.get(_id, 0)) + 1
+                if int(self._fail_counts[_id]) >= max(1, int(getattr(self, "_relocate_after_fail", 3))):
+                    try:
+                        self._card_cache.pop(_id, None)
+                        self._mid_cache.pop(_id, None)
+                    except Exception:
+                        pass
+                    self._fail_counts[_id] = 0
+                    self._log_debug(f"[恢复][{it.name}] 未见购买按钮，已清空缓存强制重定位")
+            except Exception:
+                pass
             return False, 0
         # Debug：购买按钮点击
         try:
@@ -1227,7 +1517,7 @@ class MultiSnipeRunner:
         except Exception:
             pass
         self.screen.click_center(b)
-        t_end = time.time() + 0.6
+        t_end = time.time() + max(0.2, float(getattr(self, "_buy_result_timeout_sec", 0.8)))
         got_ok = False
         found_fail = False
         while time.time() < t_end:
@@ -1270,6 +1560,21 @@ class MultiSnipeRunner:
                 self._log_debug(f"[购买][{it.name}] 失败/放弃 用时={int((time.time()-t0)*1000)}ms")
             except Exception:
                 pass
+            # 连续失败计数 + 强制重定位（超过阈值）
+            try:
+                _id = str(it.id)
+                self._fail_counts[_id] = int(self._fail_counts.get(_id, 0)) + 1
+                if int(self._fail_counts[_id]) >= max(1, int(getattr(self, "_relocate_after_fail", 3))):
+                    # 清理缓存强制下次重定位
+                    try:
+                        self._card_cache.pop(_id, None)
+                        self._mid_cache.pop(_id, None)
+                    except Exception:
+                        pass
+                    self._fail_counts[_id] = 0
+                    self._log_debug(f"[恢复][{it.name}] 连续失败，已清空缓存强制重定位")
+            except Exception:
+                pass
             return False, 0
         # 购买增量：参考 task_runner 的逻辑
         try:
@@ -1279,6 +1584,11 @@ class MultiSnipeRunner:
         inc = (120 if used_max else 10) if is_ammo else (5 if used_max else 1)
         try:
             self._log_debug(f"[购买][{it.name}] 成功 数量+={int(inc)} 总用时={int((time.time()-t0)*1000)}ms")
+        except Exception:
+            pass
+        # 成功：清零连续失败计数
+        try:
+            self._fail_counts[str(it.id)] = 0
         except Exception:
             pass
         return True, int(inc)

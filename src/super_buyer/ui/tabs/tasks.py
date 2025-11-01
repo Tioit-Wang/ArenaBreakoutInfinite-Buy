@@ -70,6 +70,39 @@ class SingleFastBuyTab(BaseTab):
         self.btn_exec_pause.pack(side=tk.LEFT, padx=6)
         self.btn_exec_stop = ttk.Button(ctrl_inner, text="终止", command=self._exec_stop)
         self.btn_exec_stop.pack(side=tk.LEFT)
+        # 主界面：任务模式切换
+        try:
+            ttk.Label(ctrl_inner, text="  任务模式").pack(side=tk.LEFT, padx=(12, 4))
+            # 使用显示文案与内部值的映射
+            self._task_mode_combo_var = tk.StringVar()
+            _mode_map = {"按时间区间": "time", "轮流执行": "round"}
+            _rev_map = {v: k for k, v in _mode_map.items()}
+            cur_mode = str(self.tasks_data.get("task_mode", "time"))
+            self._task_mode_combo_var.set(_rev_map.get(cur_mode, "按时间区间"))
+            mode_combo = ttk.Combobox(
+                ctrl_inner,
+                width=10,
+                state="readonly",
+                values=list(_mode_map.keys()),
+                textvariable=self._task_mode_combo_var,
+            )
+            def _on_mode_selected(_e=None):
+                try:
+                    name = self._task_mode_combo_var.get()
+                    val = _mode_map.get(name, "time")
+                    if val not in ("time", "round"):
+                        val = "time"
+                    self.tasks_data["task_mode"] = val
+                    self._save_tasks_data()
+                    # 重新渲染任务卡片以反映字段变化
+                    self._render_task_cards()
+                except Exception:
+                    pass
+            mode_combo.bind("<<ComboboxSelected>>", _on_mode_selected)
+            mode_combo.pack(side=tk.LEFT)
+            self._task_mode_combo = mode_combo
+        except Exception:
+            self._task_mode_combo = None
         self.lab_exec_status = ttk.Label(ctrl_inner, text="idle", foreground="#666")
         self.lab_exec_status.pack(side=tk.RIGHT)
 
@@ -167,17 +200,25 @@ class SingleFastBuyTab(BaseTab):
             radios = self._task_mode_radios
         except Exception:
             radios = None
+        combo = getattr(self, "_task_mode_combo", None)
         if not radios:
-            return
+            # 仍需处理主界面下拉的禁用
+            pass
         disable = False
         try:
             disable = bool((self._editing_task_index is not None) or self._task_draft_alive)
         except Exception:
             pass
         state = (tk.DISABLED if disable else tk.NORMAL)
-        for rb in radios:
+        if radios:
+            for rb in radios:
+                try:
+                    rb.configure(state=state)
+                except Exception:
+                    pass
+        if combo is not None:
             try:
-                rb.configure(state=state)
+                combo.configure(state=("readonly" if not disable else tk.DISABLED))
             except Exception:
                 pass
         # Update subtle hint visibility/content
@@ -286,6 +327,31 @@ class SingleFastBuyTab(BaseTab):
         tb.pack(fill=tk.X)
         self.btn_add_task = ttk.Button(tb, text="新增…", command=self._add_task_card)
         self.btn_add_task.pack(side=tk.LEFT)
+        # 全局任务模式选择（时间区间 / 轮流执行）
+        try:
+            ttk.Label(tb, text="  任务模式：").pack(side=tk.LEFT, padx=(8, 0))
+            self._task_mode_var = tk.StringVar(value=str(self.tasks_data.get("task_mode", "time")))
+            def _on_mode_change():
+                try:
+                    val = str(self._task_mode_var.get() or "time")
+                    if val not in ("time", "round"):
+                        val = "time"
+                    # 编辑/新增中时不允许切换（由 _update_task_mode_controls_state 控制）
+                    self.tasks_data["task_mode"] = val
+                    self._save_tasks_data()
+                    # 重新渲染任务卡片以反映字段变化
+                    self._render_task_cards()
+                except Exception:
+                    pass
+            rb_time = ttk.Radiobutton(tb, text="按时间区间", value="time", variable=self._task_mode_var, command=_on_mode_change)
+            rb_round = ttk.Radiobutton(tb, text="轮流执行", value="round", variable=self._task_mode_var, command=_on_mode_change)
+            rb_time.pack(side=tk.LEFT, padx=(0, 4))
+            rb_round.pack(side=tk.LEFT, padx=(0, 8))
+            self._task_mode_radios = (rb_time, rb_round)
+            # 轻提示：在编辑/新增时提示模式锁定
+            self._task_mode_hint = ttk.Label(tb, text="", foreground="#666666")
+        except Exception:
+            self._task_mode_radios = None
 
         wrap = ttk.Frame(frm)
         wrap.pack(fill=tk.BOTH, expand=True, pady=(6, 6))
@@ -334,136 +400,25 @@ class SingleFastBuyTab(BaseTab):
             pass
 
     # ---------- Goods picker ----------
-    def _load_goods_for_picker(self) -> list[dict]:
-        goods: list[dict] = []
-        try:
-            import json
-            if os.path.exists("goods.json"):
-                with open("goods.json", "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                if isinstance(data, list):
-                    goods = [d for d in data if isinstance(d, dict)]
-        except Exception:
-            goods = []
-        return goods
-
     def _open_goods_picker(self, on_pick) -> None:
-        goods = self._load_goods_for_picker()
-        top = tk.Toplevel(self)
-        top.title("选择物品")
-        top.geometry("720x480")
-        top.transient(self)
+        """统一委托到 App 层通用选择器（保持兼容的入口）。"""
         try:
-            top.grab_set()
+            # 直接调用 App 的统一实现，确保使用“物品市场”的内存数据
+            self.app._open_goods_picker(on_pick)
         except Exception:
-            pass
-
-        # Filters
-        ctrl = ttk.Frame(top)
-        ctrl.pack(fill=tk.X, padx=8, pady=6)
-        ttk.Label(ctrl, text="搜索").pack(side=tk.LEFT)
-        var_q = tk.StringVar(value="")
-        ent = ttk.Entry(ctrl, textvariable=var_q, width=24)
-        ent.pack(side=tk.LEFT, padx=6)
-        try:
-            ent.focus_set()
-        except Exception:
-            pass
-        var_big = tk.StringVar(value="全部")
-        var_sub = tk.StringVar(value="全部")
-        # derive categories from data
-        bigs = ["全部"] + sorted({str(g.get("big_category", "")) for g in goods if g.get("big_category")})
-        cmb_big = ttk.Combobox(ctrl, values=bigs, state="readonly", width=12, textvariable=var_big)
-        cmb_big.pack(side=tk.LEFT, padx=6)
-        cmb_sub = ttk.Combobox(ctrl, values=["全部"], state="readonly", width=16, textvariable=var_sub)
-        cmb_sub.pack(side=tk.LEFT, padx=6)
-        def _refresh_sub():
-            sel_big = var_big.get()
-            subs = sorted({str(g.get("sub_category", "")) for g in goods if (sel_big in ("全部", str(g.get("big_category", ""))))})
-            vals = ["全部"] + [s for s in subs if s]
+            # 兜底：直接使用通用组件（避免因 app 方法不可用导致无法选择）
             try:
-                cmb_sub.configure(values=vals)
+                from super_buyer.ui.widgets.goods_picker import open_goods_picker
+                goods_mem = None
+                try:
+                    goods_ui = getattr(self.app, "goods_ui", None)
+                    if goods_ui is not None:
+                        goods_mem = list(getattr(goods_ui, "goods", []) or [])
+                except Exception:
+                    goods_mem = None
+                open_goods_picker(self, self.paths, on_pick, goods=goods_mem)
             except Exception:
                 pass
-            if var_sub.get() not in vals:
-                var_sub.set("全部")
-        cmb_big.bind("<<ComboboxSelected>>", lambda _e=None: _refresh_sub())
-        _refresh_sub()
-
-        # List area
-        body = ttk.Frame(top)
-        body.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0,8))
-        cols = ("name", "big", "sub")
-        tree = ttk.Treeview(body, columns=cols, show="headings")
-        tree.heading("name", text="名称")
-        tree.heading("big", text="大类")
-        tree.heading("sub", text="子类")
-        tree.column("name", width=280)
-        tree.column("big", width=120)
-        tree.column("sub", width=180)
-        # Attach vertical scrollbar
-        sb = ttk.Scrollbar(body, orient=tk.VERTICAL, command=tree.yview)
-        tree.configure(yscrollcommand=sb.set)
-        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        sb.pack(side=tk.LEFT, fill=tk.Y)
-        # Mouse-wheel support for picker list
-        try:
-            self._bind_mousewheel(tree, tree)
-        except Exception:
-            pass
-
-        def _apply_filter(_e=None):
-            q = (var_q.get() or "").strip().lower()
-            b = var_big.get()
-            s = var_sub.get()
-            # Clear existing rows before rebuilding the list
-            for iid in tree.get_children():
-                tree.delete(iid)
-            # Guard against duplicate iids within the current dataset
-            seen_iids: set[str] = set()
-            for g in goods:
-                name = str(g.get("name", ""))
-                big = str(g.get("big_category", ""))
-                sub = str(g.get("sub_category", ""))
-                if b not in ("全部", big):
-                    continue
-                if s not in ("全部", sub):
-                    continue
-                if q and (q not in name.lower() and q not in str(g.get("search_name", "")).lower()):
-                    continue
-                iid = str(g.get("id", name))
-                if iid in seen_iids or tree.exists(iid):
-                    # Skip duplicates to avoid TclError: Item ... already exists
-                    continue
-                seen_iids.add(iid)
-                tree.insert("", tk.END, iid=iid, values=(name, big, sub))
-        ent.bind("<KeyRelease>", _apply_filter)
-        cmb_big.bind("<<ComboboxSelected>>", _apply_filter)
-        cmb_sub.bind("<<ComboboxSelected>>", _apply_filter)
-        _apply_filter()
-
-        def _ok():
-            sel = tree.selection()
-            if not sel:
-                top.destroy()
-                return
-            iid = sel[0]
-            item = next((g for g in goods if str(g.get("id", "")) == iid or str(g.get("name", "")) == iid), None)
-            if item is None:
-                top.destroy()
-                return
-            try:
-                on_pick(item)
-            finally:
-                top.destroy()
-        btns = ttk.Frame(top)
-        btns.pack(fill=tk.X, padx=8, pady=6)
-        ttk.Button(btns, text="确定", command=_ok).pack(side=tk.RIGHT)
-        ttk.Button(btns, text="取消", command=top.destroy).pack(side=tk.RIGHT, padx=(0,6))
-        # Double-click select
-        def _on_dbl(_e=None):
-            _ok()
-        tree.bind("<Double-1>", _on_dbl)
 
     # ---------- Step delay config module ----------
     def _build_step_delay_panel(self, parent) -> None:

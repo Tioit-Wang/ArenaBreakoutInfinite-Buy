@@ -280,6 +280,12 @@ class App(tk.Tk):
                         except Exception:
                             pass
                     else:
+                        # 若目标已存在则跳过，避免覆盖用户自定义/历史数据
+                        try:
+                            if dst.exists():
+                                continue
+                        except Exception:
+                            pass
                         try:
                             dst.parent.mkdir(parents=True, exist_ok=True)
                         except Exception:
@@ -527,14 +533,35 @@ class App(tk.Tk):
             tab._debug_test_overlay()
 
     def _open_goods_picker(self, on_pick) -> None:
-        tab = getattr(self, "tasks_tab", None)
-        if tab is not None:
-            tab._open_goods_picker(on_pick)
-            return
+        """打开通用“选择商品”弹窗（统一出口）。
+
+        - 优先使用“物品市场”页的内存数据，确保与市场一致；
+        - 回退读取 `data/goods.json`；
+        - 回调统一输出：name、id、image_path、big_category。
+        """
         try:
-            messagebox.showwarning("选择商品", "任务标签页尚未就绪，无法选择。")
+            from super_buyer.ui.widgets.goods_picker import open_goods_picker  # 延迟导入避免循环
         except Exception:
-            pass
+            try:
+                messagebox.showwarning("选择商品", "选择器不可用。")
+            except Exception:
+                pass
+            return
+        goods_mem = None
+        try:
+            goods_ui = getattr(self, "goods_ui", None)
+            if goods_ui is not None:
+                goods_mem = list(getattr(goods_ui, "goods", []) or [])
+        except Exception:
+            goods_mem = None
+        try:
+            open_goods_picker(self, self.paths, on_pick, goods=goods_mem)
+        except Exception:
+            # 兜底提示，避免静默失败
+            try:
+                messagebox.showwarning("选择商品", "弹窗打开失败。")
+            except Exception:
+                pass
 
     # ---------- Tasks data I/O ----------
     def _load_tasks_data(self, path: Path) -> Dict[str, Any]:
@@ -724,12 +751,22 @@ class App(tk.Tk):
             pass
 
     def save_config(self, *, silent: bool = False) -> None:
-        """委托初始化配置标签页保存配置。"""
-        tab = getattr(self, "init_tab", None)
-        if tab is None:
+        """保存配置：先让多商品页刷入模板，再委托初始化页落盘。"""
+        init_tab = getattr(self, "init_tab", None)
+        if init_tab is None:
             return
+        # 先让多商品页将其模板写入到 self.cfg（不落盘），避免丢失
         try:
-            tab._save_and_sync(silent=silent)
+            multi_tab = getattr(self, "multi_tab", None)
+            if multi_tab is not None:
+                flush = getattr(multi_tab, "_save_templates_into_cfg", None)
+                if callable(flush):
+                    flush()
+        except Exception:
+            pass
+        # 再由初始化配置页统一保存配置文件
+        try:
+            init_tab._save_and_sync(silent=silent)
         except Exception:
             pass
 

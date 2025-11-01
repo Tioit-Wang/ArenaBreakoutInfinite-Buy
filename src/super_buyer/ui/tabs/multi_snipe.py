@@ -682,8 +682,28 @@ class MultiSnipeTab(BaseTab):
         except Exception:
             pass
 
-        # 构造运行器（日志级别由 Runner 内部控制，直接透传）
-        runner = MultiSnipeRunner(self.cfg, items_raw, on_log=lambda s: self._append_multi_log(s))
+        # 构造运行器：在本页注入调试覆盖（仅本页面生效，不落盘）
+        try:
+            import copy as _copy
+            cfg_copy = _copy.deepcopy(self.cfg)
+        except Exception:
+            cfg_copy = dict(self.cfg)
+        try:
+            dbg_base = (cfg_copy.get("debug", {}) or {}) if isinstance(cfg_copy.get("debug"), dict) else {}
+        except Exception:
+            dbg_base = {}
+        try:
+            overrides = self._collect_debug_overrides()
+        except Exception:
+            overrides = {}
+        try:
+            dbg_new = dict(dbg_base)
+            dbg_new.update(overrides)
+            cfg_copy["debug"] = dbg_new
+        except Exception:
+            cfg_copy["debug"] = overrides or dbg_base
+
+        runner = MultiSnipeRunner(cfg_copy, items_raw, on_log=lambda s: self._append_multi_log(s))
         self._snipe_runner = runner
         self._snipe_stop.clear()
 
@@ -849,6 +869,109 @@ class MultiSnipeTab(BaseTab):
                 messagebox.showerror("选图片", f"失败: {e}")
         ttk.Button(btnf, text="保存", command=_save).pack(side=tk.RIGHT)
         ttk.Button(btnf, text="关闭", command=top.destroy).pack(side=tk.RIGHT, padx=(0, 8))
+
+    # ---------- 将本页模板持久化到 cfg（供 App.save_config 调用） ----------
+    def _save_templates_into_cfg(self) -> None:
+        try:
+            tpls = self.cfg.setdefault("templates", {})
+            for key, row in (self.template_rows or {}).items():
+                try:
+                    tpls.setdefault(key, {})
+                    tpls[key]["path"] = row.get_path()
+                    tpls[key]["confidence"] = float(row.get_confidence())
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    # ---- 多商品抢购：调试配置（仅本页生效） ----
+    def _collect_debug_overrides(self) -> Dict[str, Any]:
+        """从本页 UI 变量收集调试覆盖配置，不落盘，仅在本页构造 Runner 时注入。
+
+        返回字段：
+        - enabled: bool
+        - overlay_sec: float [0.5, 15]
+        - step_sleep: float [0.0, 1.0]
+        - save_overlay_images: bool
+        - overlay_dir: str（为空时使用默认 images/debug 目录，由 Runner 规范化）
+        """
+        enabled = bool(self.var_debug_enabled.get()) if hasattr(self, "var_debug_enabled") else False
+        try:
+            ov = float(self.var_debug_overlay.get())
+        except Exception:
+            ov = 5.0
+        if ov < 0.5:
+            ov = 0.5
+        if ov > 15.0:
+            ov = 15.0
+        try:
+            st = float(self.var_debug_step.get())
+        except Exception:
+            st = 0.0
+        if st < 0.0:
+            st = 0.0
+        if st > 1.0:
+            st = 1.0
+        try:
+            save_imgs = bool(self.var_debug_save_imgs.get())
+        except Exception:
+            save_imgs = False
+        try:
+            od = (self.var_debug_overlay_dir.get() or "").strip()
+        except Exception:
+            od = ""
+        return {
+            "enabled": enabled,
+            "overlay_sec": float(ov),
+            "step_sleep": float(st),
+            "save_overlay_images": save_imgs,
+            "overlay_dir": od,
+        }
+
+    def _debug_test_overlay(self) -> None:
+        """在屏幕上显示一个半透明全屏蒙版，使用本页设置的时长参数。"""
+        try:
+            ov = float(self.var_debug_overlay.get() or 5.0)
+        except Exception:
+            ov = 5.0
+        if ov < 0.5:
+            ov = 0.5
+        if ov > 15.0:
+            ov = 15.0
+        try:
+            top = tk.Toplevel(self)
+            W = int(self.winfo_screenwidth())
+            H = int(self.winfo_screenheight())
+            top.geometry(f"{W}x{H}+0+0")
+            try:
+                top.attributes("-alpha", 0.3)
+            except Exception:
+                pass
+            try:
+                top.attributes("-topmost", True)
+            except Exception:
+                pass
+            top.overrideredirect(True)
+            cv = tk.Canvas(top, bg="black", highlightthickness=0)
+            cv.pack(fill=tk.BOTH, expand=True)
+            try:
+                from super_buyer.services.font_loader import tk_font as _tk_font  # 延迟导入
+            except Exception:
+                _tk_font = None
+            try:
+                f1 = _tk_font(self, 14) if _tk_font else None
+                if f1 is not None:
+                    cv.create_text(W // 2, 40, text="调试蒙版预览（本页参数）", fill="white", font=f1)
+                else:
+                    cv.create_text(W // 2, 40, text="调试蒙版预览（本页参数）", fill="white")
+            except Exception:
+                pass
+            try:
+                top.after(int(ov * 1000), top.destroy)
+            except Exception:
+                pass
+        except Exception:
+            pass
 
 
     # ---------- Tab: 利润计算 ----------

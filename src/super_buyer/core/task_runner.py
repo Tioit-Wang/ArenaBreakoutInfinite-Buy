@@ -860,6 +860,7 @@ class TaskRunner:
         except Exception:
             arr = []
         goods_map: Dict[str, Goods] = {}
+        base_dir = Path(path).resolve().parent  # data/
         if isinstance(arr, list):
             for e in arr:
                 if not isinstance(e, dict):
@@ -867,11 +868,22 @@ class TaskRunner:
                 gid = str(e.get("id", ""))
                 if not gid:
                     continue
+                # 解析相对图片路径为 data/ 下的绝对路径；兼容反斜杠
+                raw_img = str(e.get("image_path", ""))
+                try:
+                    pp = Path(raw_img)
+                    if not pp.is_absolute():
+                        norm = raw_img.replace("\\", "/")
+                        img_abs = str((base_dir / norm).resolve()) if norm else ""
+                    else:
+                        img_abs = str(pp)
+                except Exception:
+                    img_abs = raw_img
                 goods_map[gid] = Goods(
                     id=gid,
                     name=str(e.get("name", "")),
                     search_name=str(e.get("search_name", "")),
-                    image_path=str(e.get("image_path", "")),
+                    image_path=img_abs,
                     big_category=str(e.get("big_category", "")),
                     sub_category=str(e.get("sub_category", "")),
                     exchangeable=bool(e.get("exchangeable", False)),
