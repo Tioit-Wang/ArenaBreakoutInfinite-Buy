@@ -35,7 +35,9 @@
     "btn_back": {"path": "images/btn_back.png", "confidence": 0.85},
     "btn_max": {"path": "images/btn_max.png", "confidence": 0.85},
     "qty_minus": {"path": "images/qty_minus.png", "confidence": 0.85},
-    "qty_plus": {"path": "images/qty_plus.png", "confidence": 0.85}
+    "qty_plus": {"path": "images/qty_plus.png", "confidence": 0.85},
+    "penalty_warning": {"path": "images/penalty_warning.png", "confidence": 0.9},
+    "btn_penalty_confirm": {"path": "images/btn_penalty_confirm.png", "confidence": 0.9}
   },
   "purchase": {
     "item_name": "",

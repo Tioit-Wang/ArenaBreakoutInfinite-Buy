@@ -253,9 +253,26 @@ class MultiSnipeRunner:
             self._relocate_after_fail = int(tuning.get("relocate_after_fail", 3) or 3)
         except Exception:
             self._relocate_after_fail = 3
+        # 处罚检测相关参数
+        try:
+            self._ocr_miss_threshold = int(tuning.get("ocr_miss_penalty_threshold", 10) or 10)
+        except Exception:
+            self._ocr_miss_threshold = 10
+        try:
+            self._penalty_confirm_delay_sec = float(tuning.get("penalty_confirm_delay_sec", 5.0) or 5.0)
+        except Exception:
+            self._penalty_confirm_delay_sec = 5.0
+        try:
+            self._penalty_wait_after_confirm_sec = float(tuning.get("penalty_wait_sec", 180.0) or 180.0)
+        except Exception:
+            self._penalty_wait_after_confirm_sec = 180.0
 
         # 连续失败计数器：item.id -> count
         self._fail_counts: Dict[str, int] = {}
+        # OCR 连续未识别计数器（整轮计数）
+        self._ocr_miss_streak: int = 0
+        # 最近一次扫描存在有效价格识别的时间戳（用于抑制处罚误报）
+        self._last_ocr_ok_ts: float = 0.0
 
     # ---------- Utils ----------
     def _log(self, s: str) -> None:
@@ -1657,8 +1674,134 @@ class MultiSnipeRunner:
         except Exception:
             pass
         # 一轮摘要：Info 输出识别/购买/耗时（精简且可读）
+        # 统计本轮价格识别是否全部失败（用于处罚检测阈值累计）
+        try:
+            valid_count = 0
+            for r in results:
+                if r.get("price_value") is not None:
+                    valid_count += 1
+            if len(results) == 0 or valid_count == 0:
+                self._ocr_miss_streak = int(getattr(self, "_ocr_miss_streak", 0)) + 1
+            else:
+                self._ocr_miss_streak = 0
+                self._last_ocr_ok_ts = time.time()
+        except Exception:
+            pass
+
+        # 达到阈值后，且距离上次成功识别已超过 penalty_confirm_delay_sec，再检测处罚
+        try:
+            if (
+                int(getattr(self, "_ocr_miss_streak", 0)) >= max(1, int(getattr(self, "_ocr_miss_threshold", 10)))
+                and (time.time() - float(getattr(self, "_last_ocr_ok_ts", 0.0))) >= float(max(2.0, getattr(self, "_penalty_confirm_delay_sec", 5.0)))
+            ):
+                self._check_and_handle_penalty()
+        except Exception:
+            pass
+
         try:
             self._log_info(f"[一轮] 完成 识别={len(results)} 购买={len(bought)} 用时={int((time.time()-t0)*1000)}ms")
         except Exception:
             pass
         return {"recognized": results, "bought": bought}
+
+    # ---------- 处罚检测与处理 ----------
+    def _check_and_handle_penalty(self) -> None:
+        """当连续 OCR 未识别次数达到阈值后，检测并处理处罚提示。
+
+        流程：
+        1) 检测 `penalty_warning` 模板是否存在；若不存在则返回。
+        2) 日志提示并等待 `self._penalty_confirm_delay_sec` 秒。
+        3) 尝试定位 `btn_penalty_confirm` 并点击一次；若未定位到，记录日志后返回。
+        4) 点击后等待 `self._penalty_wait_after_confirm_sec` 秒（处罚流程结束）。
+        5) 清零计数，继续后续轮次。
+        """
+        try:
+            self._log_info(
+                f"[风控] OCR 连续未识别 {int(self._ocr_miss_streak)} 次，检查处罚提示…"
+            )
+        except Exception:
+            pass
+        # 检查处罚提示模板
+        warn_box = None
+        try:
+            warn_box = self.screen.locate("penalty_warning", timeout=0.6)
+        except Exception:
+            warn_box = None
+        if warn_box is None:
+            try:
+                self._log_debug("[风控] 未发现处罚提示模板，稍后继续重试。")
+            except Exception:
+                pass
+            return
+
+        # 可视化叠加（若开启）
+        try:
+            wtpl, _ = self._tpl("penalty_warning")
+            self._debug_show_overlay(
+                [
+                    {"rect": warn_box, "label": "处罚提示", "fill": (255, 193, 7, 80), "outline": (255, 193, 7)},
+                ],
+                stage="检测到处罚提示",
+                template_path=(wtpl if wtpl and os.path.exists(wtpl) else None),
+                save_name="overlay_penalty_warning.png",
+            )
+        except Exception:
+            pass
+
+        # 延迟后点击确认
+        try:
+            self._log_info(
+                f"[风控] 5 秒后点击处罚确认（等待 {int(self._penalty_confirm_delay_sec)}s）"
+            )
+        except Exception:
+            pass
+        try:
+            time.sleep(max(0.0, float(self._penalty_confirm_delay_sec)))
+        except Exception:
+            pass
+
+        # 定位确认按钮并点击
+        btn_box = None
+        t_end = time.time() + 2.0
+        while time.time() < t_end and btn_box is None:
+            try:
+                btn_box = self.screen.locate("btn_penalty_confirm", timeout=0.2)
+            except Exception:
+                btn_box = None
+        if btn_box is not None:
+            try:
+                btpl, _ = self._tpl("btn_penalty_confirm")
+                self._debug_show_overlay(
+                    [
+                        {"rect": btn_box, "label": "处罚确认", "fill": (76, 175, 80, 80), "outline": (76, 175, 80)},
+                    ],
+                    stage="点击处罚确认",
+                    template_path=(btpl if btpl and os.path.exists(btpl) else None),
+                    save_name="overlay_penalty_confirm.png",
+                )
+            except Exception:
+                pass
+            try:
+                self.screen.click_center(btn_box)
+            except Exception:
+                pass
+            try:
+                self._log_info(
+                    f"[风控] 已点击处罚确认，等待 {int(self._penalty_wait_after_confirm_sec)}s 后继续…"
+                )
+            except Exception:
+                pass
+            try:
+                time.sleep(max(0.0, float(self._penalty_wait_after_confirm_sec)))
+            except Exception:
+                pass
+            # 处罚流程结束，清零计数
+            try:
+                self._ocr_miss_streak = 0
+            except Exception:
+                pass
+        else:
+            try:
+                self._log_error("[风控] 未定位到处罚确认按钮，跳过点击。")
+            except Exception:
+                pass

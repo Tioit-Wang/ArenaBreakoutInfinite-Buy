@@ -68,6 +68,10 @@ class Buyer:
 
         # 当前详情页按钮缓存（本次进入详情周期内有效）
         self._detail_ui_cache: Dict[str, Tuple[int, int, int, int]] = {}
+        # 最近一次平均价 OCR 是否成功（供上层累计“未识别”次数）
+        self._last_avg_ocr_ok: bool = True
+        # 平均价 OCR 连续未识别计数（在本类内维护，成功即清零）
+        self._avg_ocr_streak: int = 0
 
     # ------------------------------ 基础工具 ------------------------------
     def _log(self, item_disp: str, purchased: str, msg: str) -> None:
@@ -355,6 +359,9 @@ class Buyer:
                 purchased_str,
                 f"未匹配到“购买”按钮模板，无法定位平均价格区域 匹配耗时={btn_ms}ms",
             )
+            # OCR 失败：标记失败
+            self._last_avg_ocr_ok = False
+            self._avg_ocr_streak = int(getattr(self, "_avg_ocr_streak", 0)) + 1
             return None
         b_left, b_top, b_w, b_h = buy_box
         avg_cfg = self.cfg.get("avg_price_area") or {}
@@ -389,20 +396,28 @@ class Buyer:
         height = max(1, y_bottom - y_top)
         if height <= 0 or width <= 0:
             self._log(item_disp, purchased_str, "平均单价 ROI 计算失败（尺寸无效）")
+            self._last_avg_ocr_ok = False
+            self._avg_ocr_streak = int(getattr(self, "_avg_ocr_streak", 0)) + 1
             return None
         roi = (x_left, y_top, width, height)
         img = self.screen.screenshot_region(roi)
         if img is None:
             self._log(item_disp, purchased_str, "平均单价 ROI 截屏失败")
+            self._last_avg_ocr_ok = False
+            self._avg_ocr_streak = int(getattr(self, "_avg_ocr_streak", 0)) + 1
             return None
         # 横向分割 ROI：上=平均价，下=合计
         try:
             w0, h0 = img.size
         except Exception:
             self._log(item_disp, purchased_str, "平均单价 ROI 尺寸无效")
+            self._last_avg_ocr_ok = False
+            self._avg_ocr_streak = int(getattr(self, "_avg_ocr_streak", 0)) + 1
             return None
         if h0 < 2:
             self._log(item_disp, purchased_str, "平均单价 ROI 高度过小，无法二分")
+            self._last_avg_ocr_ok = False
+            self._avg_ocr_streak = int(getattr(self, "_avg_ocr_streak", 0)) + 1
             return None
         mid_h = h0 // 2
         img_top = img.crop((0, 0, w0, mid_h))
@@ -521,6 +536,8 @@ class Buyer:
                 purchased_str,
                 f"平均价 OCR 解析失败：'{(txt or '').strip()[:64]}' | ROI=({x_left},{y_top},{x_left + width},{y_top + mid_h}) 缩放={sc:.2f} btn耗时={btn_ms}ms OCR耗时={ocr_ms if ocr_ms >= 0 else '-'}ms",
             )
+            self._last_avg_ocr_ok = False
+            self._avg_ocr_streak = int(getattr(self, "_avg_ocr_streak", 0)) + 1
             return None
         # 验证：若设置价格存在，且识别值低于 50% 的设置价格，则视为识别错误，本次丢弃
         try:
@@ -536,12 +553,17 @@ class Buyer:
                 )
             except Exception:
                 pass
+            self._last_avg_ocr_ok = False
+            self._avg_ocr_streak = int(getattr(self, "_avg_ocr_streak", 0)) + 1
             return None
         self._log(
             item_disp,
             purchased_str,
             f"平均价 OCR 成功 值={val} ROI=({x_left},{y_top},{x_left + width},{y_top + mid_h}) 缩放={sc:.2f} btn耗时={btn_ms}ms OCR耗时={ocr_ms}ms",
         )
+        # OCR 成功：标记成功
+        self._last_avg_ocr_ok = True
+        self._avg_ocr_streak = 0
         # 记录价格历史（按物品），供历史价格与分钟聚合使用
         try:
             _append_price(
@@ -795,6 +817,27 @@ class TaskRunner:
             self._relay_log,
             history_paths=self.history_paths,
         )
+
+        # 处罚检测：OCR 连续未识别计数与参数（与多商品模式保持一致）
+        self._ocr_miss_streak: int = 0
+        try:
+            tuning = (self.cfg.get("multi_snipe_tuning", {}) or {})
+        except Exception:
+            tuning = {}
+        try:
+            self._ocr_miss_threshold = int(tuning.get("ocr_miss_penalty_threshold", 10) or 10)
+        except Exception:
+            self._ocr_miss_threshold = 10
+        try:
+            self._penalty_confirm_delay_sec = float(tuning.get("penalty_confirm_delay_sec", 5.0) or 5.0)
+        except Exception:
+            self._penalty_confirm_delay_sec = 5.0
+        try:
+            self._penalty_wait_after_confirm_sec = float(tuning.get("penalty_wait_sec", 180.0) or 180.0)
+        except Exception:
+            self._penalty_wait_after_confirm_sec = 180.0
+        # 成功时间戳：用于抑制“刚识别过又检查处罚”的抖动
+        self._last_avg_ok_ts: float = 0.0
 
         # 模式、日志与重启
         self.mode = str(self.tasks_data.get("task_mode", "time"))
@@ -1128,6 +1171,25 @@ class TaskRunner:
                         pass
                 if not _cont:
                     break
+                # 统计 OCR 未识别连续次数并触发处罚检测
+                try:
+                    last_ok = bool(getattr(self.buyer, "_last_avg_ocr_ok", True))
+                    if last_ok:
+                        self._ocr_miss_streak = 0
+                        self._last_avg_ok_ts = time.time()
+                    else:
+                        # 也参考 Buyer 内部的本地连败计数
+                        buyer_streak = int(getattr(self.buyer, "_avg_ocr_streak", 0))
+                        self._ocr_miss_streak = int(self._ocr_miss_streak) + 1
+                        # 需满足：达到阈值 且 距离上次成功已超过 penalty_confirm_delay_sec
+                        if (
+                            int(self._ocr_miss_streak) >= max(1, int(self._ocr_miss_threshold))
+                            and buyer_streak >= 1
+                            and (time.time() - float(getattr(self, "_last_avg_ok_ts", 0.0))) >= float(max(2.0, self._penalty_confirm_delay_sec))
+                        ):
+                            self._check_and_handle_penalty()
+                except Exception:
+                    pass
                 # 每轮尝试之间的微等待：避免连击触发节流/误判
                 _sleep(0.02)
 
@@ -1257,6 +1319,23 @@ class TaskRunner:
                         pass
                 if not _cont:
                     break
+                # 统计 OCR 未识别连续次数并触发处罚检测（时间窗口模式）
+                try:
+                    last_ok = bool(getattr(self.buyer, "_last_avg_ocr_ok", True))
+                    if last_ok:
+                        self._ocr_miss_streak = 0
+                        self._last_avg_ok_ts = time.time()
+                    else:
+                        buyer_streak = int(getattr(self.buyer, "_avg_ocr_streak", 0))
+                        self._ocr_miss_streak = int(self._ocr_miss_streak) + 1
+                        if (
+                            int(self._ocr_miss_streak) >= max(1, int(self._ocr_miss_threshold))
+                            and buyer_streak >= 1
+                            and (time.time() - float(getattr(self, "_last_avg_ok_ts", 0.0))) >= float(max(2.0, self._penalty_confirm_delay_sec))
+                        ):
+                            self._check_and_handle_penalty()
+                except Exception:
+                    pass
                 # 窗口循环的微等待：20ms，减少 UI 抖动影响
                 _sleep(0.02)
 
@@ -1299,7 +1378,48 @@ class TaskRunner:
                     )
             t["_valid"] = bool(ok)
 
+    # ------------------------------ 处罚检测与处理 ------------------------------
+    def _check_and_handle_penalty(self) -> None:
+        """当 OCR 连续未识别次数达到阈值后，检测并处理处罚提示。
 
+        - 检测 `penalty_warning` 模板是否存在；不存在则忽略。
+        - 若存在，等待 `self._penalty_confirm_delay_sec` 秒后点击 `btn_penalty_confirm`。
+        - 点击后等待 `self._penalty_wait_after_confirm_sec` 秒，再清零计数。
+        """
+        try:
+            self._relay_log(
+                f"【{_now_label()}】【全局】【-】：OCR 连续未识别 {int(self._ocr_miss_streak)} 次，检查处罚提示…"
+            )
+        except Exception:
+            pass
+        warn_box = self.screen.locate("penalty_warning", timeout=0.6)
+        if warn_box is None:
+            try:
+                self._relay_log(f"【{_now_label()}】【全局】【-】：未发现处罚提示模板，稍后继续重试…")
+            except Exception:
+                pass
+            return
+        # 延迟后点击确认
+        _sleep(max(0.0, float(getattr(self, "_penalty_confirm_delay_sec", 5.0))))
+        btn_box = None
+        end = time.time() + 2.0
+        while time.time() < end and btn_box is None:
+            btn_box = self.screen.locate("btn_penalty_confirm", timeout=0.2)
+        if btn_box is not None:
+            self.screen.click_center(btn_box)
+            try:
+                self._relay_log(
+                    f"【{_now_label()}】【全局】【-】：已点击处罚确认，等待 {int(getattr(self, '_penalty_wait_after_confirm_sec', 180.0))} 秒后继续…"
+                )
+            except Exception:
+                pass
+            _sleep(max(0.0, float(getattr(self, "_penalty_wait_after_confirm_sec", 180.0))))
+            self._ocr_miss_streak = 0
+        else:
+            try:
+                self._relay_log(f"【{_now_label()}】【全局】【-】：未定位到处罚确认按钮，跳过点击。")
+            except Exception:
+                pass
 __all__ = [
     "TaskRunner",
     "run_launch_flow",

@@ -58,6 +58,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "btn_max": {"path": _asset_path("btn_max.png"), "confidence": 0.85},
         "qty_minus": {"path": _asset_path("qty_minus.png"), "confidence": 0.85},
         "qty_plus": {"path": _asset_path("qty_plus.png"), "confidence": 0.85},
+        # 新增：处罚识别与确认模板
+        "penalty_warning": {"path": _asset_path("penalty_warning.png"), "confidence": 0.90},
+        "btn_penalty_confirm": {"path": _asset_path("btn_penalty_confirm.png"), "confidence": 0.90},
     },
     "purchase": {
         "item_name": "",

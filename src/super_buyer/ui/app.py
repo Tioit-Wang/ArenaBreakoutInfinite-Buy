@@ -144,6 +144,9 @@ class App(tk.Tk):
             "商品关闭位置": "btn_close",
             "刷新按钮": "btn_refresh",
             "返回按钮": "btn_back",
+            # 新增：处罚识别模板
+            "处罚识别模板": "penalty_warning",
+            "处罚识别确认模板": "btn_penalty_confirm",
             # ASCII keys map to themselves
             "btn_launch": "btn_launch",
             "btn_settings": "btn_settings",
@@ -164,6 +167,9 @@ class App(tk.Tk):
             "btn_close": "btn_close",
             "btn_refresh": "btn_refresh",
             "btn_back": "btn_back",
+            # ASCII: 新增模板自映射
+            "penalty_warning": "penalty_warning",
+            "btn_penalty_confirm": "btn_penalty_confirm",
             # 多商品抢购：标签模板
             "最近购买模板": "recent_purchases_tab",
             "我的收藏模板": "favorites_tab",

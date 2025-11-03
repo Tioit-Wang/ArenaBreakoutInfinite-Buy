@@ -445,6 +445,9 @@ class InitConfigTab(BaseTab):
             "btn_close": "商品关闭位置",
             "btn_refresh": "刷新按钮",
             "btn_back": "返回按钮",
+            # 新增：处罚识别
+            "penalty_warning": "处罚识别模板",
+            "btn_penalty_confirm": "处罚识别确认模板",
         }
         # 从“其他模板”列表中排除：已在其他分组中出现的键
         _skip_in_general = {

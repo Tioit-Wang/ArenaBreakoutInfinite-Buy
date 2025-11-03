@@ -132,6 +132,9 @@ def normalize_template_keys(cfg: Dict[str, Any]) -> bool:
         "刷新按钮": "btn_refresh",
         "返回按钮": "btn_back",
         "最大按钮": "btn_max",
+        # 新增：处罚识别模板及确认
+        "处罚识别模板": "penalty_warning",
+        "处罚识别确认模板": "btn_penalty_confirm",
     }
     changed = False
     for cn_key, ascii_key in mapping.items():
