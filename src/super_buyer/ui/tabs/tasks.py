@@ -106,6 +106,92 @@ class SingleFastBuyTab(BaseTab):
         self.lab_exec_status = ttk.Label(ctrl_inner, text="idle", foreground="#666")
         self.lab_exec_status.pack(side=tk.RIGHT)
 
+        # 调试模式（仅本页面生效）
+        dbg_box = ttk.LabelFrame(container, text="调试模式（仅本页面生效）")
+        dbg_box.pack(fill=tk.X, padx=0, pady=(0, 8))
+        dbg_cfg = self.cfg.get("debug", {}) if isinstance(self.cfg.get("debug"), dict) else {}
+        try:
+            self.var_debug_enabled = tk.BooleanVar(value=bool(dbg_cfg.get("enabled", False)))
+        except Exception:
+            self.var_debug_enabled = tk.BooleanVar(value=False)
+        try:
+            _ov = float(dbg_cfg.get("overlay_sec", 5.0))
+        except Exception:
+            _ov = 5.0
+        self.var_debug_overlay = tk.DoubleVar(value=_ov)
+        try:
+            _st = float(dbg_cfg.get("step_sleep", 0.0))
+        except Exception:
+            _st = 0.0
+        self.var_debug_step = tk.DoubleVar(value=_st)
+        try:
+            self.var_debug_save_imgs = tk.BooleanVar(value=bool(dbg_cfg.get("save_overlay_images", False)))
+        except Exception:
+            self.var_debug_save_imgs = tk.BooleanVar(value=False)
+        try:
+            _dir = str(dbg_cfg.get("overlay_dir", self._images_path("debug", "可视化调试")))
+        except Exception:
+            _dir = self._images_path("debug", "可视化调试")
+        self.var_debug_overlay_dir = tk.StringVar(value=_dir)
+
+        # 行1：总开关 + 蒙版时长 + 步进延时
+        try:
+            chk = ttk.Checkbutton(dbg_box, text="启用调试可视化（绘制ROI/模板）", variable=self.var_debug_enabled)
+        except Exception:
+            chk = tk.Checkbutton(dbg_box, text="启用调试可视化（绘制ROI/模板）", variable=self.var_debug_enabled)
+        chk.grid(row=0, column=0, columnspan=2, sticky="w", padx=8, pady=(8, 2))
+        ttk.Label(dbg_box, text="蒙版时长(秒)").grid(row=1, column=0, sticky="e", padx=8, pady=6)
+        try:
+            sp_ov = ttk.Spinbox(dbg_box, from_=0.5, to=15.0, increment=0.5, width=8, textvariable=self.var_debug_overlay)
+        except Exception:
+            sp_ov = tk.Spinbox(dbg_box, from_=0.5, to=15.0, increment=0.5, width=8, textvariable=self.var_debug_overlay)
+        sp_ov.grid(row=1, column=1, sticky="w")
+        ttk.Label(dbg_box, text="步进延时(秒)").grid(row=1, column=2, sticky="e", padx=12)
+        try:
+            sp_st = ttk.Spinbox(dbg_box, from_=0.0, to=1.0, increment=0.01, width=8, textvariable=self.var_debug_step)
+        except Exception:
+            sp_st = tk.Spinbox(dbg_box, from_=0.0, to=1.0, increment=0.01, width=8, textvariable=self.var_debug_step)
+        sp_st.grid(row=1, column=3, sticky="w")
+        try:
+            ttk.Button(dbg_box, text="立即预览蒙版", command=self._debug_test_overlay).grid(row=1, column=4, padx=10)
+        except Exception:
+            pass
+        # 行2：保存配置与目录
+        try:
+            chk_save = ttk.Checkbutton(dbg_box, text="保存可视化截图", variable=self.var_debug_save_imgs)
+        except Exception:
+            chk_save = tk.Checkbutton(dbg_box, text="保存可视化截图", variable=self.var_debug_save_imgs)
+        chk_save.grid(row=2, column=0, sticky="w", padx=8, pady=(0, 6))
+        ttk.Label(dbg_box, text="保存目录").grid(row=2, column=1, sticky="e", padx=6)
+        ent_dir = ttk.Entry(dbg_box, width=36, textvariable=self.var_debug_overlay_dir)
+        ent_dir.grid(row=2, column=2, columnspan=2, sticky="we", padx=4)
+        def _pick_overlay_dir():
+            try:
+                from tkinter import filedialog as _fd
+                p = _fd.askdirectory(title="选择保存目录")
+            except Exception:
+                p = None
+            if p:
+                try:
+                    self.var_debug_overlay_dir.set(p)
+                except Exception:
+                    pass
+        try:
+            ttk.Button(dbg_box, text="选择…", command=_pick_overlay_dir).grid(row=2, column=4, padx=6)
+        except Exception:
+            pass
+        for c in range(0, 5):
+            try:
+                dbg_box.columnconfigure(c, weight=0)
+            except Exception:
+                pass
+        # 自动保存（去抖）
+        for v in [self.var_debug_enabled, self.var_debug_overlay, self.var_debug_step, self.var_debug_save_imgs, self.var_debug_overlay_dir]:
+            try:
+                v.trace_add("write", lambda *_: self._schedule_autosave())
+            except Exception:
+                pass
+
         log_box = ttk.LabelFrame(container, text="执行日志")
         log_box.pack(fill=tk.BOTH, expand=True)
         log_top = ttk.Frame(log_box)
@@ -171,7 +257,7 @@ class SingleFastBuyTab(BaseTab):
             self._update_task_mode_controls_state()
         except Exception:
             pass
-        # Advanced config panel
+        # 高级配置面板（延时ms / 重启周期）
         try:
             self._build_step_delay_panel(self._tasks_root_frame)
         except Exception:
@@ -435,19 +521,15 @@ class SingleFastBuyTab(BaseTab):
         inner = ttk.Frame(panel)
         inner.pack(fill=tk.X, padx=8, pady=6)
 
-        # Use a single global delay value, default 0.01s; save in real time
-        delays = dict(self.tasks_data.get("step_delays", {}) or {})
-        if not delays or not isinstance(delays, dict):
-            delays = {"default": 0.01}
-        cur_val = 0.01
+        # 新：延时(ms)，默认15ms；保存到 tasks_data.advanced.delay_ms
+        adv = self.tasks_data.get("advanced") if isinstance(self.tasks_data.get("advanced"), dict) else {}
         try:
-            cur_val = float(delays.get("default", 0.01) or 0.01)
+            cur_ms = int((adv or {}).get("delay_ms", 15))
         except Exception:
-            cur_val = 0.01
-
-        ttk.Label(inner, text="延时(秒)", width=14).grid(row=0, column=0, sticky="w")
-        var_delay = tk.DoubleVar(value=cur_val)
-        sp = ttk.Spinbox(inner, from_=0.0, to=1.0, increment=0.001, width=10, textvariable=var_delay)
+            cur_ms = 15
+        ttk.Label(inner, text="延时(ms)", width=14).grid(row=0, column=0, sticky="w")
+        var_delay_ms = tk.IntVar(value=cur_ms)
+        sp = ttk.Spinbox(inner, from_=1, to=2000, increment=1, width=10, textvariable=var_delay_ms)
         sp.grid(row=0, column=1, sticky="w")
 
         # Restart policy: restart game every N minutes (default 60)
@@ -460,20 +542,23 @@ class SingleFastBuyTab(BaseTab):
         sp2 = ttk.Spinbox(inner, from_=5, to=600, increment=5, width=10, textvariable=var_restart)
         sp2.grid(row=1, column=1, sticky="w", pady=(6,0))
 
-        def _apply_delay_from_widget() -> None:
+        def _apply_delay_ms_from_widget() -> None:
             try:
-                val = float(var_delay.get())
+                val_ms = int(var_delay_ms.get())
             except Exception:
                 return
-            # Clamp to a reasonable range [0.0, 1.0]
+            # Clamp to [1, 2000]
+            if val_ms < 1:
+                val_ms = 1
+            if val_ms > 2000:
+                val_ms = 2000
+            # 写入 advanced.delay_ms，并为兼容旧逻辑同步 step_delays.default
+            adv = self.tasks_data.setdefault("advanced", {})
+            adv["delay_ms"] = int(val_ms)
             try:
-                if val < 0.0:
-                    val = 0.0
-                if val > 1.0:
-                    val = 1.0
+                self.tasks_data.setdefault("step_delays", {})["default"] = float(val_ms) / 1000.0
             except Exception:
                 pass
-            self.tasks_data.setdefault("step_delays", {})["default"] = float(val)
             self._save_tasks_data()
 
         def _apply_restart_from_widget() -> None:
@@ -488,12 +573,12 @@ class SingleFastBuyTab(BaseTab):
 
         # Real-time save: on value change, focus out, and Enter
         try:
-            var_delay.trace_add("write", lambda *_: _apply_delay_from_widget())
+            var_delay_ms.trace_add("write", lambda *_: _apply_delay_ms_from_widget())
         except Exception:
             pass
         try:
-            sp.bind("<FocusOut>", lambda _e=None: _apply_delay_from_widget())
-            sp.bind("<Return>", lambda _e=None: _apply_delay_from_widget())
+            sp.bind("<FocusOut>", lambda _e=None: _apply_delay_ms_from_widget())
+            sp.bind("<Return>", lambda _e=None: _apply_delay_ms_from_widget())
         except Exception:
             pass
         try:
@@ -603,6 +688,7 @@ class SingleFastBuyTab(BaseTab):
             output_dir=self.paths.output_dir,
             on_log=self._append_exec_log,
             on_task_update=self._on_task_exec_update,
+            debug_overrides=self._collect_debug_overrides(),
         )
         try:
             if isinstance(self.exec_log_level_var, tk.StringVar):
@@ -613,6 +699,85 @@ class SingleFastBuyTab(BaseTab):
         self._runner.start()
         self._update_exec_controls()
         self._schedule_exec_state_poll()
+
+    # ---- 调试：收集覆盖配置（不落盘） ----
+    def _collect_debug_overrides(self) -> Dict[str, Any]:
+        enabled = bool(getattr(self, "var_debug_enabled", tk.BooleanVar(value=False)).get())
+        try:
+            ov = float(getattr(self, "var_debug_overlay", tk.DoubleVar(value=5.0)).get())
+        except Exception:
+            ov = 5.0
+        if ov < 0.5:
+            ov = 0.5
+        if ov > 15.0:
+            ov = 15.0
+        try:
+            st = float(getattr(self, "var_debug_step", tk.DoubleVar(value=0.0)).get())
+        except Exception:
+            st = 0.0
+        if st < 0.0:
+            st = 0.0
+        if st > 1.0:
+            st = 1.0
+        try:
+            save_imgs = bool(getattr(self, "var_debug_save_imgs", tk.BooleanVar(value=False)).get())
+        except Exception:
+            save_imgs = False
+        try:
+            od = str(getattr(self, "var_debug_overlay_dir", tk.StringVar(value=self._images_path("debug", "可视化调试"))).get() or "").strip()
+        except Exception:
+            od = self._images_path("debug", "可视化调试")
+        return {
+            "enabled": enabled,
+            "overlay_sec": float(ov),
+            "step_sleep": float(st),
+            "save_overlay_images": save_imgs,
+            "overlay_dir": od,
+        }
+
+    def _debug_test_overlay(self) -> None:
+        try:
+            ov = float(getattr(self, "var_debug_overlay", tk.DoubleVar(value=5.0)).get())
+        except Exception:
+            ov = 5.0
+        if ov < 0.5:
+            ov = 0.5
+        if ov > 15.0:
+            ov = 15.0
+        try:
+            top = tk.Toplevel(self)
+            W = int(self.winfo_screenwidth())
+            H = int(self.winfo_screenheight())
+            top.geometry(f"{W}x{H}+0+0")
+            try:
+                top.attributes("-alpha", 0.3)
+            except Exception:
+                pass
+            try:
+                top.attributes("-topmost", True)
+            except Exception:
+                pass
+            top.overrideredirect(True)
+            cv = tk.Canvas(top, bg="black", highlightthickness=0)
+            cv.pack(fill=tk.BOTH, expand=True)
+            try:
+                from super_buyer.services.font_loader import tk_font as _tk_font  # 延迟导入中文字体
+            except Exception:
+                _tk_font = None
+            try:
+                f1 = _tk_font(self, 14) if _tk_font else None
+                if f1 is not None:
+                    cv.create_text(W // 2, 40, text="调试蒙版预览（本页参数）", fill="white", font=f1)
+                else:
+                    cv.create_text(W // 2, 40, text="调试蒙版预览（本页参数）", fill="white")
+            except Exception:
+                pass
+            try:
+                top.after(int(ov * 1000), top.destroy)
+            except Exception:
+                pass
+        except Exception:
+            pass
 
     def _exec_toggle_pause(self) -> None:
         r = getattr(self, "_runner", None)

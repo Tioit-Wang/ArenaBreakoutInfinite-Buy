@@ -72,6 +72,11 @@ class Buyer:
         self._last_avg_ocr_ok: bool = True
         # 平均价 OCR 连续未识别计数（在本类内维护，成功即清零）
         self._avg_ocr_streak: int = 0
+        # 统一本模块内的延时（秒），来源于 ScreenOps 的 step_delay（由外层以 ms 配置），默认 15ms
+        try:
+            self._delay_sec: float = float(getattr(self.screen, "step_delay", 0.015))
+        except Exception:
+            self._delay_sec = 0.015
 
     # ------------------------------ 基础工具 ------------------------------
     def _log(self, item_disp: str, purchased: str, msg: str) -> None:
@@ -89,7 +94,7 @@ class Buyer:
             sw, sh = pg.size()
             pg.moveTo(max(0, int(sw) - 5), max(0, 5))
         except Exception:
-            pass
+                pass
 
     def _click_center_screen_once(self) -> None:
         try:
@@ -99,16 +104,44 @@ class Buyer:
         except Exception:
             pass
         # 任意点击后的短等待：给弹层/遮罩关闭动画一点时间
-        _sleep(0.01)
+        _sleep(self._delay_sec)
+    def _dismiss_success_overlay(self, goods: Optional[Goods] = None) -> None:
+        """关闭购买成功遮罩。
 
-    def _dismiss_success_overlay(self) -> None:
-        # 将鼠标移至安全区并任意点击以关闭“成功遮罩”
+        速度优化：
+        - 若本次详情已缓存“购买”按钮坐标，则无需大范围移动，直接在当前位置快速单击一次。
+        - 若未缓存，则采用“移动至安全区→中间点击→回安全区”的保守路径，避免鼠标遮挡影响模板匹配。
+        """
+        def _click_here_once() -> None:
+            try:
+                self.screen._pg.click()  # type: ignore[attr-defined]
+            except Exception:
+                # 回退到屏幕中心点击
+                self._click_center_screen_once()
+            # 需求：该步用于关闭购买成功遮罩，点击后需要强制等待300ms
+            _sleep(max(0.3, float(getattr(self, "_delay_sec", 0.015))))
+
+        try:
+            has_cache = False
+            if goods is not None:
+                has_cache = (
+                    (self._first_detail_buttons.get(goods.id, {}) or {}).get("btn_buy") is not None
+                )
+            if has_cache:
+                _click_here_once()
+                # 已在 _click_here_once 内部保证≥100ms 的等待
+                return
+        except Exception:
+            pass
+        # 兜底：保守移动策略
         try:
             self._move_cursor_top_right()
             self._click_center_screen_once()
             self._move_cursor_top_right()
         except Exception:
             self._click_center_screen_once()
+        # 需求：该步用于关闭购买成功遮罩，点击后需要强制等待100ms
+        _sleep(max(0.1, float(getattr(self, "_delay_sec", 0.015))))
 
     # --- 详情按钮获取与关闭封装（缓存优先） ---
     def _get_btn_box(
@@ -140,6 +173,16 @@ class Buyer:
         """关闭详情页（缓存坐标优先，失败回退匹配）。返回是否执行了关闭点击。"""
         c = self._get_btn_box(goods, "btn_close", timeout=timeout)
         if c is not None:
+            # 调试：叠加关闭按钮区域
+            try:
+                self._debug_show_overlay(
+                    overlays=[{"rect": c, "label": "按钮-关闭", "fill": (45, 124, 255, 80), "outline": (45, 124, 255)}],
+                    stage="关闭详情",
+                    template_path=None,
+                    save_name="overlay_close_detail.png",
+                )
+            except Exception:
+                pass
             self.screen.click_center(c)
             return True
         return False
@@ -268,6 +311,16 @@ class Buyer:
         # 优先使用缓存坐标
         if goods.id in self._pos_cache:
             # 快速路径：使用缓存坐标直接点击打开详情；验证时缩短匹配超时，减少感知等待
+            try:
+                _rect = self._pos_cache[goods.id]
+                self._debug_show_overlay(
+                    overlays=[{"rect": _rect, "label": "进入详情", "fill": (0, 128, 255, 90), "outline": (0, 128, 255)}],
+                    stage="进入详情点击",
+                    template_path=None,
+                    save_name="overlay_enter_detail.png",
+                )
+            except Exception:
+                pass
             self.screen.click_center(self._pos_cache[goods.id])
             b = self.screen.locate("btn_buy", timeout=0.25)
             c = self.screen.locate("btn_close", timeout=0.25)
@@ -280,6 +333,15 @@ class Buyer:
             box = self._pg_locate_image(goods.image_path, confidence=0.80, timeout=2.5)
             if box is not None:
                 self._pos_cache[goods.id] = box
+                try:
+                    self._debug_show_overlay(
+                        overlays=[{"rect": box, "label": "进入详情", "fill": (0, 128, 255, 90), "outline": (0, 128, 255)}],
+                        stage="进入详情点击",
+                        template_path=None,
+                        save_name="overlay_enter_detail.png",
+                    )
+                except Exception:
+                    pass
                 self.screen.click_center(box)
                 # 回退路径验证也缩短匹配时间，优先提升响应
                 b = self.screen.locate("btn_buy", timeout=0.25)
@@ -334,7 +396,211 @@ class Buyer:
             if time.time() >= end:
                 return None
             # 模板匹配短轮询：等待屏幕刷新，降低 CPU 占用
-            _sleep(0.02)
+            _sleep(self._delay_sec)
+
+    # ------------------------------ 数量输入辅助（非弹药补货） ------------------------------
+    def _find_qty_midpoint(self) -> Optional[Tuple[int, int]]:
+        """定位数量输入区域：默认以 qty_minus/qty_plus 的几何中点作为输入框中心。
+
+        返回 (x, y) 屏幕坐标；若模板缺失或未匹配返回 None。
+        """
+        m = self.screen.locate("qty_minus", timeout=0.2)
+        p = self.screen.locate("qty_plus", timeout=0.2)
+        if m is None or p is None:
+            return None
+        mx, my = int(m[0] + m[2] / 2), int(m[1] + m[3] / 2)
+        px, py = int(p[0] + p[2] / 2), int(p[1] + p[3] / 2)
+        return int((mx + px) / 2), int((my + py) / 2)
+
+    def _focus_and_type_quantity(self, qty: int) -> bool:
+        """点击数量输入框中心并输入数量（清空后输入）。"""
+        mid = self._find_qty_midpoint()
+        if mid is None:
+            return False
+        try:
+            self.screen.click_point(mid[0], mid[1], clicks=1, interval=self._delay_sec)
+            _sleep(self._delay_sec)
+            self.screen.type_text(str(int(qty)), clear_first=True)
+            _sleep(self._delay_sec)
+            return True
+        except Exception:
+            return False
+
+    # ------------------------------ 补货快速循环（Max 一次化/数量输入一次化） ------------------------------
+    def _restock_fast_loop(
+        self,
+        goods: Goods,
+        task: Dict[str, Any],
+        purchased_so_far: int,
+    ) -> Tuple[int, bool]:
+        """进入补货快速循环。
+
+        规则：
+        - “弹药”：仅首次点击一次 Max，后续循环不再点击 Max。
+        - “非弹药”：仅首次点击数量输入框并输入固定数量（统一为 5）。
+        - 循环体：读取均价→仅以补货上限判定→购买→等待结果→成功则快速单击关闭遮罩→达标或不满足退出条件则关闭详情并（如达标）回首页。
+        返回 (本次累计购买数量, 是否继续外层循环)。
+        """
+        item_disp = goods.name or goods.search_name or str(task.get("item_name", ""))
+        target_total = int(task.get("target_total", 0) or 0)
+        bought = 0
+
+        # 计算补货上限
+        try:
+            restock = int(task.get("restock_price", 0) or 0)
+        except Exception:
+            restock = 0
+        try:
+            r_prem = float(task.get("restock_premium_pct", 0.0) or 0.0)
+        except Exception:
+            r_prem = 0.0
+        restock_limit = restock + int(round(restock * max(0.0, r_prem) / 100.0)) if restock > 0 else 0
+
+        # 会话初始化：Max 或 数量输入
+        try:
+            is_ammo = (goods.big_category or "").strip() == "弹药"
+        except Exception:
+            is_ammo = False
+        used_max = False
+        typed_qty = 0
+        if is_ammo:
+            mx = (self._first_detail_buttons.get(goods.id, {}) or {}).get("btn_max") or self.screen.locate("btn_max", timeout=0.3)
+            if mx is not None:
+                self.screen.click_center(mx)
+                _sleep(self._delay_sec)
+                used_max = True
+        else:
+            # 非弹药：默认数量为 5，无需配置
+            if self._focus_and_type_quantity(5):
+                typed_qty = 5
+            else:
+                # 未能定位数量区域：退化为默认 1，继续
+                typed_qty = 1
+
+        # 循环直到退出条件
+        ocr_fail_streak = 0
+        retry_delay = max(self._delay_sec, 0.02)
+        while True:
+            purchased_str = f"{purchased_so_far + bought}/{target_total}"
+            # 价格读取（仅以补货为目标）：expected_floor 仍以阈值/补货价的较大者作为 OCR 合理性下限
+            try:
+                _thr_base = int(task.get("price_threshold", 0) or 0)
+            except Exception:
+                _thr_base = 0
+            _base = _thr_base if _thr_base > 0 else restock
+            unit_price = self._read_avg_unit_price(
+                goods,
+                item_disp,
+                purchased_str,
+                expected_floor=_base if _base > 0 else None,
+                allow_bottom_fallback=False,
+            )
+            if unit_price is None or unit_price <= 0:
+                ocr_fail_streak += 1
+                if ocr_fail_streak < 3:
+                    self._log(
+                        item_disp,
+                        purchased_str,
+                        f"平均单价识别失败（补货），准备重试（第 {ocr_fail_streak} 次）",
+                    )
+                    _sleep(retry_delay)
+                    continue
+                _ = self._close_detail(goods, timeout=0.4)
+                self._log(
+                    item_disp,
+                    purchased_str,
+                    "平均单价识别失败（补货），已关闭详情（重试次数超限）",
+                )
+                return bought, True
+            else:
+                ocr_fail_streak = 0
+
+            ok_restock = (restock > 0) and (unit_price <= restock_limit)
+            if not ok_restock:
+                # 价格不满足：退出补货循环
+                _ = self._close_detail(goods, timeout=0.3)
+                return bought, True
+
+            # 点击购买
+            b = (self._first_detail_buttons.get(goods.id, {}) or {}).get("btn_buy") or self.screen.locate("btn_buy", timeout=0.4)
+            if b is None:
+                _ = self._close_detail(goods, timeout=0.3)
+                self._log(item_disp, purchased_str, "未找到“购买”按钮（补货），已关闭详情")
+                return bought, True
+            try:
+                self._debug_show_overlay(
+                    overlays=[{"rect": b, "label": "按钮-购买", "fill": (255, 99, 71, 70), "outline": (255, 99, 71)}],
+                    stage="点击购买",
+                    template_path=None,
+                    save_name="overlay_click_buy.png",
+                )
+            except Exception:
+                pass
+            self.screen.click_center(b)
+
+            # 等待结果
+            t_end = time.time() + float(getattr(self, "_buy_result_timeout_sec", 0.8))
+            got_ok = False
+            found_fail = False
+            ok_box = None
+            fail_box = None
+            while time.time() < t_end:
+                _ok = self.screen.locate("buy_ok", timeout=0.0)
+                if _ok is not None:
+                    got_ok = True
+                    ok_box = _ok
+                    break
+                _fail = self.screen.locate("buy_fail", timeout=0.0)
+                if _fail is not None:
+                    found_fail = True
+                    fail_box = _fail
+                _sleep(self._delay_sec)
+
+            if got_ok:
+                # 累加数量
+                if is_ammo:
+                    inc = 120 if used_max else 10
+                else:
+                    inc = max(1, int(typed_qty or 5))
+                bought += int(inc)
+                # 写历史
+                try:
+                    _append_purchase(
+                        item_id=goods.id,
+                        item_name=goods.name or goods.search_name or str(task.get("item_name", "")),
+                        price=int(unit_price or 0),
+                        qty=int(inc),
+                        task_id=str(task.get("id", "")) if task.get("id") else None,
+                        task_name=str(task.get("item_name", "")) or None,
+                        category=(goods.big_category or "") or None,
+                        used_max=bool(used_max),
+                        paths=self.history_paths,
+                    )
+                except Exception:
+                    pass
+                # 快速关闭成功遮罩
+                self._dismiss_success_overlay(goods)
+
+                # 达标：关闭详情并回首页，结束当前片段
+                if target_total > 0 and (purchased_so_far + bought) >= target_total:
+                    _ = self._close_detail(goods, timeout=0.3)
+                    h = self.screen.locate("btn_home", timeout=2.0)
+                    if h is not None:
+                        self.screen.click_center(h)
+                        _sleep(self._delay_sec)
+                    return bought, False
+                # 否则继续下一轮
+                continue
+
+            if found_fail:
+                _ = self._close_detail(goods, timeout=0.3)
+                self._log(item_disp, purchased_str, "购买失败（补货），已关闭详情")
+                return bought, True
+
+            # 结果未知：关闭详情退出
+            _ = self._close_detail(goods, timeout=0.3)
+            self._log(item_disp, purchased_str, "结果未知（补货），已关闭详情")
+            return bought, True
 
     # ------------------------------ 价格读取 ------------------------------
 
@@ -345,13 +611,45 @@ class Buyer:
         purchased_str: str,
         *,
         expected_floor: Optional[int] = None,
+        allow_bottom_fallback: bool = True,
     ) -> Optional[int]:
         # 以购买按钮为锚点（与“平均单价预览”一致）
+        # 修复：补货购买后界面可能轻微重排，导致首次缓存的按钮坐标失效。
+        # 这里优先在“缓存附近的小区域内”快速重定位按钮；失败才回退到缓存或全局匹配。
         t_btn = time.perf_counter()
-        # 优先使用缓存的购买按钮；失败则短时匹配
-        buy_box = self._detail_ui_cache.get("btn_buy") or self.screen.locate(
-            "btn_buy", timeout=0.3
-        )
+        prev = self._detail_ui_cache.get("btn_buy")
+        buy_box = None
+        btn_source = "cache"
+        try:
+            if prev is not None:
+                px, py, pw, ph = prev
+                # 以此前坐标为中心扩展一个小区域进行快速匹配（更稳更快）
+                try:
+                    sw, sh = self._pg.size()  # type: ignore[attr-defined]
+                except Exception:
+                    sw, sh = 1920, 1080
+                margin = int(max(8, min(80, max(int(pw), int(ph)))))
+                x0 = max(0, int(px) - margin)
+                y0 = max(0, int(py) - margin)
+                x1 = min(max(1, int(sw) - 1), int(px + pw) + margin)
+                y1 = min(max(1, int(sh) - 1), int(py + ph) + margin)
+                region = (int(x0), int(y0), max(1, int(x1 - x0)), max(1, int(y1 - y0)))
+                cand = self.screen.locate("btn_buy", region=region, timeout=max(0.0, self._delay_sec))
+                if cand is not None:
+                    buy_box = cand
+                    # 更新本次会话缓存（不动首轮跨会话缓存）
+                    self._detail_ui_cache["btn_buy"] = cand
+                    btn_source = "region"
+        except Exception:
+            pass
+        if buy_box is None and prev is not None:
+            buy_box = prev
+        if buy_box is None:
+            cand_global = self.screen.locate("btn_buy", timeout=0.3)
+            if cand_global is not None:
+                buy_box = cand_global
+                self._detail_ui_cache["btn_buy"] = cand_global
+                btn_source = "global"
         btn_ms = int((time.perf_counter() - t_btn) * 1000.0)
         if buy_box is None:
             self._log(
@@ -363,6 +661,12 @@ class Buyer:
             self._last_avg_ocr_ok = False
             self._avg_ocr_streak = int(getattr(self, "_avg_ocr_streak", 0)) + 1
             return None
+        else:
+            self._log(
+                item_disp,
+                purchased_str,
+                f"DEBUG: 购买按钮坐标来源={btn_source} ROI_anchor=({buy_box[0]},{buy_box[1]},{buy_box[2]},{buy_box[3]}) 匹配耗时={btn_ms}ms",
+            )
         b_left, b_top, b_w, b_h = buy_box
         avg_cfg = self.cfg.get("avg_price_area") or {}
         try:
@@ -401,6 +705,19 @@ class Buyer:
             return None
         roi = (x_left, y_top, width, height)
         img = self.screen.screenshot_region(roi)
+        # 调试可视化：显示购买按钮与均价 ROI（不影响已截取的 img 内容）
+        try:
+            self._debug_show_overlay(
+                overlays=[
+                    {"rect": (b_left, b_top, b_w, b_h), "label": "按钮-购买", "fill": (255, 99, 71, 70), "outline": (255, 99, 71)},
+                    {"rect": (x_left, y_top, width, height), "label": "均价OCR区域", "fill": (255, 216, 77, 90), "outline": (255, 216, 77)},
+                ],
+                stage="详情价复核区域",
+                template_path=None,
+                save_name="overlay_detail_avg.png",
+            )
+        except Exception:
+            pass
         if img is None:
             self._log(item_disp, purchased_str, "平均单价 ROI 截屏失败")
             self._last_avg_ocr_ok = False
@@ -422,6 +739,11 @@ class Buyer:
         mid_h = h0 // 2
         img_top = img.crop((0, 0, w0, mid_h))
         img_bot = img.crop((0, mid_h, w0, h0))
+        self._log(
+            item_disp,
+            purchased_str,
+            f"DEBUG: ROI=({x_left},{y_top},{x_left + width},{y_top + height}) 上半尺寸=({img_top.width}x{img_top.height}) 下半尺寸=({img_bot.width}x{img_bot.height})",
+        )
         # 可选缩放（与预览逻辑一致的约束）
         try:
             sc = float(avg_cfg.get("scale", 1.0) or 1.0)
@@ -469,6 +791,56 @@ class Buyer:
                 bin_bot = img_bot.convert("L").point(lambda p: 255 if p > 128 else 0)  # type: ignore
             except Exception:
                 bin_bot = img_bot
+        # 调试：保存 ROI 及上下半区（含二值化）到 output/debug/roi
+        try:
+            dbg = (self.cfg.get("debug", {}) or {})
+            save_roi = bool(dbg.get("save_roi_images", True))
+        except Exception:
+            save_roi = True
+        if save_roi:
+            try:
+                paths_cfg = (self.cfg.get("paths", {}) or {})
+                out_root = str(paths_cfg.get("output_dir", "output") or "output")
+                roi_dir = Path(out_root) / "debug" / "roi"
+                roi_dir.mkdir(parents=True, exist_ok=True)
+                ts = time.strftime("%Y%m%d-%H%M%S")
+                gid = (goods.id or "item").replace("/", "-")
+                base = f"{ts}_{gid}_{purchased_str.replace('/', '-') }"
+                # 原始 ROI
+                try:
+                    img.save(str(roi_dir / f"{base}_roi.png"))
+                except Exception:
+                    pass
+                # 上下半原图
+                try:
+                    img_top.save(str(roi_dir / f"{base}_top.png"))
+                except Exception:
+                    pass
+                try:
+                    img_bot.save(str(roi_dir / f"{base}_bot.png"))
+                except Exception:
+                    pass
+                # 上下半二值图
+                try:
+                    if bin_top is not None:
+                        bin_top.save(str(roi_dir / f"{base}_top_bin.png"))
+                except Exception:
+                    pass
+                try:
+                    if bin_bot is not None:
+                        bin_bot.save(str(roi_dir / f"{base}_bot_bin.png"))
+                except Exception:
+                    pass
+                try:
+                    self._log(
+                        item_disp,
+                        purchased_str,
+                        f"DEBUG: ROI样本已保存 {roi_dir}/{base}_*.png",
+                    )
+                except Exception:
+                    pass
+            except Exception:
+                pass
         # 使用 utils.ocr_utils 进行数字识别（优先路径）
         try:
             ocfg = self.cfg.get("umi_ocr") or {}
@@ -481,6 +853,11 @@ class Buyer:
             ) if bin_top is not None else []
             cand = max([c for c in cands if getattr(c, "value", None) is not None], key=lambda c: int(c.value)) if cands else None  # type: ignore[arg-type]
             val = int(getattr(cand, "value", 0)) if cand is not None and getattr(cand, "value", None) is not None else None
+            self._log(
+                item_disp,
+                purchased_str,
+                f"DEBUG: 上半数字候选数={len(cands) if isinstance(cands, list) else 0} 首选值={getattr(cand, 'value', None)}",
+            )
         except Exception:
             val = None
         if isinstance(val, int) and val > 0:
@@ -489,6 +866,9 @@ class Buyer:
             except Exception:
                 floor = 0
             if floor > 0 and int(val) < max(1, floor // 2):
+                # 数字 OCR 结果明显异常：记为失败并返回
+                self._last_avg_ocr_ok = False
+                self._avg_ocr_streak = int(getattr(self, "_avg_ocr_streak", 0)) + 1
                 return None
             self._log(
                 item_disp,
@@ -505,7 +885,16 @@ class Buyer:
                 )
             except Exception:
                 pass
+            # 数字 OCR 成功：标记成功并清零连续失败计数
+            self._last_avg_ocr_ok = True
+            self._avg_ocr_streak = 0
             return int(val)
+        else:
+            self._log(
+                item_disp,
+                purchased_str,
+                "DEBUG: 上半数字识别无有效值，准备文本OCR",
+            )
         # 仅对上半部分做 OCR（平均单价），统一使用 Umi-OCR（utils/ocr_utils）
         txt = ""
         ocr_ms = -1
@@ -529,6 +918,11 @@ class Buyer:
                 f"Umi OCR 失败: {e} | ROI=({x_left},{y_top},{x_left + width},{y_top + mid_h}) 缩放={sc:.2f} btn耗时={btn_ms}ms OCR耗时={ocr_ms if ocr_ms >= 0 else '-'}ms",
             )
             raise FatalOcrError(str(e))
+        self._log(
+            item_disp,
+            purchased_str,
+            f"DEBUG: 上半文本OCR结果='{(txt or '').strip()[:80]}' 耗时={ocr_ms}ms",
+        )
         val = _parse_price_text(txt or "")
         if val is None or val <= 0:
             self._log(
@@ -536,6 +930,76 @@ class Buyer:
                 purchased_str,
                 f"平均价 OCR 解析失败：'{(txt or '').strip()[:64]}' | ROI=({x_left},{y_top},{x_left + width},{y_top + mid_h}) 缩放={sc:.2f} btn耗时={btn_ms}ms OCR耗时={ocr_ms if ocr_ms >= 0 else '-'}ms",
             )
+            # 新增：在允许的情况下，尝试对下半部分（合计区域）做数字识别作为兜底。
+            # 说明：仅在预补货阶段安全（数量通常为1）；进入补货会话后可能为多数量，禁止兜底。
+            if allow_bottom_fallback and bin_bot is not None:
+                try:
+                    ocfg = self.cfg.get("umi_ocr") or {}
+                    cands2 = recognize_numbers(
+                        bin_bot,
+                        base_url=str(ocfg.get("base_url", "http://127.0.0.1:1224")),
+                        timeout=float(ocfg.get("timeout_sec", 2.5) or 2.5),
+                        options=dict(ocfg.get("options", {}) or {}),
+                        offset=(x_left, y_top + mid_h),
+                    )
+                    cand2 = max([c for c in cands2 if getattr(c, "value", None) is not None], key=lambda c: int(c.value)) if cands2 else None  # type: ignore[arg-type]
+                    val2 = int(getattr(cand2, "value", 0)) if cand2 is not None and getattr(cand2, "value", None) is not None else None
+                    self._log(
+                        item_disp,
+                        purchased_str,
+                        f"DEBUG: 下半数字候选数={len(cands2) if isinstance(cands2, list) else 0} 首选值={getattr(cand2, 'value', None)}",
+                    )
+                except Exception:
+                    val2 = None
+                if isinstance(val2, int) and val2 > 0:
+                    try:
+                        floor = int(expected_floor or 0)
+                    except Exception:
+                        floor = 0
+                    if floor > 0 and int(val2) < max(1, floor // 2):
+                        # 兜底数值也明显异常：仍记为失败
+                        self._last_avg_ocr_ok = False
+                        self._avg_ocr_streak = int(getattr(self, "_avg_ocr_streak", 0)) + 1
+                        return None
+                    # 接受兜底结果
+                    self._log(
+                        item_disp,
+                        purchased_str,
+                        f"平均价 OCR 成功(下部兜底) 值={val2} ROI=({x_left},{y_top + mid_h},{x_left + width},{y_top + height}) 缩放={sc:.2f} btn耗时={btn_ms}ms",
+                    )
+                    try:
+                        _append_price(
+                            item_id=goods.id,
+                            item_name=goods.name or goods.search_name or str(item_disp),
+                            price=int(val2),
+                            category=(goods.big_category or "") or None,
+                            paths=self.history_paths,
+                        )
+                    except Exception:
+                        pass
+                    self._last_avg_ocr_ok = True
+                    self._avg_ocr_streak = 0
+                    return int(val2)
+            else:
+                if not allow_bottom_fallback:
+                    self._log(
+                        item_disp,
+                        purchased_str,
+                        "DEBUG: 补货模式禁用下半兜底",
+                    )
+                elif bin_bot is None:
+                    self._log(
+                        item_disp,
+                        purchased_str,
+                        "DEBUG: 下半图像为空，无法兜底",
+                    )
+                else:
+                    self._log(
+                        item_disp,
+                        purchased_str,
+                        "DEBUG: 下半兜底无有效数值",
+                    )
+            # 顶部与兜底均失败：记录失败并退出
             self._last_avg_ocr_ok = False
             self._avg_ocr_streak = int(getattr(self, "_avg_ocr_streak", 0)) + 1
             return None
@@ -663,13 +1127,11 @@ class Buyer:
                 _ = self._close_detail(goods, timeout=0.4)
                 return bought, True
 
-            used_max = False
-            if ok_restock and (goods.big_category or "").strip() == "弹药":
-                mx = self._first_detail_buttons.get(goods.id, {}).get("btn_max") or self.screen.locate("btn_max", timeout=0.3)
-                if mx is not None:
-                    self.screen.click_center(mx)
-                    _sleep(0.02)
-                    used_max = True
+            # 一旦满足补货，进入专用的补货快速循环（弹药 Max 一次化 / 非弹药数量输入一次化）
+            if ok_restock:
+                got_more, cont = self._restock_fast_loop(goods, task, purchased_so_far + bought)
+                bought += int(got_more)
+                return bought, cont
 
             b = self._first_detail_buttons.get(goods.id, {}).get("btn_buy") or self.screen.locate("btn_buy", timeout=0.4)
             if b is None:
@@ -677,17 +1139,32 @@ class Buyer:
                 _ = self._close_detail(goods, timeout=0.3)
                 self._log(item_disp, purchased_str, "未找到“购买”按钮，已关闭详情")
                 return bought, True
+            try:
+                self._debug_show_overlay(
+                    overlays=[{"rect": b, "label": "按钮-购买", "fill": (255, 99, 71, 70), "outline": (255, 99, 71)}],
+                    stage="点击购买",
+                    template_path=None,
+                    save_name="overlay_click_buy.png",
+                )
+            except Exception:
+                pass
             self.screen.click_center(b)
 
-            t_end = time.time() + 0.5
+            t_end = time.time() + float(getattr(self, "_buy_result_timeout_sec", 0.8))
             got_ok = False
             found_fail = False
+            ok_box = None
+            fail_box = None
             while time.time() < t_end:
-                if self.screen.locate("buy_ok", timeout=0.0) is not None:
+                _ok = self.screen.locate("buy_ok", timeout=0.0)
+                if _ok is not None:
                     got_ok = True
+                    ok_box = _ok
                     break
-                if self.screen.locate("buy_fail", timeout=0.0) is not None:
+                _fail = self.screen.locate("buy_fail", timeout=0.0)
+                if _fail is not None:
                     found_fail = True
+                    fail_box = _fail
                 _sleep(0.02)
 
             if got_ok:
@@ -696,10 +1173,11 @@ class Buyer:
                     is_ammo = (goods.big_category or "").strip() == "弹药"
                 except Exception:
                     is_ammo = False
+                # 普通模式下不涉及 Max 的补货，会走到这里；保持原有规则
                 if is_ammo:
-                    inc = 120 if used_max else 10
+                    inc = 10
                 else:
-                    inc = 5 if used_max else 1
+                    inc = 1
                 bought += int(inc)
                 # 记录购买历史（关联任务与物品）
                 try:
@@ -713,12 +1191,12 @@ class Buyer:
                         task_id=str(task.get("id", "")) if task.get("id") else None,
                         task_name=str(task.get("item_name", "")) or None,
                         category=(goods.big_category or "") or None,
-                        used_max=bool(used_max),
+                        used_max=False,
                         paths=self.history_paths,
                     )
                 except Exception:
                     pass
-                self._dismiss_success_overlay()
+                self._dismiss_success_overlay(goods)
                 continue
             if found_fail:
                 # 购买失败：关闭详情（缓存优先）
@@ -789,6 +1267,7 @@ class TaskRunner:
         output_dir: Optional[str | Path] = None,
         on_log: Optional[Callable[[str], None]] = None,
         on_task_update: Optional[Callable[[int, Dict[str, Any]], None]] = None,
+        debug_overrides: Optional[Dict[str, Any]] = None,
     ) -> None:
         self.on_log = on_log or (lambda s: None)
         self.on_task_update = on_task_update or (lambda i, it: None)
@@ -798,6 +1277,18 @@ class TaskRunner:
 
         # 配置快照
         self.cfg = load_config(cfg_path)
+        # 合并调试覆盖（仅本次运行生效，不落盘）
+        if isinstance(debug_overrides, dict):
+            try:
+                base_dbg = dict(self.cfg.get("debug", {}) or {}) if isinstance(self.cfg.get("debug"), dict) else {}
+            except Exception:
+                base_dbg = {}
+            try:
+                nd = dict(base_dbg)
+                nd.update(debug_overrides)
+                self.cfg["debug"] = nd
+            except Exception:
+                self.cfg["debug"] = debug_overrides
         self.tasks_data = json.loads(json.dumps(tasks_data or {"tasks": []}))
         self.goods_map: Dict[str, Goods] = self._load_goods(goods_path)
         paths_cfg = self.cfg.get("paths", {}) or {}
@@ -807,9 +1298,77 @@ class TaskRunner:
         self.history_paths = _resolve_history_paths(out_dir)
 
         # 派生辅助对象
-        step_delay = float(
-            ((self.tasks_data.get("step_delays") or {}).get("default", 0.01)) or 0.01
-        )
+        # 高级配置：延时单位 ms，默认 15ms；兼容旧字段 step_delays.default（秒）
+        adv = self.tasks_data.get("advanced") if isinstance(self.tasks_data.get("advanced"), dict) else {}
+        try:
+            delay_ms = float((adv or {}).get("delay_ms", 15))
+            step_delay = max(0.0, delay_ms / 1000.0)
+        except Exception:
+            step_delay = 0.015
+        # 兼容旧配置：当 advanced 未给出时回退到 step_delays.default（单位秒）
+        if (adv or {}).get("delay_ms") is None:
+            try:
+                step_delay = float(((self.tasks_data.get("step_delays") or {}).get("default", step_delay)) or step_delay)
+            except Exception:
+                pass
+        # 解析调试配置并尝试覆盖步进延时；规范化保存目录
+        dbg = (self.cfg.get("debug", {}) or {}) if isinstance(self.cfg.get("debug"), dict) else {}
+        try:
+            self._debug_enabled = bool(dbg.get("enabled", False))
+        except Exception:
+            self._debug_enabled = False
+        try:
+            self._debug_overlay_sec = float(dbg.get("overlay_sec", 5.0) or 5.0)
+        except Exception:
+            self._debug_overlay_sec = 5.0
+        try:
+            self._debug_step_sleep = float(dbg.get("step_sleep", 0.0) or 0.0)
+        except Exception:
+            self._debug_step_sleep = 0.0
+        try:
+            self._debug_save_overlay_images = bool(dbg.get("save_overlay_images", False))
+        except Exception:
+            self._debug_save_overlay_images = False
+        # 保存目录：默认 output/debug/single_tasks；若为 images/debug/* 则改写到 output/debug 下
+        try:
+            paths_cfg2 = (self.cfg.get("paths", {}) or {}) if isinstance(self.cfg.get("paths"), dict) else {}
+        except Exception:
+            paths_cfg2 = {}
+        out_root = str(paths_cfg2.get("output_dir", "output") or "output")
+        try:
+            od = str(dbg.get("overlay_dir", ""))
+        except Exception:
+            od = ""
+        if not od:
+            od = os.path.join(out_root, "debug", "single_tasks")
+        else:
+            try:
+                if not os.path.isabs(od):
+                    p_norm = od.replace("\\", "/")
+                    if p_norm.startswith("images/debug") or p_norm.startswith("images/\\debug"):
+                        od = os.path.join(out_root, "debug", os.path.basename(od))
+            except Exception:
+                pass
+        self._debug_overlay_dir = od
+        # 覆盖步进延时（仅当启用调试）
+        if self._debug_enabled:
+            try:
+                dd = float(self._debug_step_sleep or 0.0)
+            except Exception:
+                dd = 0.0
+            base_min = 0.02
+            if dd < max(step_delay, base_min):
+                dd = max(step_delay, base_min)
+            if dd > 0.2:
+                dd = 0.2
+            step_delay = dd
+        # 可视化窗口状态
+        self._ov_top = None
+        self._ov_canvas = None
+        self._ov_img_refs = []
+        self._overlay_seq = 0
+        # 单任务会话的调试叠加分组目录（在 _run 内按轮设置）
+        self._loop_dir: Optional[str] = None
         self.screen = ScreenOps(self.cfg, step_delay=step_delay)
         self.buyer = Buyer(
             self.cfg,
@@ -817,6 +1376,12 @@ class TaskRunner:
             self._relay_log,
             history_paths=self.history_paths,
         )
+
+        # 将 Runner 的调试叠加能力注入 Buyer
+        try:
+            setattr(self.buyer, "_debug_show_overlay", self._debug_show_overlay)
+        except Exception:
+            pass
 
         # 处罚检测：OCR 连续未识别计数与参数（与多商品模式保持一致）
         self._ocr_miss_streak: int = 0
@@ -836,6 +1401,11 @@ class TaskRunner:
             self._penalty_wait_after_confirm_sec = float(tuning.get("penalty_wait_sec", 180.0) or 180.0)
         except Exception:
             self._penalty_wait_after_confirm_sec = 180.0
+        # 购买结果等待时长（与多商品一致，可通过 multi_snipe_tuning.buy_result_timeout_sec 调整）
+        try:
+            self._buy_result_timeout_sec = float(tuning.get("buy_result_timeout_sec", 0.8) or 0.8)
+        except Exception:
+            self._buy_result_timeout_sec = 0.8
         # 成功时间戳：用于抑制“刚识别过又检查处罚”的抖动
         self._last_avg_ok_ts: float = 0.0
 
@@ -852,6 +1422,386 @@ class TaskRunner:
         self._next_restart_ts: Optional[float] = None
         # 降噪用：空闲提示的节流时间戳
         self._last_idle_log_ts: float = 0.0
+
+    # ------------------------------ 调试可视化 ------------------------------
+    def _debug_active(self) -> bool:
+        try:
+            return bool(getattr(self, "_debug_enabled", False))
+        except Exception:
+            return False
+
+    def _debug_screenshot_full(self):
+        try:
+            return self.screen._pg.screenshot()  # type: ignore[attr-defined]
+        except Exception:
+            return None
+
+    def _debug_build_annotated(self, base_img, overlays: List[Dict[str, Any]], *, stage: str, template_path: Optional[str] = None):
+        try:
+            from PIL import Image, ImageDraw  # type: ignore
+        except Exception:
+            return None
+        if base_img is None:
+            return None
+        try:
+            img = base_img.convert("RGBA")
+        except Exception:
+            return None
+        W, H = img.size
+        # 半透明全屏蒙版
+        try:
+            mask = Image.new("RGBA", (W, H), (0, 0, 0, 120))
+            img = Image.alpha_composite(img, mask)
+        except Exception:
+            pass
+        try:
+            draw = ImageDraw.Draw(img)
+        except Exception:
+            return None
+        # 辅助：rect(x,y,w,h) -> (x1,y1,x2,y2)
+        def _xyxy(rect):
+            x, y, w, h = rect
+            return int(x), int(y), int(x + w), int(y + h)
+        # 绘制 ROI
+        for ov in overlays or []:
+            try:
+                rect = tuple(ov.get("rect", ()))
+                if len(rect) != 4:
+                    continue
+                x1, y1, x2, y2 = _xyxy(rect)  # type: ignore[arg-type]
+                fill = ov.get("fill", (255, 216, 77, 90))
+                outline = ov.get("outline", (255, 216, 77))
+                # 先以叠加层方式绘制填充，再画描边
+                try:
+                    roi_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+                    roi_draw = ImageDraw.Draw(roi_layer)
+                    roi_draw.rectangle([x1, y1, x2, y2], fill=tuple(fill))
+                    img = Image.alpha_composite(img, roi_layer)
+                    draw = ImageDraw.Draw(img)
+                except Exception:
+                    pass
+                try:
+                    draw.rectangle([x1, y1, x2, y2], outline=tuple(outline), width=2)
+                except Exception:
+                    pass
+                # 标签背景 + 文本（中文字体）
+                label = str(ov.get("label", "") or "")
+                if label:
+                    try:
+                        tw = draw.textlength(label)
+                        th = 16
+                    except Exception:
+                        tw, th = len(label) * 8, 16
+                    pad = 4
+                    bx1, by1 = x1 + 2, y1 + 2
+                    bx2, by2 = bx1 + int(tw) + pad * 2, by1 + th + pad
+                    try:
+                        draw.rectangle([bx1, by1, bx2, by2], fill=(0, 0, 0, 160))
+                    except Exception:
+                        pass
+                    try:
+                        from super_buyer.services.font_loader import draw_text as _draw_text  # type: ignore
+                        _draw_text(draw, (bx1 + pad, by1 + pad // 2), label, fill=(255, 255, 255, 255), size=14)
+                    except Exception:
+                        try:
+                            draw.text((bx1 + pad, by1 + pad // 2), label, fill=(255, 255, 255, 255))
+                        except Exception:
+                            pass
+            except Exception:
+                continue
+        # 阶段标题
+        if stage:
+            t = f"调试：{stage}"
+            try:
+                tw = draw.textlength(t)
+                th = 18
+            except Exception:
+                tw, th = len(t) * 8, 18
+            cx, top = W // 2, 20
+            try:
+                draw.rectangle([cx - tw // 2 - 8, top - 6, cx + tw // 2 + 8, top + th + 6], fill=(0, 0, 0, 170))
+            except Exception:
+                pass
+            try:
+                from super_buyer.services.font_loader import draw_text as _draw_text  # type: ignore
+                _draw_text(draw, (cx - tw // 2, top), t, fill=(255, 255, 255, 255), size=16)
+            except Exception:
+                try:
+                    draw.text((cx - tw // 2, top), t, fill=(255, 255, 255, 255))
+                except Exception:
+                    pass
+        # 模板原图贴图
+        try:
+            import os
+            if template_path and os.path.exists(template_path):
+                from PIL import Image as _PILImage  # type: ignore
+                # 选择目标 ROI：优先 label 含“模板”，否则第一个
+                target_rect = None
+                for ov in overlays or []:
+                    lb = str(ov.get("label", ""))
+                    if "模板" in lb:
+                        target_rect = ov.get("rect")
+                        break
+                if target_rect is None and overlays:
+                    target_rect = overlays[0].get("rect")
+                if target_rect:
+                    x1, y1, x2, y2 = _xyxy(target_rect)
+                    tpl = _PILImage.open(template_path).convert("RGBA")
+                    maxw = 200
+                    ratio = min(1.0, maxw / max(1, tpl.width))
+                    tw, th = max(1, int(tpl.width * ratio)), max(1, int(tpl.height * ratio))
+                    try:
+                        tpl = tpl.resize((tw, th))
+                    except Exception:
+                        pass
+                    px = x2 + 10
+                    py = y1
+                    if px + tw > W - 8:
+                        px = x1 - 10 - tw
+                    if px < 8:
+                        px = max(8, min(W - tw - 8, x1))
+                    py = max(8, min(H - th - 8, py))
+                    try:
+                        draw.rectangle([px - 6, py - 24, px + tw + 6, py + th + 6], fill=(0, 0, 0, 180))
+                    except Exception:
+                        pass
+                    try:
+                        from super_buyer.services.font_loader import draw_text as _draw_text  # type: ignore
+                        _draw_text(draw, (px, py - 18), "模板原图", fill=(255, 255, 255, 255), size=14)
+                    except Exception:
+                        try:
+                            draw.text((px, py - 18), "模板原图", fill=(255, 255, 255, 255))
+                        except Exception:
+                            pass
+                    try:
+                        img.alpha_composite(tpl, dest=(px, py))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        try:
+            return img.convert("RGB")
+        except Exception:
+            return None
+
+    def _debug_show_overlay(self, overlays: List[Dict[str, Any]], *, stage: str, template_path: Optional[str] = None, save_name: Optional[str] = None) -> None:
+        if not self._debug_active():
+            return
+        try:
+            self._overlay_seq += 1
+            seq = int(self._overlay_seq)
+        except Exception:
+            seq = 1
+            self._overlay_seq = 1
+        def _clean(s: str) -> str:
+            s = str(s or "").strip()
+            for ch in ("/", "\\", ":", "*", "?", "\"", "<", ">", "|", " "):
+                s = s.replace(ch, "_")
+            return s[:60] or "overlay"
+        fname = save_name or f"{_clean(stage)}.png"
+        fname = f"{seq:03d}_{fname}"
+        delay_ms = int(max(0.0, float(getattr(self, "_debug_overlay_sec", 5.0))) * 1000)
+        # 输出一次可视化摘要（DEBUG）
+        try:
+            self._relay_log(
+                f"【DEBUG】[可视化] 阶段={stage} 叠加数={len(overlays) if overlays else 0} 持续={getattr(self,'_debug_overlay_sec',0)}s 保存={'on' if getattr(self,'_debug_save_overlay_images', False) else 'off'} seq={seq}"
+            )
+        except Exception:
+            pass
+
+        # 无 Tk：静态截图上绘制并可选保存
+        try:
+            import tkinter as tk  # type: ignore
+            root = getattr(tk, "_default_root", None)
+        except Exception:
+            root = None
+        if root is None:
+            base = self._debug_screenshot_full()
+            if base is not None and bool(getattr(self, "_debug_save_overlay_images", False)):
+                annotated = self._debug_build_annotated(base, overlays, stage=stage, template_path=template_path)
+                if annotated is not None:
+                    try:
+                        target_dir = getattr(self, "_loop_dir", None) or self._debug_overlay_dir
+                        os.makedirs(target_dir, exist_ok=True)
+                        annotated.save(os.path.join(target_dir, fname))
+                    except Exception:
+                        pass
+            _sleep(float(delay_ms) / 1000.0)
+            return
+
+        # Tk 路径：创建/复用全屏蒙版窗口绘制
+        done = threading.Event()
+        def _spawn():
+            try:
+                W = int(root.winfo_screenwidth())
+                H = int(root.winfo_screenheight())
+            except Exception:
+                W, H = 1920, 1080
+            try:
+                import tkinter as tk  # type: ignore
+                top = getattr(self, "_ov_top", None)
+                cv = getattr(self, "_ov_canvas", None)
+                if top is None or cv is None:
+                    t = tk.Toplevel(root)
+                    try:
+                        t.attributes("-topmost", True)
+                    except Exception:
+                        pass
+                    t.overrideredirect(True)
+                    try:
+                        t.attributes("-alpha", 0.35)
+                    except Exception:
+                        pass
+                    try:
+                        t.geometry(f"{W}x{H}+0+0")
+                    except Exception:
+                        pass
+                    c = tk.Canvas(t, width=W, height=H, highlightthickness=0, bg="#000000")
+                    try:
+                        c.pack(fill=tk.BOTH, expand=True)
+                    except Exception:
+                        c.pack()
+                    self._ov_top = t
+                    self._ov_canvas = c
+                    top, cv = t, c
+                else:
+                    try:
+                        top.deiconify()
+                    except Exception:
+                        pass
+                    try:
+                        top.geometry(f"{W}x{H}+0+0")
+                    except Exception:
+                        pass
+                    try:
+                        cv.delete("all")
+                    except Exception:
+                        pass
+                # 顶部阶段标题
+                try:
+                    from super_buyer.services.font_loader import tk_font as _tk_font  # type: ignore
+                except Exception:
+                    _tk_font = None
+                try:
+                    title = f"调试：{stage}" if stage else "调试"
+                    f = _tk_font(top, 14) if _tk_font else None
+                    if f is not None:
+                        cv.create_text(W // 2, 20, text=title, fill="#ffffff", font=f)
+                    else:
+                        cv.create_text(W // 2, 20, text=title, fill="#ffffff")
+                except Exception:
+                    pass
+                for ov in overlays or []:
+                    try:
+                        rect = tuple(ov.get("rect", ()))
+                        if len(rect) != 4:
+                            continue
+                        x, y, w, h = [int(v) for v in rect]
+                        fill = ov.get("fill", (255, 216, 77, 90))
+                        outline = ov.get("outline", (255, 216, 77))
+                        label = str(ov.get("label", ""))
+                        try:
+                            cv.create_rectangle(x, y, x + w, y + h, outline="#%02x%02x%02x" % (outline[0], outline[1], outline[2]))
+                        except Exception:
+                            pass
+                        try:
+                            for yy in range(y, y + h, 3):
+                                cv.create_line(x, yy, x + w, yy, fill="#%02x%02x%02x" % (fill[0], fill[1], fill[2]))
+                        except Exception:
+                            pass
+                        if label:
+                            try:
+                                if _tk_font is not None:
+                                    f2 = _tk_font(top, 12)
+                                    cv.create_text(x + 6, y + 6, anchor="nw", text=label, fill="white", font=f2)
+                                else:
+                                    cv.create_text(x + 6, y + 6, anchor="nw", text=label, fill="white")
+                            except Exception:
+                                pass
+                    except Exception:
+                        continue
+                # 若提供模板，贴图到 ROI 旁
+                try:
+                    import os
+                    from PIL import Image, ImageTk  # type: ignore
+                    target_rect = None
+                    for ov in overlays or []:
+                        if "模板" in str(ov.get("label", "")):
+                            target_rect = ov.get("rect")
+                            break
+                    if target_rect is None and overlays:
+                        target_rect = overlays[0].get("rect")
+                    if template_path and os.path.exists(template_path) and target_rect:
+                        rx, ry, rw, rh = [int(v) for v in target_rect]  # type: ignore
+                        tpl = Image.open(template_path).convert("RGBA")
+                        maxw = 200
+                        ratio = min(1.0, maxw / max(1, tpl.width))
+                        tw, th = max(1, int(tpl.width * ratio)), max(1, int(tpl.height * ratio))
+                        try:
+                            tpl = tpl.resize((tw, th))
+                        except Exception:
+                            pass
+                        px = rx + rw + 10
+                        py = ry
+                        if px + tw > W - 8:
+                            px = rx - 10 - tw
+                        if px < 8:
+                            px = max(8, min(W - tw - 8, rx))
+                        py = max(8, min(H - th - 8, py))
+                        try:
+                            cv.create_rectangle(px - 6, py - 24, px + tw + 6, py + th + 6, fill="#000000", outline="")
+                            title2 = "模板原图"
+                            if _tk_font is not None:
+                                f3 = _tk_font(top, 11)
+                                cv.create_text(px, py - 12, text=title2, fill="#ffffff", anchor="w", font=f3)
+                            else:
+                                cv.create_text(px, py - 12, text=title2, fill="#ffffff", anchor="w")
+                        except Exception:
+                            pass
+                        try:
+                            ph = ImageTk.PhotoImage(tpl)
+                            self._ov_img_refs.append(ph)
+                            cv.create_image(px, py, image=ph, anchor="nw")
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                # 可选：保存真实屏幕截图（含叠加）
+                if bool(getattr(self, "_debug_save_overlay_images", False)):
+                    def _capture_and_save():
+                        try:
+                            import pyautogui as _pg  # type: ignore
+                            img = _pg.screenshot()
+                            loop_dir = getattr(self, "_loop_dir", None) or self._debug_overlay_dir
+                            os.makedirs(loop_dir, exist_ok=True)
+                            img.save(os.path.join(loop_dir, fname))
+                        except Exception:
+                            pass
+                    try:
+                        top.after(80, _capture_and_save)
+                    except Exception:
+                        pass
+                try:
+                    top.after(delay_ms, lambda: (top.withdraw(), done.set()))
+                except Exception:
+                    done.set()
+            except Exception:
+                done.set()
+        try:
+            import threading as _th
+            if _th.current_thread() is _th.main_thread():
+                _spawn()
+            else:
+                try:
+                    root.after(0, _spawn)
+                except Exception:
+                    _spawn()
+        except Exception:
+            _spawn()
+        try:
+            done.wait(timeout=max(0.1, float(delay_ms) / 1000.0 + 0.1))
+        except Exception:
+            pass
 
     # ------------------------------ 对外 API ------------------------------
     def start(self) -> None:
@@ -997,6 +1947,28 @@ class TaskRunner:
         try:
             if not self._ensure_ready():
                 return
+            # 开始前重置调试序号，并准备本次会话的叠加保存目录
+            try:
+                self._overlay_seq = 0
+                if bool(getattr(self, "_debug_save_overlay_images", False)):
+                    loop_name = time.strftime("%Y%m%d-%H%M%S")
+                    self._loop_dir = os.path.join(self._debug_overlay_dir, loop_name)
+            except Exception:
+                pass
+            # 调试模式提示与可视化试运行
+            try:
+                if getattr(self, "_debug_enabled", False):
+                    self._relay_log(
+                        f"【{_now_label()}】【全局】【-】：调试模式已启用 overlay={getattr(self,'_debug_overlay_sec',5.0)}s step={getattr(self,'_debug_step_sleep',0.0)} 保存={'on' if getattr(self,'_debug_save_overlay_images', False) else 'off'} 目录={getattr(self,'_debug_overlay_dir','')}"
+                    )
+                    # 小块提示叠加（左上角 320x80），验证可视化链路
+                    self._debug_show_overlay(
+                        overlays=[{"rect": (20, 20, 320, 80), "label": "调试启用", "fill": (0, 128, 255, 90), "outline": (0, 128, 255)}],
+                        stage="调试启用提示",
+                        save_name="overlay_debug_start.png",
+                    )
+            except Exception:
+                pass
             # 规范化任务列表
             tasks: List[Dict[str, Any]] = list(self.tasks_data.get("tasks", []) or [])
             # 稳定排序（按 order 升序）
@@ -1398,7 +2370,30 @@ class TaskRunner:
                 self._relay_log(f"【{_now_label()}】【全局】【-】：未发现处罚提示模板，稍后继续重试…")
             except Exception:
                 pass
+            # 未命中处罚提示：清零相关计数，避免持续重复触发
+            try:
+                self._ocr_miss_streak = 0
+            except Exception:
+                pass
+            try:
+                # 同步清理 Buyer 内部的本地计数，防止误触发
+                if getattr(self, "buyer", None) is not None:
+                    setattr(self.buyer, "_avg_ocr_streak", 0)
+                    setattr(self.buyer, "_last_avg_ocr_ok", True)
+            except Exception:
+                pass
             return
+        # 命中处罚提示时：可视化叠加提示区域
+        try:
+            if warn_box is not None:
+                self._debug_show_overlay(
+                    overlays=[{"rect": warn_box, "label": "处罚提示", "fill": (255, 193, 7, 80), "outline": (255, 193, 7)}],
+                    stage="检测到处罚提示",
+                    template_path=None,
+                    save_name="overlay_penalty_warning.png",
+                )
+        except Exception:
+            pass
         # 延迟后点击确认
         _sleep(max(0.0, float(getattr(self, "_penalty_confirm_delay_sec", 5.0))))
         btn_box = None
@@ -1406,6 +2401,15 @@ class TaskRunner:
         while time.time() < end and btn_box is None:
             btn_box = self.screen.locate("btn_penalty_confirm", timeout=0.2)
         if btn_box is not None:
+            try:
+                self._debug_show_overlay(
+                    overlays=[{"rect": btn_box, "label": "处罚确认", "fill": (76, 175, 80, 80), "outline": (76, 175, 80)}],
+                    stage="点击处罚确认",
+                    template_path=None,
+                    save_name="overlay_penalty_confirm.png",
+                )
+            except Exception:
+                pass
             self.screen.click_center(btn_box)
             try:
                 self._relay_log(

@@ -583,6 +583,20 @@ class App(tk.Tk):
                         data["tasks"] = []
                     if not isinstance(data.get("step_delays"), dict):
                         data["step_delays"] = {"default": 0.01}
+                    # 新增：高级配置 advanced.delay_ms（毫秒）；若缺失则从旧字段迁移/设默认15
+                    adv = data.get("advanced") if isinstance(data.get("advanced"), dict) else None
+                    if adv is None:
+                        adv = {}
+                        try:
+                            # 从旧 step_delays.default(秒) 迁移为 ms
+                            sec = float((data.get("step_delays") or {}).get("default", 0.015) or 0.015)
+                        except Exception:
+                            sec = 0.015
+                        try:
+                            adv["delay_ms"] = max(1, int(round(sec * 1000.0)))
+                        except Exception:
+                            adv["delay_ms"] = 15
+                        data["advanced"] = adv
                     # New defaults for task mode and restart policy
                     if str(data.get("task_mode") or "") not in ("time", "round"):
                         data["task_mode"] = "time"

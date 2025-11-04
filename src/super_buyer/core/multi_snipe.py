@@ -1732,6 +1732,11 @@ class MultiSnipeRunner:
                 self._log_debug("[风控] 未发现处罚提示模板，稍后继续重试。")
             except Exception:
                 pass
+            # 未命中处罚提示：清零计数，符合“未命中即清零”的策略
+            try:
+                self._ocr_miss_streak = 0
+            except Exception:
+                pass
             return
 
         # 可视化叠加（若开启）
