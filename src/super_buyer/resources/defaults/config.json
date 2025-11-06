@@ -1,8 +1,10 @@
 {
   "game": {
-    "exe_path": "",
+    "exe_path": "C:/WeGameApps/rail_apps/暗区突围无限(2001688)/WeGameLauncher/launcher.exe",
     "launch_args": "",
-    "startup_timeout_sec": 180
+    "startup_timeout_sec": 180,
+    "launcher_timeout_sec": 60,
+    "launch_click_delay_sec": 20
   },
   "umi_ocr": {
     "base_url": "http://127.0.0.1:1224",
@@ -13,31 +15,104 @@
   },
   "ocr_allowlist": "0123456789KkMm",
   "paths": {
-    "output_dir": "output"
+    "output_dir": "C:\\Code\\PythonProjects\\ArenaBreakoutInfinite-Buy\\data\\output"
   },
   "hotkeys": {
-    "toggle": "<Control-Alt-t>",
-    "stop": "<Control-Alt-t>"
+    "toggle": "<Control-Alt-t>"
   },
   "templates": {
-    "btn_launch": {"path": "images/btn_launch.png", "confidence": 0.85},
-    "home_indicator": {"path": "images/home_indicator.png", "confidence": 0.85},
-    "market_indicator": {"path": "images/market_indicator.png", "confidence": 0.85},
-    "btn_market": {"path": "images/btn_market.png", "confidence": 0.85},
-    "btn_home": {"path": "images/btn_home.png", "confidence": 0.85},
-    "input_search": {"path": "images/input_search.png", "confidence": 0.85},
-    "btn_search": {"path": "images/btn_search.png", "confidence": 0.85},
-    "btn_buy": {"path": "images/btn_buy.png", "confidence": 0.88},
-    "buy_ok": {"path": "images/buy_ok.png", "confidence": 0.9},
-    "buy_fail": {"path": "images/buy_fail.png", "confidence": 0.9},
-    "btn_close": {"path": "images/btn_close.png", "confidence": 0.85},
-    "btn_refresh": {"path": "images/btn_refresh.png", "confidence": 0.85},
-    "btn_back": {"path": "images/btn_back.png", "confidence": 0.85},
-    "btn_max": {"path": "images/btn_max.png", "confidence": 0.85},
-    "qty_minus": {"path": "images/qty_minus.png", "confidence": 0.85},
-    "qty_plus": {"path": "images/qty_plus.png", "confidence": 0.85},
-    "penalty_warning": {"path": "images/penalty_warning.png", "confidence": 0.9},
-    "btn_penalty_confirm": {"path": "images/btn_penalty_confirm.png", "confidence": 0.9}
+    "btn_launch": {
+      "path": "C:\\Code\\PythonProjects\\ArenaBreakoutInfinite-Buy\\src\\super_buyer\\resources\\images\\btn_launch.png",
+      "confidence": 0.85
+    },
+    "home_indicator": {
+      "path": "C:\\Code\\PythonProjects\\ArenaBreakoutInfinite-Buy\\src\\super_buyer\\resources\\images\\home_indicator.png",
+      "confidence": 0.85
+    },
+    "market_indicator": {
+      "path": "C:\\Code\\PythonProjects\\ArenaBreakoutInfinite-Buy\\src\\super_buyer\\resources\\images\\market_indicator.png",
+      "confidence": 0.85
+    },
+    "btn_market": {
+      "path": "C:\\Code\\PythonProjects\\ArenaBreakoutInfinite-Buy\\src\\super_buyer\\resources\\images\\btn_market.png",
+      "confidence": 0.85
+    },
+    "btn_home": {
+      "path": "C:\\Code\\PythonProjects\\ArenaBreakoutInfinite-Buy\\src\\super_buyer\\resources\\images\\btn_home.png",
+      "confidence": 0.85
+    },
+    "input_search": {
+      "path": "C:\\Code\\PythonProjects\\ArenaBreakoutInfinite-Buy\\src\\super_buyer\\resources\\images\\input_search.png",
+      "confidence": 0.85
+    },
+    "btn_search": {
+      "path": "C:\\Code\\PythonProjects\\ArenaBreakoutInfinite-Buy\\src\\super_buyer\\resources\\images\\btn_search.png",
+      "confidence": 0.85
+    },
+    "btn_buy": {
+      "path": "C:\\Code\\PythonProjects\\ArenaBreakoutInfinite-Buy\\src\\super_buyer\\resources\\images\\btn_buy.png",
+      "confidence": 0.87
+    },
+    "buy_ok": {
+      "path": "images/buy_ok.png",
+      "confidence": 0.9
+    },
+    "buy_fail": {
+      "path": "C:\\Code\\PythonProjects\\ArenaBreakoutInfinite-Buy\\src\\super_buyer\\resources\\images\\buy_fail.png",
+      "confidence": 0.89
+    },
+    "btn_close": {
+      "path": "C:\\Code\\PythonProjects\\ArenaBreakoutInfinite-Buy\\src\\super_buyer\\resources\\images\\btn_close.png",
+      "confidence": 0.85
+    },
+    "btn_refresh": {
+      "path": "C:\\Code\\PythonProjects\\ArenaBreakoutInfinite-Buy\\src\\super_buyer\\resources\\images\\btn_refresh.png",
+      "confidence": 0.85
+    },
+    "btn_back": {
+      "path": "images/btn_back.png",
+      "confidence": 0.85
+    },
+    "btn_max": {
+      "path": "C:\\Code\\PythonProjects\\ArenaBreakoutInfinite-Buy\\src\\super_buyer\\resources\\images\\btn_max.png",
+      "confidence": 0.85
+    },
+    "qty_minus": {
+      "path": "C:\\Code\\PythonProjects\\ArenaBreakoutInfinite-Buy\\src\\super_buyer\\resources\\images\\qty_minus.png",
+      "confidence": 0.85
+    },
+    "qty_plus": {
+      "path": "C:\\Code\\PythonProjects\\ArenaBreakoutInfinite-Buy\\src\\super_buyer\\resources\\images\\qty_plus.png",
+      "confidence": 0.85
+    },
+    "penalty_warning": {
+      "path": "images/penalty_warning.png",
+      "confidence": 0.9
+    },
+    "btn_penalty_confirm": {
+      "path": "images/btn_penalty_confirm.png",
+      "confidence": 0.9
+    },
+    "btn_settings": {
+      "path": "images/btn_settings.png",
+      "confidence": 0.85
+    },
+    "btn_exit": {
+      "path": "images/btn_exit.png",
+      "confidence": 0.85
+    },
+    "btn_exit_confirm": {
+      "path": "images/btn_exit_confirm.png",
+      "confidence": 0.85
+    },
+    "recent_purchases_tab": {
+      "path": "images/recent_purchases_tab.png",
+      "confidence": 0.85
+    },
+    "favorites_tab": {
+      "path": "images/favorites_tab.png",
+      "confidence": 0.85
+    }
   },
   "purchase": {
     "item_name": "",
@@ -48,17 +123,19 @@
   },
   "purchase_items": [],
   "price_roi": {
-    "top_template": "images/buy_data_top.png",
+    "top_template": "C:\\Code\\PythonProjects\\ArenaBreakoutInfinite-Buy\\src\\super_buyer\\resources\\images\\buy_data_top.png",
     "top_threshold": 0.55,
-    "bottom_template": "images/buy_data_btm.png",
+    "bottom_template": "C:\\Code\\PythonProjects\\ArenaBreakoutInfinite-Buy\\src\\super_buyer\\resources\\images\\buy_data_btm.png",
     "bottom_threshold": 0.55,
     "top_offset": 0,
     "bottom_offset": 0,
-    "lr_pad": 0
+    "lr_pad": 0,
+    "scale": 1.0
   },
   "avg_price_area": {
     "distance_from_buy_top": 5,
     "height": 45,
     "scale": 1.0
-  }
+  },
+  "debug": {}
 }

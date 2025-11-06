@@ -3,7 +3,8 @@
 模块目标：
 - 将单商品购买流程按“步骤 1–8”进行明确的模块化拆分；
 - 统一强制等待与轮询步进的时序参数；
-- 在不出现新界面/不触发 ROI OCR 的操作中采用“快速点击并复位”实现（如 Max/数量），随后 OCR 前保证至少 50ms 的等待；
+- 不对进入详情叠加固定等待，OCR 与结果识别均采用“识别轮”推进（窗口+步进）；
+- 非新界面小操作（如 Max/数量）优先采用“快速点击并复位”，无需固定等待，由识别轮自然收敛；
 - 收敛日志输出：info 记录关键状态迁移与核心数据，debug 仅输出排障关键点（阶段开始/结束、匹配来源、ROI 尺寸、OCR/匹配耗时等）。
 
 说明：
@@ -53,18 +54,26 @@ class Timings:
     - post_success_click: 关闭购买成功遮罩后强制等待（规范：≥300ms）
     - post_nav: 导航（首页/市场）点击后的强制等待（规范：100ms）
     - buy_result_timeout: 购买结果识别窗口（规范：0.8s，可配）
-    - poll_step: 轮询步进（规范：20ms）
-    - ocr_min_wait: 快速点击（非新界面）到 OCR 前的最小等待（规范：≥50ms）
+    - buy_result_poll_step: 购买结果识别轮询步进（规范：20ms，可配）
+    - poll_step: 通用轮询步进（规范：20ms），若未专门配置则可共用
+    - ocr_min_wait: 非新界面小操作后的最小等待（保留兼容，v2 主流程不依赖固定等待）
     - step_delay: 微步进（来自 ScreenOps，默认 15ms）
+    - ocr_round_window: OCR 识别轮窗口（规范：0.5s，可配）
+    - ocr_round_step: OCR 识别轮步进（规范：20ms，可配）
+    - ocr_round_fail_limit: OCR 识别轮连续失败上限（规范：10 次，可配）
     """
 
     post_close_detail: float = 0.1
     post_success_click: float = 0.3
     post_nav: float = 0.1
     buy_result_timeout: float = 0.8
+    buy_result_poll_step: float = 0.02
     poll_step: float = 0.02
     ocr_min_wait: float = 0.05
     step_delay: float = 0.015
+    ocr_round_window: float = 0.5
+    ocr_round_step: float = 0.02
+    ocr_round_fail_limit: int = 10
 
 
 class StageTimer:
@@ -123,6 +132,8 @@ class SinglePurchaseBuyerV2:
         # OCR 连败标记（供外层统计参考）
         self._last_avg_ocr_ok: bool = True
         self._avg_ocr_streak: int = 0
+        # 最近一次 OCR 使用的 ROI 与二值图（用于最终失败时落盘）
+        self._last_roi_debug: Dict[str, Any] = {}
 
     # -------------------- 基础：日志/工具 --------------------
     def _emit(self, level: str, msg: str) -> None:
@@ -138,6 +149,77 @@ class SinglePurchaseBuyerV2:
     def _log_debug(self, item: str, purchased: str, msg: str) -> None:
         self.on_log(f"【DEBUG】【{item}】【{purchased}】：{msg}")
 
+    def _safe_name(self, s: str) -> str:
+        try:
+            name = str(s)
+        except Exception:
+            name = "obj"
+        keep = []
+        for ch in name:
+            if ch.isalnum() or ch in ("_", "-", "×", "·", " "):
+                keep.append(ch)
+        return ("".join(keep) or "obj").strip().replace(" ", "_")[:60]
+
+    def _stash_roi_debug(self, *,
+                         item_disp: str,
+                         roi: Tuple[int, int, int, int],
+                         img, img_top, img_bot,
+                         bin_top, bin_bot) -> None:
+        """缓存最近一次 ROI/二值图，供最终失败时保存。"""
+        try:
+            self._last_roi_debug = {
+                "item": item_disp,
+                "roi": tuple(int(v) for v in roi),
+                "img": img,
+                "img_top": img_top,
+                "img_bot": img_bot,
+                "bin_top": bin_top,
+                "bin_bot": bin_bot,
+                "ts": time.time(),
+            }
+        except Exception:
+            self._last_roi_debug = {}
+
+    def _dump_last_roi_debug(self, item_disp: str, purchased_str: str) -> None:
+        """若开启了 debug.save_roi_on_fail，则将最近一次 ROI/二值图落盘。"""
+        try:
+            dbg = (self.cfg.get("debug", {}) or {})
+            if not bool(dbg.get("save_roi_on_fail", False)):
+                return
+        except Exception:
+            return
+        data = self._last_roi_debug or {}
+        if not data:
+            return
+        try:
+            out_root = str(((self.cfg.get("paths", {}) or {}).get("output_dir", "output")) or "output")
+        except Exception:
+            out_root = "output"
+        out_dir = os.path.join(out_root, "roi_debug")
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+        except Exception:
+            return
+        try:
+            ts = time.strftime("%Y%m%d-%H%M%S", time.localtime(float(data.get("ts", time.time()))))
+        except Exception:
+            ts = time.strftime("%Y%m%d-%H%M%S")
+        base = f"{ts}_{self._safe_name(item_disp)}"
+        # 保存文件
+        saved = []
+        for key in ("img", "img_top", "img_bot", "bin_top", "bin_bot"):
+            im = data.get(key)
+            if im is None:
+                continue
+            fn = os.path.join(out_dir, f"{base}_{key}.png")
+            try:
+                im.save(fn)
+                saved.append(fn)
+            except Exception:
+                pass
+        if saved:
+            self._log_debug(item_disp, purchased_str, f"已保存 ROI 调试图：{len(saved)} 张 -> {out_dir}")
+
     @property
     def _pg(self):  # type: ignore
         import pyautogui  # type: ignore
@@ -152,7 +234,7 @@ class SinglePurchaseBuyerV2:
         """快速点击并复位：不涉及新界面场景（如 Max/数量输入）优先使用。
 
         - 记录当前位置 → 移动至目标中心 → 点击 → 立即移回原位置；
-        - 无强制等待，由调用方在后续 OCR 前满足 ocr_min_wait。
+        - 不做固定等待，若后续需要触发 OCR，应由“识别轮”推进收敛。
         """
 
         try:
@@ -340,12 +422,15 @@ class SinglePurchaseBuyerV2:
 
     # -------------------- 步骤 5：进入详情与按钮缓存 --------------------
     def _open_detail_from_cache_or_match(self, goods: Goods) -> bool:
+        """点击商品卡片进入详情并校验关键按钮存在。
+
+        - 优先使用列表阶段缓存的卡片矩形；失败再回退模板匹配；
+        - 点击后不叠加固定等待，直接以模板验证 `btn_buy` 与 `btn_close`；
+        - 成功后返回 True；失败清除位置缓存并返回 False。
+        """
         # 1) 缓存坐标
         if goods.id in self._pos_cache:
             self.screen.click_center(self._pos_cache[goods.id])
-            # 进入详情后：最小渲染 20–50ms + 强制 100ms
-            safe_sleep(0.05)
-            safe_sleep(self.timings.post_nav)
             b = self.screen.locate("btn_buy", timeout=0.35)
             c = self.screen.locate("btn_close", timeout=0.35)
             if (b is not None) and (c is not None):
@@ -357,32 +442,182 @@ class SinglePurchaseBuyerV2:
             if box is not None:
                 self._pos_cache[goods.id] = box
                 self.screen.click_center(box)
-                safe_sleep(0.05)
-                safe_sleep(self.timings.post_nav)
                 b = self.screen.locate("btn_buy", timeout=0.35)
                 c = self.screen.locate("btn_close", timeout=0.35)
                 if (b is not None) and (c is not None):
                     return True
         return False
 
+    def _read_avg_price_with_rounds(
+        self,
+        goods: Goods,
+        item_disp: str,
+        purchased_str: str,
+        *,
+        expected_floor: Optional[int],
+        allow_bottom_fallback: bool,
+    ) -> Optional[int]:
+        """基于“识别轮”的均价读取（仅平均价，上半 ROI）。
+
+        - 窗口：`timings.ocr_round_window`（默认 0.5s）；步进：`timings.ocr_round_step`（默认 20ms）；
+        - 每轮内循环尝试 `_read_avg_unit_price(..., fast_anchor_only=True)`；
+        - 成功条件：读到任意正整数即返回；超时记一次失败；
+        - 失败达到 `timings.ocr_round_fail_limit` 由调用方触发障碍清理并退出。
+        """
+
+        fails = 0
+        step = max(0.0, float(getattr(self.timings, "ocr_round_step", 0.02)))
+        ocr_window = max(0.0, float(getattr(self.timings, "ocr_round_window", 0.5)))
+        fail_limit = int(getattr(self.timings, "ocr_round_fail_limit", 10))
+        # 步骤级可观测性
+        self._log_debug(item_disp, purchased_str, "正在执行【步骤6-均价读取】")
+        self._log_debug(
+            item_disp,
+            purchased_str,
+            f"【步骤6-均价读取】- 参数 窗口={int(ocr_window * 1000)}ms 步进={int(step * 1000)}ms 失败上限={fail_limit}",
+        )
+        while fails < fail_limit:
+            self._log_debug(item_disp, purchased_str, f"【步骤6-均价读取】- 识别轮#{fails + 1} 开始")
+            t_end = time.time() + ocr_window
+            unit_price: Optional[int] = None
+            iter_idx = 0
+            while time.time() < t_end:
+                up = self._read_avg_unit_price(
+                    goods,
+                    item_disp,
+                    purchased_str,
+                    expected_floor=expected_floor,
+                    allow_bottom_fallback=allow_bottom_fallback,
+                    fast_anchor_only=True,
+                )
+                if isinstance(up, int) and up > 0:
+                    unit_price = int(up)
+                    self._log_debug(
+                        item_disp,
+                        purchased_str,
+                        f"OCR识别轮#{fails + 1} 成功 | 步进={int(step * 1000)}ms",
+                    )
+                    self._log_debug(
+                        item_disp,
+                        purchased_str,
+                        f"【步骤6-均价读取】- 本轮迭代={iter_idx} 值={unit_price}",
+                    )
+                    return unit_price
+                iter_idx += 1
+                safe_sleep(step)
+            fails += 1
+            self._log_debug(
+                item_disp,
+                purchased_str,
+                f"OCR识别轮#{fails} 超时 | 窗口={int(ocr_window * 1000)}ms 步进={int(step * 1000)}ms",
+            )
+        # 最终失败：按需落盘 ROI 调试图
+        self._dump_last_roi_debug(item_disp, purchased_str)
+        return None
+
     def _ensure_first_detail_buttons(self, goods: Goods) -> None:
+        """缓存详情页关键按钮坐标（修复首次缓存作用域问题）。"""
         if self._first_detail_cached.get(goods.id):
             # 预热到会话缓存
             self._detail_ui_cache.update(self._first_detail_buttons.get(goods.id) or {})
             return
+        cache: Dict[str, Tuple[int, int, int, int]] = {}
         b = self.screen.locate("btn_buy", timeout=0.4)
         c = self.screen.locate("btn_close", timeout=0.4)
         if (b is not None) and (c is not None):
-            cache: Dict[str, Tuple[int, int, int, int]] = {"btn_buy": b, "btn_close": c}
+            cache = {"btn_buy": b, "btn_close": c}
             if (goods.big_category or "").strip() == "弹药":
                 m = self.screen.locate("btn_max", timeout=0.35)
                 if m is not None:
                     cache["btn_max"] = m
             self._first_detail_buttons[goods.id] = cache
             self._first_detail_cached[goods.id] = True
+        if cache:
             self._detail_ui_cache.update(cache)
 
     # -------------------- 步骤 6：价格读取（ROI + OCR） --------------------
+    def _wait_buy_result_window(self, item_disp: str, purchased_str: str) -> str:
+        """购买结果识别轮：在窗口内轮询模板，返回 ok/fail/unknown。
+
+        - 窗口：timings.buy_result_timeout
+        - 步进：timings.buy_result_poll_step（若无则回退为 timings.poll_step）
+        - 日志：仅输出“识别结果=成功/失败/未知”汇总，不打印迭代级耗时
+        """
+
+        t_end = time.time() + float(self.timings.buy_result_timeout)
+        got_ok = False
+        found_fail = False
+        step = float(getattr(self.timings, "buy_result_poll_step", self.timings.poll_step))
+        while time.time() < t_end:
+            ok_hit = self.screen.locate("buy_ok", timeout=0.0) is not None
+            if ok_hit:
+                got_ok = True
+                break
+            fail_hit = self.screen.locate("buy_fail", timeout=0.0) is not None
+            if fail_hit:
+                found_fail = True
+            safe_sleep(step)
+        if got_ok:
+            self._log_debug(item_disp, purchased_str, "识别结果=成功")
+            return "ok"
+        if found_fail:
+            self._log_debug(item_disp, purchased_str, "识别结果=失败")
+            return "fail"
+        self._log_debug(item_disp, purchased_str, "识别结果=未知")
+        return "unknown"
+
+    def precache_detail_once(self, goods: Goods, item_disp: str, purchased_str: str) -> bool:
+        """预热：独立执行一次“进入详情→缓存关键信息→轻量OCR→退出”。
+
+        约定：
+        - 每个关键步骤后固定等待 2s（只限预热流程）；
+        - 关键信息：btn_buy/btn_close/(btn_max)、数量输入锚点（qty_minus/qty_plus 中点）；
+        - 轻量 OCR：使用识别轮（fast_anchor_only），成功条件=读到任意正整数；
+        - 失败：触发障碍清理并返回 False。
+        """
+
+        # 1) 进入详情
+        if not self._open_detail_from_cache_or_match(goods):
+            self._log_info(item_disp, purchased_str, "预缓存：打开详情失败")
+            self.step3_clear_obstacles()
+            return False
+        safe_sleep(2.0)
+
+        # 2) 缓存关键按钮
+        self._ensure_first_detail_buttons(goods)
+        safe_sleep(2.0)
+        b = self._get_btn_box(goods, "btn_buy", timeout=0.5)
+        c = self._get_btn_box(goods, "btn_close", timeout=0.5)
+        if (b is None) or (c is None):
+            self._log_info(item_disp, purchased_str, "预缓存：关键按钮未命中")
+            self.step3_clear_obstacles()
+            return False
+
+        # 3) 缓存数量输入锚点（可选）
+        mid = self._find_qty_midpoint()
+        if isinstance(mid, tuple):
+            try:
+                self._detail_ui_cache["qty_mid"] = (int(mid[0]) - 2, int(mid[1]) - 2, 4, 4)
+            except Exception:
+                pass
+        safe_sleep(2.0)
+
+        # 4) 轻量 OCR 验证（不写历史，仅验证链路）
+        _ = self._read_avg_price_with_rounds(
+            goods,
+            item_disp,
+            purchased_str,
+            expected_floor=None,
+            allow_bottom_fallback=True,
+        )
+        # 识别轮内部会更新 buyer 的 OCR 连败统计标记；不强制依赖结果成功
+        safe_sleep(2.0)
+
+        # 5) 关闭详情
+        _ = self._close_detail_with_wait(goods)
+        safe_sleep(2.0)
+        return True
+
     def _read_avg_unit_price(
         self,
         goods: Goods,
@@ -391,6 +626,7 @@ class SinglePurchaseBuyerV2:
         *,
         expected_floor: Optional[int] = None,
         allow_bottom_fallback: bool = True,
+        fast_anchor_only: bool = False,
     ) -> Optional[int]:
         """以 btn_buy 为锚点计算 ROI，并识别“平均单价”。
 
@@ -398,12 +634,13 @@ class SinglePurchaseBuyerV2:
         - 锚点来源优先级：会话缓存 → 缓存附近小区域快速重定位 → 全局匹配；
         - ROI 公式：distance_from_buy_top=5（兑换+30）、height=45、scale∈[0.6,2.5]；
         - 分割与二值化：上下半分割；优先 Otsu，回退灰度固定阈值；
-        - 识别策略：上半数字→文本解析；必要时允许下半数字兜底；
-        - 异常过滤：expected_floor>0 且 < floor/2 视为异常，累计连败计数；
+        - 识别策略：仅使用上半（平均单价）→ 数字识别优先，失败再文本解析；不使用下半兜底；
+        - 不在此阶段做阈值过滤：任何正整数即视为识别成功，是否合格交由外层决策；
         - 产物：成功写入价格历史，可选保存 ROI。
         """
 
         # 购买按钮锚点（带邻域重定位）
+        self._log_debug(item_disp, purchased_str, "正在执行【步骤6-均价读取-ROI裁剪与OCR】")
         t_btn = time.perf_counter()
         prev = self._detail_ui_cache.get("btn_buy")
         buy_box = None
@@ -430,7 +667,7 @@ class SinglePurchaseBuyerV2:
             pass
         if buy_box is None and prev is not None:
             buy_box = prev
-        if buy_box is None:
+        if buy_box is None and not bool(fast_anchor_only):
             cand_global = self.screen.locate("btn_buy", timeout=0.35)
             if cand_global is not None:
                 buy_box = cand_global
@@ -512,6 +749,8 @@ class SinglePurchaseBuyerV2:
                 img_bot = img_bot.resize((max(1, int(img_bot.width * sc)), max(1, int(img_bot.height * sc))))
             except Exception:
                 pass
+        # 输出 ROI 参数
+        self._log_debug(item_disp, purchased_str, f"【步骤6-均价读取-ROI参数】- dist={dist} height={hei} scale={sc}")
 
         # 二值化：优先 Otsu
         bin_top = None
@@ -539,7 +778,20 @@ class SinglePurchaseBuyerV2:
             except Exception:
                 bin_bot = img_bot
 
-        # 识别：上半数字 → 文本解析 → 允许下半数字兜底
+        # 识别：仅上半（平均单价）数字 → 文本解析；不使用下半兜底
+        # 先缓存 ROI/二值图用于可能的最终失败落盘
+        try:
+            self._stash_roi_debug(
+                item_disp=item_disp,
+                roi=(x_left, y_top, width, height),
+                img=img,
+                img_top=img_top,
+                img_bot=img_bot,
+                bin_top=bin_top,
+                bin_bot=bin_bot,
+            )
+        except Exception:
+            pass
         try:
             ocfg = self.cfg.get("umi_ocr") or {}
             t_ocr = time.perf_counter()
@@ -553,21 +805,21 @@ class SinglePurchaseBuyerV2:
             cand = max([c for c in cands if getattr(c, "value", None) is not None], key=lambda c: int(c.value)) if cands else None  # type: ignore[arg-type]
             val = int(getattr(cand, "value", 0)) if cand is not None and getattr(cand, "value", None) is not None else None
             ocr_ms = int((time.perf_counter() - t_ocr) * 1000.0)
-            self._log_debug(item_disp, purchased_str, f"OCR 数字候选={len(cands) if isinstance(cands, list) else 0} | 取值={getattr(cand, 'value', None)} | 耗时={ocr_ms}ms")
+            try:
+                cand_vals = [int(getattr(c, "value", 0)) for c in (cands or []) if getattr(c, "value", None) is not None]
+            except Exception:
+                cand_vals = []
+            self._log_debug(item_disp, purchased_str, f"OCR(数字) 候选={cand_vals} 选={getattr(cand, 'value', None)} 耗时={ocr_ms}ms")
         except Exception:
             val = None
             ocr_ms = -1
 
-        def _filter_and_accept(v: int, from_bottom: bool = False) -> Optional[int]:
-            try:
-                floor = int(expected_floor or 0)
-            except Exception:
-                floor = 0
-            if floor > 0 and int(v) < max(1, floor // 2):
+        def _accept_and_record(v: int) -> Optional[int]:
+            """任何正整数即视为识别成功（阈值合格性在外层判断）。"""
+            if not isinstance(v, int) or v <= 0:
                 self._last_avg_ocr_ok = False
                 self._avg_ocr_streak += 1
                 return None
-            # 写历史
             try:
                 append_price(
                     item_id=goods.id,
@@ -580,12 +832,11 @@ class SinglePurchaseBuyerV2:
                 pass
             self._last_avg_ocr_ok = True
             self._avg_ocr_streak = 0
-            msg = "平均价 OCR 成功(下半兜底)" if from_bottom else "平均价 OCR 成功"
-            self._log_info(item_disp, purchased_str, f"{msg} 值={v} 阈下限={expected_floor or 0}")
+            self._log_info(item_disp, purchased_str, f"平均价 OCR 成功 值={v} 阈下限={expected_floor or 0}")
             return int(v)
 
         if isinstance(val, int) and val > 0:
-            r = _filter_and_accept(int(val))
+            r = _accept_and_record(int(val))
             if r is not None:
                 return r
         # 上半文本解析
@@ -618,33 +869,13 @@ class SinglePurchaseBuyerV2:
                 return None
 
         val2 = _parse_num(txt or "")
+        self._log_debug(item_disp, purchased_str, f"OCR(文本) 原文='{txt}' 解析={val2} 耗时={ocr_ms if 'ocr_ms' in locals() else -1}ms")
         if isinstance(val2, int) and val2 > 0:
-            r2 = _filter_and_accept(int(val2))
+            r2 = _accept_and_record(int(val2))
             if r2 is not None:
                 return r2
 
-        # 下半兜底
-        if allow_bottom_fallback and bin_bot is not None:
-            try:
-                ocfg = self.cfg.get("umi_ocr") or {}
-                c2 = recognize_numbers(
-                    bin_bot,
-                    base_url=str(ocfg.get("base_url", "http://127.0.0.1:1224")),
-                    timeout=float(ocfg.get("timeout_sec", 2.5) or 2.5),
-                    options=dict(ocfg.get("options", {}) or {}),
-                    offset=(x_left, y_top + mid_h),
-                )
-                cand2 = max([c for c in c2 if getattr(c, "value", None) is not None], key=lambda c: int(c.value)) if c2 else None  # type: ignore[arg-type]
-                v2 = int(getattr(cand2, "value", 0)) if cand2 is not None and getattr(cand2, "value", None) is not None else None
-            except Exception:
-                v2 = None
-            if isinstance(v2, int) and v2 > 0:
-                r3 = _filter_and_accept(int(v2), from_bottom=True)
-                if r3 is not None:
-                    return r3
-        else:
-            if not allow_bottom_fallback:
-                self._log_debug(item_disp, purchased_str, "补货模式禁用下半兜底")
+        # 拒绝下半兜底：未识别平均单价则记为失败，由识别轮继续
 
         self._last_avg_ocr_ok = False
         self._avg_ocr_streak += 1
@@ -661,12 +892,31 @@ class SinglePurchaseBuyerV2:
         return int((mx + px) / 2), int((my + py) / 2)
 
     def _focus_and_type_quantity_fast(self, qty: int) -> bool:
-        mid = self._find_qty_midpoint()
-        if mid is None:
-            return False
+        """优先使用预缓存的数量输入锚点进行聚焦与输入。
+
+        策略：
+        - 若 `_detail_ui_cache['qty_mid']` 存在，直接使用该矩形进行快速点击并复位；
+        - 否则回退到模板匹配 `qty_minus/qty_plus` 计算中点，并将矩形写入 `_detail_ui_cache['qty_mid']`；
+        - 成功后输入指定数量（清空后输入）。
+        """
+        # 1) 使用会话缓存的数量输入中点
+        cached = self._detail_ui_cache.get("qty_mid")
+        box = None
+        if isinstance(cached, tuple) and len(cached) == 4:
+            box = tuple(int(v) for v in cached)  # type: ignore[assignment]
+        else:
+            # 2) 回退：计算数量输入中点，并写入会话缓存
+            mid = self._find_qty_midpoint()
+            if mid is None:
+                return False
+            box = (int(mid[0]) - 2, int(mid[1]) - 2, 4, 4)
+            try:
+                self._detail_ui_cache["qty_mid"] = box
+            except Exception:
+                pass
         try:
             # 快速点击并复位到输入框中心
-            self._fast_click_and_restore((mid[0] - 2, mid[1] - 2, 4, 4))
+            self._fast_click_and_restore(box)  # type: ignore[arg-type]
             # 输入数量
             self.screen.type_text(str(int(qty)), clear_first=True)
             return True
@@ -706,8 +956,6 @@ class SinglePurchaseBuyerV2:
                 typed_qty = 5
             else:
                 typed_qty = 1
-        # 快操作后 → OCR 前保证 50ms
-        safe_sleep(self.timings.ocr_min_wait)
 
         # 循环直到退出
         while True:
@@ -717,7 +965,7 @@ class SinglePurchaseBuyerV2:
             except Exception:
                 thr_base = 0
             base = thr_base if thr_base > 0 else restock
-            unit_price = self._read_avg_unit_price(
+            unit_price = self._read_avg_price_with_rounds(
                 goods,
                 item_disp,
                 purchased_str,
@@ -725,8 +973,9 @@ class SinglePurchaseBuyerV2:
                 allow_bottom_fallback=False,
             )
             if unit_price is None or unit_price <= 0:
-                _ = self._close_detail_with_wait(goods)
-                self._log_info(item_disp, purchased_str, "平均价识别失败（补货），已关闭详情")
+                # 识别轮连续失败（达到阈值），执行障碍清理逻辑并退出本次详情
+                self.step3_clear_obstacles()
+                self._log_info(item_disp, purchased_str, "平均价识别失败（补货，识别轮超时），已执行障碍清理")
                 return bought, True
             ok_restock = (restock > 0) and (unit_price <= restock_limit)
             if not ok_restock:
@@ -740,28 +989,9 @@ class SinglePurchaseBuyerV2:
             # 点击购买（调试记录）
             self._log_debug(item_disp, purchased_str, f"已点击购买(补货) 按钮框={b}")
             self.screen.click_center(b)
-            # 结果识别窗口（逐轮记录模板识别耗时）
-            t_end = time.time() + float(self.timings.buy_result_timeout)
-            got_ok = False
-            found_fail = False
-            iter_idx = 0
-            win_t0 = time.perf_counter()
-            while time.time() < t_end:
-                t0 = time.perf_counter()
-                ok_hit = self.screen.locate("buy_ok", timeout=0.0) is not None
-                ok_ms = int((time.perf_counter() - t0) * 1000.0)
-                t1 = time.perf_counter()
-                fail_hit = self.screen.locate("buy_fail", timeout=0.0) is not None
-                fail_ms = int((time.perf_counter() - t1) * 1000.0)
-                self._log_debug(item_disp, purchased_str, f"结果识别轮#{iter_idx}(补货) ok_cost={ok_ms}ms fail_cost={fail_ms}ms")
-                if ok_hit:
-                    got_ok = True
-                    break
-                if fail_hit:
-                    found_fail = True
-                iter_idx += 1
-                safe_sleep(self.timings.poll_step)
-            if got_ok:
+            # 结果识别轮（汇总级日志）
+            _res = self._wait_buy_result_window(item_disp, purchased_str)
+            if _res == "ok":
                 inc = (120 if used_max else 10) if is_ammo else max(1, int(typed_qty or 5))
                 bought += int(inc)
                 try:
@@ -778,8 +1008,6 @@ class SinglePurchaseBuyerV2:
                     )
                 except Exception:
                     pass
-                win_ms = int((time.perf_counter() - win_t0) * 1000.0)
-                self._log_debug(item_disp, purchased_str, f"识别结果=成功(补货) | 窗口耗时={win_ms}ms | 写历史 qty={inc} price={int(unit_price or 0)} used_max={bool(used_max)}")
                 self._dismiss_success_overlay_with_wait(item_disp, purchased_str, goods=goods)
                 if target_total > 0 and (purchased_so_far + bought) >= target_total:
                     _ = self._close_detail_with_wait(goods)
@@ -789,14 +1017,11 @@ class SinglePurchaseBuyerV2:
                         safe_sleep(self.timings.post_nav)
                     return bought, False
                 continue
-            if found_fail:
-                win_ms = int((time.perf_counter() - win_t0) * 1000.0)
-                self._log_debug(item_disp, purchased_str, f"识别结果=失败(补货) | 窗口耗时={win_ms}ms")
+            if _res == "fail":
                 _ = self._close_detail_with_wait(goods)
                 self._log_info(item_disp, purchased_str, "购买失败（补货），已关闭详情")
                 return bought, True
-            win_ms = int((time.perf_counter() - win_t0) * 1000.0)
-            self._log_debug(item_disp, purchased_str, f"识别结果=未知(补货) | 窗口耗时={win_ms}ms")
+            # 未知
             _ = self._close_detail_with_wait(goods)
             self._log_info(item_disp, purchased_str, "结果未知（补货），已关闭详情")
             return bought, True
@@ -843,16 +1068,17 @@ class SinglePurchaseBuyerV2:
             except Exception:
                 rest_base = 0
             base = thr_base if thr_base > 0 else rest_base
-            unit_price = self._read_avg_unit_price(
+            unit_price = self._read_avg_price_with_rounds(
                 goods,
                 item_disp,
                 purchased_str,
                 expected_floor=base if base > 0 else None,
-                allow_bottom_fallback=True,
+                allow_bottom_fallback=False,
             )
             if unit_price is None or unit_price <= 0:
-                _ = self._close_detail_with_wait(goods)
-                self._log_info(item_disp, purchased_str, "平均单价识别失败，已关闭详情")
+                # 识别轮连续失败（达到阈值），执行障碍清理逻辑并退出本次详情
+                self.step3_clear_obstacles()
+                self._log_info(item_disp, purchased_str, "平均单价识别失败（识别轮超时），已执行障碍清理")
                 return bought, True
 
             # 价格阈值/补货上限解析与判定
@@ -907,28 +1133,9 @@ class SinglePurchaseBuyerV2:
             # 点击购买（调试记录）
             self._log_debug(item_disp, purchased_str, f"已点击购买 按钮框={b}")
             self.screen.click_center(b)
-            # 结果识别窗口（逐轮记录模板识别耗时）
-            t_end = time.time() + float(self.timings.buy_result_timeout)
-            got_ok = False
-            found_fail = False
-            iter_idx = 0
-            win_t0 = time.perf_counter()
-            while time.time() < t_end:
-                t0 = time.perf_counter()
-                ok_hit = self.screen.locate("buy_ok", timeout=0.0) is not None
-                ok_ms = int((time.perf_counter() - t0) * 1000.0)
-                t1 = time.perf_counter()
-                fail_hit = self.screen.locate("buy_fail", timeout=0.0) is not None
-                fail_ms = int((time.perf_counter() - t1) * 1000.0)
-                self._log_debug(item_disp, purchased_str, f"结果识别轮#{iter_idx} ok_cost={ok_ms}ms fail_cost={fail_ms}ms")
-                if ok_hit:
-                    got_ok = True
-                    break
-                if fail_hit:
-                    found_fail = True
-                iter_idx += 1
-                safe_sleep(self.timings.poll_step)
-            if got_ok:
+            # 结果识别轮（汇总级日志）
+            _res = self._wait_buy_result_window(item_disp, purchased_str)
+            if _res == "ok":
                 is_ammo = (goods.big_category or "").strip() == "弹药"
                 inc = 10 if is_ammo else 1
                 bought += int(inc)
@@ -946,18 +1153,13 @@ class SinglePurchaseBuyerV2:
                     )
                 except Exception:
                     pass
-                win_ms = int((time.perf_counter() - win_t0) * 1000.0)
-                self._log_debug(item_disp, purchased_str, f"识别结果=成功 | 窗口耗时={win_ms}ms | 写历史 qty={inc} price={int(unit_price or 0)} used_max=False")
                 self._dismiss_success_overlay_with_wait(item_disp, purchased_str, goods=goods)
                 continue
-            if found_fail:
-                win_ms = int((time.perf_counter() - win_t0) * 1000.0)
-                self._log_debug(item_disp, purchased_str, f"识别结果=失败 | 窗口耗时={win_ms}ms")
+            if _res == "fail":
                 _ = self._close_detail_with_wait(goods)
                 self._log_info(item_disp, purchased_str, "购买失败，已关闭详情")
                 return bought, True
-            win_ms = int((time.perf_counter() - win_t0) * 1000.0)
-            self._log_debug(item_disp, purchased_str, f"识别结果=未知 | 窗口耗时={win_ms}ms")
+            # 未知
             _ = self._close_detail_with_wait(goods)
             self._log_info(item_disp, purchased_str, "结果未知，已关闭详情")
             return bought, True
@@ -968,6 +1170,28 @@ class SinglePurchaseBuyerV2:
             self._pos_cache.clear()
         else:
             self._pos_cache.pop(goods_id, None)
+
+    def clear_all_caches(self, goods_id: Optional[str] = None) -> None:
+        """清理与缓存相关的所有数据结构。
+
+        - 若提供 goods_id：仅清理该商品的卡片坐标与首次按钮缓存；
+        - 始终清空会话级 `_detail_ui_cache`，确保下次进入详情重新识别。
+        """
+        try:
+            if goods_id is None:
+                self._pos_cache.clear()
+                self._first_detail_cached.clear()
+                self._first_detail_buttons.clear()
+            else:
+                self._pos_cache.pop(goods_id, None)
+                self._first_detail_cached.pop(goods_id, None)
+                self._first_detail_buttons.pop(goods_id, None)
+        except Exception:
+            pass
+        try:
+            self._detail_ui_cache.clear()
+        except Exception:
+            pass
 
 
 # ------------------------------ 单商品 Runner v2 ------------------------------
@@ -991,7 +1215,6 @@ class SinglePurchaseTaskRunnerV2:
         output_dir: Optional[str | Path] = None,
         on_log: Optional[Callable[[str], None]] = None,
         on_task_update: Optional[Callable[[int, Dict[str, Any]], None]] = None,
-        debug_overrides: Optional[Dict[str, Any]] = None,
     ) -> None:
         self.on_log = on_log or (lambda s: None)
         self.on_task_update = on_task_update or (lambda i, it: None)
@@ -1000,13 +1223,6 @@ class SinglePurchaseTaskRunnerV2:
 
         # 配置
         self.cfg = load_config(cfg_path)
-        if isinstance(debug_overrides, dict):
-            try:
-                base_dbg = dict(self.cfg.get("debug", {}) or {}) if isinstance(self.cfg.get("debug"), dict) else {}
-            except Exception:
-                base_dbg = {}
-            base_dbg.update(debug_overrides)
-            self.cfg["debug"] = base_dbg
         self.tasks_data = json.loads(json.dumps(tasks_data or {"tasks": []}))
         self.goods_map: Dict[str, Goods] = self._load_goods(goods_path)
         paths_cfg = self.cfg.get("paths", {}) or {}
@@ -1015,25 +1231,13 @@ class SinglePurchaseTaskRunnerV2:
         out_dir = Path(output_dir) if output_dir is not None else Path(paths_cfg.get("output_dir", "output"))
         self.history_paths = _resolve_history_paths(out_dir)
 
-        # 步进延时与调试
+        # 步进延时（不再读取/应用 cfg.debug.*）
         adv = self.tasks_data.get("advanced") if isinstance(self.tasks_data.get("advanced"), dict) else {}
         try:
             delay_ms = float((adv or {}).get("delay_ms", 15))
             step_delay = max(0.0, delay_ms / 1000.0)
         except Exception:
             step_delay = 0.015
-        # 调试覆盖步进
-        dbg = (self.cfg.get("debug", {}) or {}) if isinstance(self.cfg.get("debug"), dict) else {}
-        self._debug_enabled = bool(dbg.get("enabled", False))
-        self._debug_step_sleep = float(dbg.get("step_sleep", 0.0) or 0.0)
-        if self._debug_enabled:
-            dd = float(self._debug_step_sleep or 0.0)
-            base_min = 0.02
-            if dd < max(step_delay, base_min):
-                dd = max(step_delay, base_min)
-            if dd > 0.2:
-                dd = 0.2
-            step_delay = dd
 
         # 统一时序
         try:
@@ -1043,7 +1247,11 @@ class SinglePurchaseTaskRunnerV2:
         timings = Timings(
             step_delay=step_delay,
             buy_result_timeout=float(tuning.get("buy_result_timeout_sec", 0.8) or 0.8),
-            poll_step=0.02,
+            buy_result_poll_step=float(tuning.get("buy_result_poll_step_sec", 0.02) or 0.02),
+            poll_step=float(tuning.get("poll_step_sec", 0.02) or 0.02),
+            ocr_round_window=float(tuning.get("ocr_round_window_sec", 0.5) or 0.5),
+            ocr_round_step=float(tuning.get("ocr_round_step_sec", 0.02) or 0.02),
+            ocr_round_fail_limit=int(tuning.get("ocr_round_fail_limit", 10) or 10),
         )
 
         # 服务对象
@@ -1182,7 +1390,7 @@ class SinglePurchaseTaskRunnerV2:
         # 6) 重建上下文
         if goods is not None:
             try:
-                self.buyer.clear_pos(goods.id)
+                self.buyer.clear_all_caches(goods.id)
                 item_disp = goods.name or goods.search_name or "-"
                 self.buyer.step4_build_search_context(goods, item_disp=item_disp, purchased_str="-")
             except Exception:
@@ -1235,6 +1443,48 @@ class SinglePurchaseTaskRunnerV2:
         except Exception as e:
             self._relay_log(f"【{now_label()}】【全局】【-】：运行异常：{e}")
 
+    def _precache_with_retries(self, goods: Goods, item_disp: str, purchased_str: str) -> bool:
+        """预缓存重试：最多 3 次，指数退避（1s→2s→4s），失败触发清理并可触发处罚逻辑。
+
+        返回 True 表示预缓存成功；False 表示失败（调用处应终止本次任务/片段）。
+        """
+        backoff = 1.0
+        for attempt in range(1, 4):
+            self._relay_log(f"【{now_label()}】【{item_disp}】【{purchased_str}】：预缓存尝试#{attempt}")
+            ok = False
+            try:
+                ok = bool(self.buyer.precache_detail_once(goods, item_disp, purchased_str))
+            except FatalOcrError as e:
+                self._relay_log(f"【{now_label()}】【全局】【-】：Umi OCR 失败（预缓存）：{e}")
+                ok = False
+            if ok:
+                # 重置处罚统计
+                self._ocr_miss_streak = 0
+                self._last_avg_ok_ts = time.time()
+                return True
+            # 失败：清理 + 处罚判定 + 退避
+            try:
+                self.buyer.step3_clear_obstacles()
+            except Exception:
+                pass
+            # 处罚统计更新
+            last_ok = bool(getattr(self.buyer, "_last_avg_ocr_ok", True))
+            if last_ok:
+                self._ocr_miss_streak = 0
+                self._last_avg_ok_ts = time.time()
+            else:
+                buyer_streak = int(getattr(self.buyer, "_avg_ocr_streak", 0))
+                self._ocr_miss_streak = int(self._ocr_miss_streak) + 1
+                if (
+                    int(self._ocr_miss_streak) >= max(1, int(self._ocr_miss_threshold))
+                    and buyer_streak >= 1
+                    and (time.time() - float(getattr(self, "_last_avg_ok_ts", 0.0))) >= float(max(2.0, self._penalty_confirm_delay_sec))
+                ):
+                    self._check_and_handle_penalty()
+            safe_sleep(max(0.0, float(backoff)))
+            backoff *= 2.0
+        return False
+
     def _run_round_robin(self, tasks: List[Dict[str, Any]]) -> None:
         idx = 0
         n = len(tasks)
@@ -1283,9 +1533,14 @@ class SinglePurchaseTaskRunnerV2:
             item_disp = goods.name or goods.search_name or str(t.get("item_name", ""))
             self._relay_log(f"【{now_label()}】【{item_disp}】【{purchased}/{target}】：开始片段 {duration_min}min")
             try:
-                self.buyer.clear_pos(goods.id)
+                self.buyer.clear_all_caches(goods.id)
                 if not self.buyer.step4_build_search_context(goods, item_disp=item_disp, purchased_str=f"{purchased}/{target}"):
                     self._relay_log(f"【{now_label()}】【{item_disp}】【{purchased}/{target}】：建立搜索上下文失败，跳过片段")
+                    idx += 1
+                    continue
+                # 预热：进入详情→缓存→轻量OCR→退出（失败清理，最多重试3次，指数退避）
+                if not self._precache_with_retries(goods, item_disp, f"{purchased}/{target}"):
+                    self._relay_log(f"【{now_label()}】【{item_disp}】【{purchased}/{target}】：预缓存失败，跳过片段")
                     idx += 1
                     continue
             except FatalOcrError as e:
@@ -1300,7 +1555,7 @@ class SinglePurchaseTaskRunnerV2:
                     paused = self._do_soft_restart(goods)
                     seg_paused_sec += max(0.0, float(paused))
                     try:
-                        self.buyer.clear_pos(goods.id)
+                        self.buyer.clear_all_caches(goods.id)
                         _ = self.buyer.step4_build_search_context(
                             goods,
                             item_disp=item_disp,
@@ -1405,9 +1660,14 @@ class SinglePurchaseTaskRunnerV2:
             item_disp = goods.name or goods.search_name or str(t.get("item_name", ""))
             self._relay_log(f"【{now_label()}】【{item_disp}】【{purchased}/{target}】：进入时间窗口")
             try:
+                self.buyer.clear_all_caches(goods.id)
                 if not self.buyer.step4_build_search_context(goods, item_disp=item_disp, purchased_str=f"{purchased}/{target}"):
                     safe_sleep(1.0)
                     continue
+                # 预热：进入详情→缓存→轻量OCR→退出（失败清理，最多重试3次，指数退避）
+                if not self._precache_with_retries(goods, item_disp, f"{purchased}/{target}"):
+                    self._relay_log(f"【{now_label()}】【{item_disp}】【{purchased}/{target}】：预缓存失败，终止本次任务（时间窗口）")
+                    break
             except FatalOcrError as e:
                 self._relay_log(f"【{now_label()}】【全局】【-】：Umi OCR 失败（进入窗口）：{e}")
                 self._stop.set()

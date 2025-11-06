@@ -739,6 +739,32 @@ class InitConfigTab(BaseTab):
             except Exception:
                 pass
 
+        # 调试（OCR/ROI）：识别轮最终失败时保存 ROI 图
+        dbg_cfg = self.cfg.get("debug", {}) if isinstance(self.cfg.get("debug"), dict) else {}
+        try:
+            self.var_save_roi_on_fail = tk.BooleanVar(value=bool(dbg_cfg.get("save_roi_on_fail", False)))
+        except Exception:
+            self.var_save_roi_on_fail = tk.BooleanVar(value=False)
+        box_dbg_roi = ttk.LabelFrame(outer, text="调试（OCR/ROI）")
+        box_dbg_roi.pack(fill=tk.X, padx=8, pady=(0, 8))
+        try:
+            chk_roi = ttk.Checkbutton(
+                box_dbg_roi,
+                text="识别轮最终失败时保存 ROI 图（output/roi_debug）",
+                variable=self.var_save_roi_on_fail,
+            )
+        except Exception:
+            chk_roi = tk.Checkbutton(
+                box_dbg_roi,
+                text="识别轮最终失败时保存 ROI 图（output/roi_debug）",
+                variable=self.var_save_roi_on_fail,
+            )
+        chk_roi.pack(anchor="w", padx=8, pady=6)
+        try:
+            self.var_save_roi_on_fail.trace_add("write", lambda *_: self._schedule_autosave())
+        except Exception:
+            pass
+
         # 调试模式（已迁移至“多商品抢购模式”页面）
 
     def _on_hotkey_change(self, *_: object) -> None:
@@ -952,6 +978,11 @@ class InitConfigTab(BaseTab):
             if not _dir:
                 _dir = self._images_path("debug", "可视化调试", ensure_parent=True)
             self.cfg["debug"]["overlay_dir"] = _dir
+            # 新增：识别轮最终失败时保存 ROI 图（默认关闭）
+            try:
+                self.cfg["debug"]["save_roi_on_fail"] = bool(self.var_save_roi_on_fail.get())
+            except Exception:
+                self.cfg["debug"]["save_roi_on_fail"] = False
         except Exception:
             pass
 

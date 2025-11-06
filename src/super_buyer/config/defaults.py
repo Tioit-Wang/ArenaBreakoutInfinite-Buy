@@ -37,6 +37,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "paths": {
         "output_dir": "output",
     },
+    "debug": {
+        # 是否在均价识别轮最终失败时保存 ROI 原图与二值图（默认关闭）
+        "save_roi_on_fail": False,
+    },
     "hotkeys": {
         "toggle": "<Control-Alt-t>",
         "stop": "<Control-Alt-t>",

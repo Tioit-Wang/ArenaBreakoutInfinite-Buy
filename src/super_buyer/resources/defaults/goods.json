@@ -7,7 +7,7 @@
         "sub_category": "5.56×45毫米子弹",
         "exchangeable": false,
         "craftable": false,
-        "image_path": "images\\goods\\ammo\\3ebd0825319a4676b7259c901c2474c5.png",
+        "image_path": "images/goods/ammo/bb38e882b57a48909dad259621a80f91.png",
         "price": null
     },
     {
@@ -249,8 +249,8 @@
         "sub_category": "7.62×25毫米子弹",
         "exchangeable": false,
         "craftable": false,
-        "image_path": "images\\goods\\_default.png",
-        "favorite": false
+        "image_path": "C:\\Code\\PythonProjects\\ArenaBreakoutInfinite-Buy\\data\\images\\goods\\ammo\\b85f2780b15e4637ab1cd4a2e841e3e3.png",
+        "price": null
     },
     {
         "id": "bb22cc33dd44ee55ff6600778899aa11",
@@ -1054,5 +1054,16 @@
         "craftable": false,
         "image_path": "images\\goods\\_default.png",
         "favorite": false
+    },
+    {
+        "id": "0c71547893b6404b8a55d4933e95d246",
+        "name": "维也娜柠檬饮料",
+        "search_name": "维也娜柠檬饮料",
+        "big_category": "饮食",
+        "sub_category": "饮料",
+        "exchangeable": false,
+        "craftable": false,
+        "image_path": "images/goods/ammo/b25a8340eda0467a978733e67b73f2b4.png",
+        "price": null
     }
 ]
