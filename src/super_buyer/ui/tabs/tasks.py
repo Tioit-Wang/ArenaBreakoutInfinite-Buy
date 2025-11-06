@@ -9,7 +9,9 @@ from typing import TYPE_CHECKING, Any, Dict
 import tkinter as tk
 from tkinter import messagebox, ttk
 
-from super_buyer.core.task_runner import TaskRunner
+from super_buyer.core.single_purchase_runner_v2 import (
+    SinglePurchaseTaskRunnerV2 as TaskRunner,
+)
 
 from .base import BaseTab
 
@@ -66,8 +68,6 @@ class SingleFastBuyTab(BaseTab):
         ctrl_inner.pack(fill=tk.X, padx=8, pady=6)
         self.btn_exec_start = ttk.Button(ctrl_inner, text="开始执行", command=self._exec_start)
         self.btn_exec_start.pack(side=tk.LEFT)
-        self.btn_exec_pause = ttk.Button(ctrl_inner, text="暂停", command=self._exec_toggle_pause)
-        self.btn_exec_pause.pack(side=tk.LEFT, padx=6)
         self.btn_exec_stop = ttk.Button(ctrl_inner, text="终止", command=self._exec_stop)
         self.btn_exec_stop.pack(side=tk.LEFT)
         # 主界面：任务模式切换
@@ -637,9 +637,12 @@ class SingleFastBuyTab(BaseTab):
                 btn_start.configure(state=(tk.DISABLED if running else tk.NORMAL))
             if btn_stop is not None:
                 btn_stop.configure(state=(tk.NORMAL if running else tk.DISABLED))
-            paused = bool(getattr(self._runner, "_pause", None) and self._runner._pause.is_set()) if self._runner else False
+            # v2 Runner 仅保留开始/终止；暂停控件在 UI 隐藏，不更新
             if btn_pause is not None:
-                btn_pause.configure(state=(tk.NORMAL if running else tk.DISABLED), text=("继续" if paused else "暂停"))
+                try:
+                    btn_pause.pack_forget()
+                except Exception:
+                    pass
             if lab_status is not None:
                 lab_status.configure(text=("running" if running else "idle"))
         except Exception:
@@ -780,17 +783,11 @@ class SingleFastBuyTab(BaseTab):
             pass
 
     def _exec_toggle_pause(self) -> None:
-        r = getattr(self, "_runner", None)
-        if not r:
-            return
+        # v2 Runner 不支持暂停/继续，此函数保留以兼容热键/旧入口，但不执行任何动作。
         try:
-            if r._pause.is_set():
-                r.resume()
-            else:
-                r.pause()
+            self._append_exec_log("【%s】【全局】【-】：v2模式不支持暂停/继续" % time.strftime("%H:%M:%S"))
         except Exception:
             pass
-        self._update_exec_controls()
 
     def _exec_stop(self) -> None:
         r = getattr(self, "_runner", None)

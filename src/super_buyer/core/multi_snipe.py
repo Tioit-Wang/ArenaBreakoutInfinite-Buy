@@ -295,7 +295,7 @@ class MultiSnipeRunner:
 
         优先级：
         1) 已是绝对路径（POSIX）→ 直接返回；
-        2) Windows 盘符形式（如 C:\path）→ 原样返回；
+        2) Windows 盘符形式（如 C:\\path）→ 原样返回；
         3) 相对路径：按以下 base 依次拼接并选择第一个存在的路径：
            - data 根（paths.output_dir 的上级）
            - cwd/data
