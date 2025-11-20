@@ -45,6 +45,7 @@ class SingleFastBuyTab(BaseTab):
         self.cards_window: int | None = None
         self.btn_add_task: ttk.Button | None = None
         self._task_modal_top: tk.Toplevel | None = None
+        self._advanced_modal_top: tk.Toplevel | None = None
         self.lab_task_summary: ttk.Label | None = None
         self._build_tab_fast()
 
@@ -56,10 +57,11 @@ class SingleFastBuyTab(BaseTab):
         box_top = ttk.Frame(container)
         box_top.pack(fill=tk.X, pady=(0, 8))
         ttk.Button(box_top, text="配置任务…", command=self._open_tasks_modal).pack(side=tk.LEFT)
+        ttk.Button(box_top, text="高级配置…", command=self._open_advanced_modal).pack(side=tk.LEFT, padx=(8, 0))
         self.lab_task_summary = ttk.Label(box_top, text="", foreground="#666666")
         self.lab_task_summary.pack(side=tk.LEFT, padx=(12, 0))
 
-        # 高级配置放置于主页面（执行控制下方）
+        # 任务卡片容器（用于渲染任务列表）
         self._tasks_root_frame = container
 
         ctrl_box = ttk.LabelFrame(container, text="执行控制")
@@ -139,10 +141,6 @@ class SingleFastBuyTab(BaseTab):
     def _render_task_cards(self) -> None:
         container = getattr(self, "cards_inner", None)
         if container is None:
-            try:
-                self._build_step_delay_panel(self._tasks_root_frame)
-            except Exception:
-                pass
             self._update_task_summary()
             return
         for w in container.winfo_children():
@@ -169,11 +167,6 @@ class SingleFastBuyTab(BaseTab):
         # Also enable/disable task mode radios accordingly
         try:
             self._update_task_mode_controls_state()
-        except Exception:
-            pass
-        # 高级配置面板（延时ms / 重启周期）
-        try:
-            self._build_step_delay_panel(self._tasks_root_frame)
         except Exception:
             pass
         self._update_task_summary()
@@ -420,7 +413,7 @@ class SingleFastBuyTab(BaseTab):
             except Exception:
                 pass
 
-    # ---------- Step delay config module ----------
+        # ---------- Step delay & timings config module ----------
     def _build_step_delay_panel(self, parent) -> None:
         # Remove previous panel if any
         old = getattr(self, "_step_panel", None)
@@ -445,6 +438,16 @@ class SingleFastBuyTab(BaseTab):
         var_delay_ms = tk.IntVar(value=cur_ms)
         sp = ttk.Spinbox(inner, from_=1, to=2000, increment=1, width=10, textvariable=var_delay_ms)
         sp.grid(row=0, column=1, sticky="w")
+        try:
+            lbl_q_delay = ttk.Label(inner, text="？", foreground="#666666", width=2)
+            lbl_q_delay.grid(row=0, column=2, sticky="w", padx=(4, 0))
+            self._attach_tooltip(
+                lbl_q_delay,
+                "控制基础鼠标/键盘操作的等待间隔，数值越小点击越密集。\n"
+                "建议 5–20ms，过小可能在卡顿时导致点击不稳定。",
+            )
+        except Exception:
+            pass
 
         # Restart policy: restart game every N minutes (default 60)
         ttk.Label(inner, text="重启周期(分钟)", width=14).grid(row=1, column=0, sticky="w", pady=(6,0))
@@ -455,6 +458,199 @@ class SingleFastBuyTab(BaseTab):
         var_restart = tk.IntVar(value=cur_restart)
         sp2 = ttk.Spinbox(inner, from_=5, to=600, increment=5, width=10, textvariable=var_restart)
         sp2.grid(row=1, column=1, sticky="w", pady=(6,0))
+        try:
+            lbl_q_restart = ttk.Label(inner, text="？", foreground="#666666", width=2)
+            lbl_q_restart.grid(row=1, column=2, sticky="w", padx=(4, 0))
+            self._attach_tooltip(
+                lbl_q_restart,
+                "长时间运行时定期重启游戏以降低卡死风险。\n"
+                "一般建议 30–120 分钟，过短会增加重启开销。",
+            )
+        except Exception:
+            pass
+
+        # 快速连击模式：是否启用
+        try:
+            fast_mode_cur = bool((adv or {}).get("fast_chain_mode", False))
+        except Exception:
+            fast_mode_cur = False
+        ttk.Label(inner, text="启用快速连击模式", width=14).grid(row=2, column=0, sticky="w", pady=(6, 0))
+        var_fast_mode = tk.BooleanVar(value=fast_mode_cur)
+        chk_fast = ttk.Checkbutton(inner, variable=var_fast_mode)
+        chk_fast.grid(row=2, column=1, sticky="w", pady=(6, 0))
+        try:
+            lbl_q_fast_mode = ttk.Label(inner, text="？", foreground="#666666", width=2)
+            lbl_q_fast_mode.grid(row=2, column=2, sticky="w", padx=(4, 0))
+            self._attach_tooltip(
+                lbl_q_fast_mode,
+                "开启后一次均价识别可连续多次购买，适合短时间大量挂出的抢购场景。\n"
+                "价格变化时存在多买风险，建议仅在需要极限速度的任务中开启。",
+            )
+        except Exception:
+            pass
+
+        # 快速连击：每次 OCR 后最多连续购买次数
+        try:
+            fast_max_cur = int((adv or {}).get("fast_chain_max", 10) or 10)
+        except Exception:
+            fast_max_cur = 10
+        ttk.Label(inner, text="快速连击次数上限", width=14).grid(row=3, column=0, sticky="w", pady=(6, 0))
+        var_fast_max = tk.IntVar(value=fast_max_cur)
+        sp_fast_max = ttk.Spinbox(inner, from_=1, to=50, increment=1, width=10, textvariable=var_fast_max)
+        sp_fast_max.grid(row=3, column=1, sticky="w", pady=(6, 0))
+        try:
+            lbl_q_fast_max = ttk.Label(inner, text="？", foreground="#666666", width=2)
+            lbl_q_fast_max.grid(row=3, column=2, sticky="w", padx=(4, 0))
+            self._attach_tooltip(
+                lbl_q_fast_max,
+                "一次均价识别之后，最多允许连续购买的次数。\n"
+                "建议 5–15，数值越大速度越快，但一旦价格上涨可能连续多次买入。",
+            )
+        except Exception:
+            pass
+
+        # 快速连击：遮罩关闭与再次点击的间隔(ms)
+        try:
+            fast_interval_cur = float((adv or {}).get("fast_chain_interval_ms", 35.0) or 35.0)
+        except Exception:
+            fast_interval_cur = 35.0
+        ttk.Label(inner, text="快速连击间隔(ms)", width=14).grid(row=4, column=0, sticky="w", pady=(6, 0))
+        var_fast_interval = tk.DoubleVar(value=fast_interval_cur)
+        sp_fast_interval = ttk.Spinbox(inner, from_=30, to=500, increment=5, width=10, textvariable=var_fast_interval)
+        sp_fast_interval.grid(row=4, column=1, sticky="w", pady=(6, 0))
+        try:
+            lbl_q_fast_interval = ttk.Label(inner, text="？", foreground="#666666", width=2)
+            lbl_q_fast_interval.grid(row=4, column=2, sticky="w", padx=(4, 0))
+            self._attach_tooltip(
+                lbl_q_fast_interval,
+                "关闭购买成功遮罩到再次点击购买按钮之间的间隔。\n"
+                "必须 ≥30ms，建议 35–80ms。越小速度越快，但过小可能导致点击无效或被判定为脚本。",
+            )
+        except Exception:
+            pass
+
+        # 购买结果与 OCR 时序参数（读取自 cfg.multi_snipe_tuning，按需覆盖）
+        tuning = self.cfg.get("multi_snipe_tuning") if isinstance(self.cfg.get("multi_snipe_tuning"), dict) else {}
+        try:
+            cur_buy_timeout = float((tuning or {}).get("buy_result_timeout_sec", 0.35) or 0.35)
+        except Exception:
+            cur_buy_timeout = 0.35
+        try:
+            cur_buy_step = float((tuning or {}).get("buy_result_poll_step_sec", 0.01) or 0.01)
+        except Exception:
+            cur_buy_step = 0.01
+        try:
+            cur_ocr_win = float((tuning or {}).get("ocr_round_window_sec", 0.35) or 0.35)
+        except Exception:
+            cur_ocr_win = 0.35
+        try:
+            cur_ocr_step = float((tuning or {}).get("ocr_round_step_sec", 0.015) or 0.015)
+        except Exception:
+            cur_ocr_step = 0.015
+        try:
+            cur_post_success = float((tuning or {}).get("post_success_click_sec", 0.08) or 0.08)
+        except Exception:
+            cur_post_success = 0.08
+
+        # 将秒转换为毫秒以便在界面中统一使用 ms
+        try:
+            cur_buy_timeout_ms = int(round(cur_buy_timeout * 1000.0))
+        except Exception:
+            cur_buy_timeout_ms = 350
+        try:
+            cur_buy_step_ms = int(round(cur_buy_step * 1000.0))
+        except Exception:
+            cur_buy_step_ms = 10
+        try:
+            cur_ocr_win_ms = int(round(cur_ocr_win * 1000.0))
+        except Exception:
+            cur_ocr_win_ms = 350
+        try:
+            cur_ocr_step_ms = int(round(cur_ocr_step * 1000.0))
+        except Exception:
+            cur_ocr_step_ms = 15
+        try:
+            cur_post_success_ms = int(round(cur_post_success * 1000.0))
+        except Exception:
+            cur_post_success_ms = 80
+
+        row_base = 5
+        ttk.Separator(inner, orient=tk.HORIZONTAL).grid(row=row_base, column=0, columnspan=3, sticky="we", pady=(6, 6))
+
+        ttk.Label(inner, text="结果窗口(ms)", width=14).grid(row=row_base + 1, column=0, sticky="w")
+        var_buy_timeout = tk.IntVar(value=cur_buy_timeout_ms)
+        sp_buy_timeout = ttk.Spinbox(inner, from_=100, to=2000, increment=10, width=10, textvariable=var_buy_timeout)
+        sp_buy_timeout.grid(row=row_base + 1, column=1, sticky="w")
+        try:
+            lbl_q_buy_timeout = ttk.Label(inner, text="？", foreground="#666666", width=2)
+            lbl_q_buy_timeout.grid(row=row_base + 1, column=2, sticky="w", padx=(4, 0))
+            self._attach_tooltip(
+                lbl_q_buy_timeout,
+                "从点击购买到检测到“购买成功/失败”提示的最大等待时间。\n"
+                "建议 300–400ms，过大浪费时间，过小可能在网络波动时漏判。",
+            )
+        except Exception:
+            pass
+
+        ttk.Label(inner, text="结果轮询步进(ms)", width=14).grid(row=row_base + 2, column=0, sticky="w", pady=(6, 0))
+        var_buy_step = tk.IntVar(value=cur_buy_step_ms)
+        sp_buy_step = ttk.Spinbox(inner, from_=5, to=100, increment=1, width=10, textvariable=var_buy_step)
+        sp_buy_step.grid(row=row_base + 2, column=1, sticky="w", pady=(6, 0))
+        try:
+            lbl_q_buy_step = ttk.Label(inner, text="？", foreground="#666666", width=2)
+            lbl_q_buy_step.grid(row=row_base + 2, column=2, sticky="w", padx=(4, 0))
+            self._attach_tooltip(
+                lbl_q_buy_step,
+                "在结果窗口内每次检查成功/失败提示的间隔。\n"
+                "建议约 10ms，小幅调整即可，不建议过大。",
+            )
+        except Exception:
+            pass
+
+        ttk.Label(inner, text="均价识别窗口(ms)", width=14).grid(row=row_base + 3, column=0, sticky="w", pady=(6, 0))
+        var_ocr_win = tk.IntVar(value=cur_ocr_win_ms)
+        sp_ocr_win = ttk.Spinbox(inner, from_=100, to=1500, increment=10, width=10, textvariable=var_ocr_win)
+        sp_ocr_win.grid(row=row_base + 3, column=1, sticky="w", pady=(6, 0))
+        try:
+            lbl_q_ocr_win = ttk.Label(inner, text="？", foreground="#666666", width=2)
+            lbl_q_ocr_win.grid(row=row_base + 3, column=2, sticky="w", padx=(4, 0))
+            self._attach_tooltip(
+                lbl_q_ocr_win,
+                "单次均价 OCR 尝试的时间窗口。\n"
+                "建议 300–500ms，过大浪费时间，过小可能在 OCR 服务抖动时频繁失败。",
+            )
+        except Exception:
+            pass
+
+        ttk.Label(inner, text="均价轮询步进(ms)", width=14).grid(row=row_base + 4, column=0, sticky="w", pady=(6, 0))
+        var_ocr_step = tk.IntVar(value=cur_ocr_step_ms)
+        sp_ocr_step = ttk.Spinbox(inner, from_=5, to=100, increment=1, width=10, textvariable=var_ocr_step)
+        sp_ocr_step.grid(row=row_base + 4, column=1, sticky="w", pady=(6, 0))
+        try:
+            lbl_q_ocr_step = ttk.Label(inner, text="？", foreground="#666666", width=2)
+            lbl_q_ocr_step.grid(row=row_base + 4, column=2, sticky="w", padx=(4, 0))
+            self._attach_tooltip(
+                lbl_q_ocr_step,
+                "均价 OCR 窗口内部的调用间隔。\n"
+                "建议 10–20ms，根据 OCR 服务速度微调。",
+            )
+        except Exception:
+            pass
+
+        ttk.Label(inner, text="成功遮罩等待(ms)", width=14).grid(row=row_base + 5, column=0, sticky="w", pady=(6, 0))
+        var_post_success = tk.IntVar(value=cur_post_success_ms)
+        sp_post_success = ttk.Spinbox(inner, from_=30, to=500, increment=5, width=10, textvariable=var_post_success)
+        sp_post_success.grid(row=row_base + 5, column=1, sticky="w", pady=(6, 0))
+        try:
+            lbl_q_post_success = ttk.Label(inner, text="？", foreground="#666666", width=2)
+            lbl_q_post_success.grid(row=row_base + 5, column=2, sticky="w", padx=(4, 0))
+            self._attach_tooltip(
+                lbl_q_post_success,
+                "普通模式下关闭购买成功遮罩后的固定等待时间。\n"
+                "快速连击模式主要使用上面的“快速连击间隔(ms)”。建议 60–120ms。",
+            )
+        except Exception:
+            pass
 
         def _apply_delay_ms_from_widget() -> None:
             try:
@@ -485,6 +681,77 @@ class SingleFastBuyTab(BaseTab):
             self.tasks_data["restart_every_min"] = int(val)
             self._save_tasks_data()
 
+        def _apply_fast_chain_from_widget() -> None:
+            """将快速连击配置写入 tasks_data.advanced，并触发自动保存。"""
+            try:
+                mode_val = bool(var_fast_mode.get())
+            except Exception:
+                mode_val = False
+            try:
+                max_val = int(var_fast_max.get())
+            except Exception:
+                max_val = 10
+            if max_val < 1:
+                max_val = 1
+            if max_val > 50:
+                max_val = 50
+            try:
+                interval_ms = float(var_fast_interval.get())
+            except Exception:
+                interval_ms = 35.0
+            if interval_ms < 30.0:
+                interval_ms = 30.0
+            if interval_ms > 500.0:
+                interval_ms = 500.0
+            adv = self.tasks_data.setdefault("advanced", {})
+            adv["fast_chain_mode"] = bool(mode_val)
+            adv["fast_chain_max"] = int(max_val)
+            adv["fast_chain_interval_ms"] = float(interval_ms)
+            self._save_tasks_data()
+
+        def _apply_timing_from_widget() -> None:
+            """将购买结果与 OCR 时序参数写回 cfg.multi_snipe_tuning 并保存到配置文件。"""
+            try:
+                cfg = dict(self.cfg)
+            except Exception:
+                cfg = self.cfg
+            tuning = cfg.get("multi_snipe_tuning") if isinstance(cfg.get("multi_snipe_tuning"), dict) else {}
+            if not isinstance(tuning, dict):
+                tuning = {}
+            try:
+                timeout_ms = float(var_buy_timeout.get())
+                tuning["buy_result_timeout_sec"] = max(0.05, timeout_ms / 1000.0)
+            except Exception:
+                pass
+            try:
+                step_ms = float(var_buy_step.get())
+                tuning["buy_result_poll_step_sec"] = max(0.001, step_ms / 1000.0)
+            except Exception:
+                pass
+            try:
+                win_ms = float(var_ocr_win.get())
+                tuning["ocr_round_window_sec"] = max(0.05, win_ms / 1000.0)
+            except Exception:
+                pass
+            try:
+                ostep_ms = float(var_ocr_step.get())
+                tuning["ocr_round_step_sec"] = max(0.001, ostep_ms / 1000.0)
+            except Exception:
+                pass
+            try:
+                post_ms = float(var_post_success.get())
+                tuning["post_success_click_sec"] = max(0.03, post_ms / 1000.0)
+            except Exception:
+                pass
+            cfg["multi_snipe_tuning"] = tuning
+            try:
+                from super_buyer.config import save_config  # type: ignore
+                save_config(cfg, paths=self.paths)
+                # 同步到内存态 cfg，避免重启前不一致
+                self.cfg = cfg
+            except Exception:
+                pass
+
         # Real-time save: on value change, focus out, and Enter
         try:
             var_delay_ms.trace_add("write", lambda *_: _apply_delay_ms_from_widget())
@@ -499,11 +766,85 @@ class SingleFastBuyTab(BaseTab):
             var_restart.trace_add("write", lambda *_: _apply_restart_from_widget())
         except Exception:
             pass
+
+        # 快速连击参数的实时保存
         try:
+            var_fast_mode.trace_add("write", lambda *_: _apply_fast_chain_from_widget())
+        except Exception:
+            pass
+        try:
+            var_fast_max.trace_add("write", lambda *_: _apply_fast_chain_from_widget())
+        except Exception:
+            pass
+        try:
+            var_fast_interval.trace_add("write", lambda *_: _apply_fast_chain_from_widget())
+        except Exception:
+            pass
+
+        # 时序参数：在组件失焦或回车时保存（避免频繁写文件）
+        try:
+            for w in (sp_buy_timeout, sp_buy_step, sp_ocr_win, sp_ocr_step, sp_post_success):
+                w.bind("<FocusOut>", lambda _e=None: _apply_timing_from_widget())
+                w.bind("<Return>", lambda _e=None: _apply_timing_from_widget())
             sp2.bind("<FocusOut>", lambda _e=None: _apply_restart_from_widget())
             sp2.bind("<Return>", lambda _e=None: _apply_restart_from_widget())
         except Exception:
             pass
+
+    def _open_advanced_modal(self) -> None:
+        """打开高级配置弹窗。"""
+
+        existing = getattr(self, "_advanced_modal_top", None)
+        if existing is not None and existing.winfo_exists():
+            try:
+                existing.lift()
+                existing.focus_force()
+            except Exception:
+                pass
+            return
+
+        top = tk.Toplevel(self)
+        top.title("高级配置")
+        top.transient(self)
+        try:
+            self._place_modal(top, 520, 520)
+        except Exception:
+            try:
+                top.geometry("520x520")
+            except Exception:
+                pass
+        try:
+            top.grab_set()
+        except Exception:
+            pass
+        self._advanced_modal_top = top
+
+        def _on_close() -> None:
+            cur = getattr(self, "_advanced_modal_top", None)
+            if cur is not top:
+                return
+            self._advanced_modal_top = None
+            try:
+                top.destroy()
+            except Exception:
+                pass
+
+        def _on_destroy(event) -> None:
+            if event.widget is top:
+                self._advanced_modal_top = None
+
+        top.protocol("WM_DELETE_WINDOW", _on_close)
+        top.bind("<Destroy>", _on_destroy)
+
+        frm = ttk.Frame(top)
+        frm.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+
+        # 构建高级配置内容
+        self._build_step_delay_panel(frm)
+
+        bf = ttk.Frame(top)
+        bf.pack(fill=tk.X, padx=8, pady=(0, 8))
+        ttk.Button(bf, text="关闭", command=_on_close).pack(side=tk.RIGHT)
 
     # ---------- 执行控制与日志 ----------
     def _append_exec_log(self, s: str) -> None:

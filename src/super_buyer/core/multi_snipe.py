@@ -49,6 +49,7 @@ except Exception:
     ImageTk = None  # type: ignore
 
 from super_buyer.core.common import parse_price_text as _parse_price_text
+from super_buyer.core.launcher import run_launch_flow
 from super_buyer.services.font_loader import draw_text, pil_font, tk_font
 from super_buyer.services.ocr import recognize_numbers
 from super_buyer.services.screen_ops import ScreenOps
@@ -250,6 +251,35 @@ class MultiSnipeRunner:
         except Exception:
             self._buy_result_timeout_sec = 0.8
         try:
+            self._buy_result_poll_step_sec = float(tuning.get("buy_result_poll_step_sec", 0.02) or 0.02)
+        except Exception:
+            self._buy_result_poll_step_sec = 0.02
+        try:
+            self._post_success_click_sec = float(tuning.get("post_success_click_sec", 0.3) or 0.3)
+        except Exception:
+            self._post_success_click_sec = 0.3
+        try:
+            self._post_close_detail_sec = float(tuning.get("post_close_detail_sec", 0.1) or 0.1)
+        except Exception:
+            self._post_close_detail_sec = 0.1
+        try:
+            self._post_nav_sec = float(tuning.get("post_nav_sec", 0.1) or 0.1)
+        except Exception:
+            self._post_nav_sec = 0.1
+        # 快速连击参数（对齐单品 v2，间隔至少 30ms）
+        try:
+            self._fast_chain_mode = bool(tuning.get("fast_chain_mode", True))
+        except Exception:
+            self._fast_chain_mode = True
+        try:
+            self._fast_chain_max = int(tuning.get("fast_chain_max", 10) or 10)
+        except Exception:
+            self._fast_chain_max = 10
+        try:
+            self._fast_chain_interval_ms = float(tuning.get("fast_chain_interval_ms", 35.0) or 35.0)
+        except Exception:
+            self._fast_chain_interval_ms = 35.0
+        try:
             self._relocate_after_fail = int(tuning.get("relocate_after_fail", 3) or 3)
         except Exception:
             self._relocate_after_fail = 3
@@ -266,6 +296,12 @@ class MultiSnipeRunner:
             self._penalty_wait_after_confirm_sec = float(tuning.get("penalty_wait_sec", 180.0) or 180.0)
         except Exception:
             self._penalty_wait_after_confirm_sec = 180.0
+        # 重启周期（分钟），0 表示不重启
+        try:
+            self.restart_every_min = int(tuning.get("restart_every_min", 0) or 0)
+        except Exception:
+            self.restart_every_min = 0
+        self._next_restart_ts: Optional[float] = None
 
         # 连续失败计数器：item.id -> count
         self._fail_counts: Dict[str, int] = {}
@@ -289,6 +325,135 @@ class MultiSnipeRunner:
 
     def _log_error(self, s: str) -> None:
         self._log(f"【ERROR】{s}")
+
+    @staticmethod
+    def _center_of(box: Tuple[int, int, int, int]) -> Tuple[int, int]:
+        x, y, w, h = box
+        return int(x + w / 2), int(y + h / 2)
+
+    def _wait_buy_result_window(self) -> str:
+        """购买结果识别窗口轮询，返回 ok/fail/unknown。"""
+        t_end = time.time() + float(getattr(self, "_buy_result_timeout_sec", 0.8))
+        step = float(getattr(self, "_buy_result_poll_step_sec", 0.02))
+        got_ok = False
+        found_fail = False
+        while time.time() < t_end:
+            ok_hit = self.screen.locate("buy_ok", timeout=0.0) is not None
+            if ok_hit:
+                got_ok = True
+                break
+            fail_hit = self.screen.locate("buy_fail", timeout=0.0) is not None
+            if fail_hit:
+                found_fail = True
+            time.sleep(max(0.0, step))
+        if got_ok:
+            return "ok"
+        if found_fail:
+            return "fail"
+        return "unknown"
+
+    def _fast_close_success_overlay(self, btn_box: Tuple[int, int, int, int], interval_sec: float) -> None:
+        """快速关闭购买成功遮罩（不换界面场景）。"""
+        try:
+            cx, cy = self._center_of(btn_box)
+            self.screen.click_point(cx, cy, clicks=1)
+            time.sleep(max(interval_sec, 0.03))
+        except Exception:
+            try:
+                self.screen.click_center(btn_box)
+            except Exception:
+                pass
+            time.sleep(max(interval_sec, 0.03))
+
+    def _fast_close_and_rebuy(self, btn_box: Tuple[int, int, int, int], interval_sec: float) -> None:
+        """关闭遮罩并在同一位置立即再次点击一次。"""
+        try:
+            cx, cy = self._center_of(btn_box)
+            self.screen.click_point(cx, cy, clicks=1)
+            time.sleep(max(interval_sec, 0.03))
+            self.screen.click_point(cx, cy, clicks=1)
+        except Exception:
+            try:
+                self.screen.click_center(btn_box)
+                time.sleep(max(interval_sec, 0.03))
+                self.screen.click_center(btn_box)
+            except Exception:
+                pass
+
+    def _close_detail_with_wait(self) -> bool:
+        """关闭详情并按配置等待，成功返回 True。"""
+        c = self.screen.locate("btn_close", timeout=0.4)
+        if c is None:
+            return False
+        try:
+            self._debug_show_overlay([
+                {"rect": c, "label": "关闭详情", "fill": (45, 124, 255, 70), "outline": (45, 124, 255)},
+            ], stage="关闭详情", template_path=None, save_name="overlay_close_after_buy.png")
+        except Exception:
+            pass
+        self.screen.click_center(c)
+        time.sleep(max(0.0, float(getattr(self, "_post_close_detail_sec", 0.1))))
+        return True
+
+    def _should_restart_now(self) -> bool:
+        """检查是否到达重启周期。"""
+        if int(getattr(self, "restart_every_min", 0) or 0) <= 0:
+            return False
+        if self._next_restart_ts is None:
+            self._next_restart_ts = time.time() + int(self.restart_every_min) * 60
+            return False
+        return time.time() >= float(self._next_restart_ts)
+
+    def _do_soft_restart(self) -> None:
+        """简化版软重启：退出并重新进入游戏、清理缓存。"""
+        self._log_info("[重启] 到达重启周期，尝试重启…")
+        try:
+            h = self.screen.locate("btn_home", timeout=1.0)
+            if h is not None:
+                self.screen.click_center(h)
+            time.sleep(max(0.0, float(getattr(self, "_post_nav_sec", 0.1))))
+        except Exception:
+            pass
+        try:
+            s = self.screen.locate("btn_settings", timeout=1.0)
+            if s is not None:
+                self.screen.click_center(s)
+            time.sleep(5.0)
+            e = self.screen.locate("btn_exit", timeout=1.0)
+            if e is not None:
+                self.screen.click_center(e)
+            time.sleep(5.0)
+            ec = self.screen.locate("btn_exit_confirm", timeout=1.0)
+            if ec is not None:
+                self.screen.click_center(ec)
+        except Exception:
+            pass
+        # 等待恢复并重新启动
+        time.sleep(30.0)
+        res = run_launch_flow(self.cfg, on_log=lambda s: self._log_info(f"[重启]{s}"))
+        if not res.ok:
+            self._log_error(f"[重启] 失败：{res.error or res.code}")
+        # 重建简单上下文：清缓存
+        try:
+            self._card_cache.clear()
+            self._mid_cache.clear()
+        except Exception:
+            pass
+        # 重回市场/收藏页（保证刷新流程可用）
+        try:
+            mk = self.screen.locate("market_indicator", timeout=1.0)
+            if mk is None:
+                btn = self.screen.locate("btn_market", timeout=1.0)
+                if btn is not None:
+                    self.screen.click_center(btn)
+                    time.sleep(max(0.0, float(getattr(self, "_post_nav_sec", 0.1))))
+        except Exception:
+            pass
+        # 规划下一次重启时间
+        try:
+            self._next_restart_ts = time.time() + max(1, int(self.restart_every_min)) * 60
+        except Exception:
+            self._next_restart_ts = None
 
     def _tpl(self, key: str) -> Tuple[str, float]:
         """读取模板配置并解析相对路径为可用的绝对路径。
@@ -1402,6 +1567,29 @@ class MultiSnipeRunner:
         return out
 
     # ---------- 数量调整 ----------
+    def _calc_qty_mid(self) -> Optional[Tuple[int, int]]:
+        """通过数量加减按钮推算输入框中点。"""
+        m = self.screen.locate("qty_minus", timeout=0.2)
+        p = self.screen.locate("qty_plus", timeout=0.2)
+        if m is None or p is None:
+            return None
+        mx, my = int(m[0] + m[2] / 2), int(m[1] + m[3] / 2)
+        px, py = int(p[0] + p[2] / 2), int(p[1] + p[3] / 2)
+        return int((mx + px) / 2), int((my + py) / 2)
+
+    def _focus_and_type_quantity(self, qty: int) -> bool:
+        """直接聚焦数量输入框并输入指定值。"""
+        mid = self._calc_qty_mid()
+        if mid is None:
+            return False
+        try:
+            self.screen.click_point(int(mid[0]), int(mid[1]), clicks=1)
+            time.sleep(0.03)
+            self.screen.type_text(str(int(qty)), clear_first=True)
+            return True
+        except Exception:
+            return False
+
     def _adjust_qty(self, target: int) -> None:
         target = max(1, int(target or 1))
         try:
@@ -1420,6 +1608,14 @@ class MultiSnipeRunner:
         for _ in range(target - 1):
             self.screen.click_center(plus)
             time.sleep(0.01)
+
+    def _set_quantity(self, target: int) -> int:
+        """尽量精确设置数量，返回实际设定值。"""
+        q = max(1, int(target or 1))
+        if self._focus_and_type_quantity(q):
+            return q
+        self._adjust_qty(q)
+        return q
 
     # ---------- 购买（进入详情→复核详情价→购买） ----------
     def _purchase_once(self, it: SnipeItem, *, price_limit: int) -> Tuple[bool, int]:
@@ -1480,32 +1676,37 @@ class MultiSnipeRunner:
             except Exception:
                 pass
             return False, 0
-        # 购买数量/Max 逻辑
+        # 购买数量/Max 逻辑（对齐单品 v2 数量策略）
         mode = str(getattr(it, "purchase_mode", "normal") or "normal").lower()
+        is_ammo = (getattr(it, "big_category", "") or "").strip() == "弹药"
         used_max = False
+        typed_qty = 1
         if mode == "restock":
-            mx = self.screen.locate("btn_max", timeout=0.25)
-            if mx is not None:
-                self.screen.click_center(mx)
-                time.sleep(0.02)
-                used_max = True
-                try:
-                    self._log_debug(f"[数量][{it.name}] 使用最大按钮")
-                except Exception:
-                    pass
+            if is_ammo:
+                mx = self.screen.locate("btn_max", timeout=0.25)
+                if mx is not None:
+                    self.screen.click_center(mx)
+                    time.sleep(0.02)
+                    used_max = True
+                    typed_qty = 120
+                    try:
+                        self._log_debug(f"[数量][{it.name}] 使用最大按钮(弹药)")
+                    except Exception:
+                        pass
+                else:
+                    typed_qty = self._set_quantity(10)
             else:
-                self._adjust_qty(5)
+                typed_qty = self._set_quantity(max(1, int(getattr(it, "buy_qty", 5) or 5)))
         else:
-            qty = int(getattr(it, "buy_qty", 1) or 1)
-            if qty > 1:
-                self._adjust_qty(qty)
+            default_qty = int(getattr(it, "buy_qty", 10 if is_ammo else 1) or (10 if is_ammo else 1))
+            typed_qty = default_qty if default_qty > 0 else (10 if is_ammo else 1)
+            if typed_qty > 1:
+                typed_qty = self._set_quantity(typed_qty)
         # 定位并点击购买
         b = self.screen.locate("btn_buy", timeout=0.5)
         if b is None:
             # 关闭详情
-            c = self.screen.locate("btn_close", timeout=0.3)
-            if c is not None:
-                self.screen.click_center(c)
+            _ = self._close_detail_with_wait()
             try:
                 self._log_debug(f"[购买][{it.name}] 未找到购买按钮 用时={int((time.time()-t0)*1000)}ms")
             except Exception:
@@ -1533,82 +1734,133 @@ class MultiSnipeRunner:
             ], stage="点击购买", template_path=(buy_tpl if buy_tpl and os.path.exists(buy_tpl) else None), save_name="overlay_click_buy.png")
         except Exception:
             pass
+
+        # 连续购买参数（对齐单品 v2）
+        fast_mode = bool(getattr(self, "_fast_chain_mode", False))
+        try:
+            fast_max = max(1, int(getattr(self, "_fast_chain_max", 1)))
+        except Exception:
+            fast_max = 1
+        try:
+            fast_interval_sec = max(0.03, float(getattr(self, "_fast_chain_interval_ms", 35.0)) / 1000.0)
+        except Exception:
+            fast_interval_sec = 0.035
+
+        def _calc_inc() -> int:
+            if is_ammo:
+                if used_max:
+                    return 120
+                return max(1, int(typed_qty or 10))
+            # 非弹药
+            if used_max:
+                return max(1, int(typed_qty or 5))
+            return max(1, int(typed_qty or 1))
+
+        # 先发起第一次点击
         self.screen.click_center(b)
-        t_end = time.time() + max(0.2, float(getattr(self, "_buy_result_timeout_sec", 0.8)))
-        got_ok = False
-        found_fail = False
-        while time.time() < t_end:
-            ok_box = self.screen.locate("buy_ok", timeout=0.0)
-            if ok_box is not None:
-                got_ok = True
-                # Debug：购买成功标识
+
+        # 普通模式：一次 OCR -> 一次购买
+        if (not fast_mode) or fast_max <= 1:
+            res = self._wait_buy_result_window()
+            if res == "ok":
+                inc = _calc_inc()
+                # 普通模式只需要关闭遮罩，不应在购买按钮上再点一次以避免误下单
                 try:
                     ok_tpl, _ = self._tpl("buy_ok")
-                    self._debug_show_overlay([
-                        {"rect": ok_box, "label": "购买成功", "fill": (46, 160, 67, 90), "outline": (46, 160, 67)},
-                    ], stage="购买结果-成功", template_path=(ok_tpl if ok_tpl and os.path.exists(ok_tpl) else None), save_name="overlay_buy_ok.png")
+                    ok_box = self.screen.locate("buy_ok", timeout=0.0)
+                    if ok_box is not None:
+                        self._debug_show_overlay([
+                            {"rect": ok_box, "label": "购买成功", "fill": (46, 160, 67, 90), "outline": (46, 160, 67)},
+                        ], stage="购买结果-成功", template_path=(ok_tpl if ok_tpl and os.path.exists(ok_tpl) else None), save_name="overlay_buy_ok.png")
                 except Exception:
                     pass
-                break
-            fail_box = self.screen.locate("buy_fail", timeout=0.0)
-            if fail_box is not None:
-                found_fail = True
-                # Debug：购买失败标识
+                time.sleep(max(fast_interval_sec, float(getattr(self, "_post_success_click_sec", 0.3))))
+                _ = self._close_detail_with_wait()
                 try:
-                    fail_tpl, _ = self._tpl("buy_fail")
-                    self._debug_show_overlay([
-                        {"rect": fail_box, "label": "购买失败", "fill": (255, 99, 71, 90), "outline": (255, 99, 71)},
-                    ], stage="购买结果-失败", template_path=(fail_tpl if fail_tpl and os.path.exists(fail_tpl) else None), save_name="overlay_buy_fail.png")
+                    self._log_debug(f"[购买][{it.name}] 成功 数量+={int(inc)} 总用时={int((time.time()-t0)*1000)}ms")
                 except Exception:
                     pass
-            time.sleep(0.02)
-        # 关闭详情
-        c = self.screen.locate("btn_close", timeout=0.4)
-        if c is not None:
+                try:
+                    self._fail_counts[str(it.id)] = 0
+                except Exception:
+                    pass
+                return True, int(inc)
+            # 未成功
+            _ = self._close_detail_with_wait()
             try:
-                self._debug_show_overlay([
-                    {"rect": c, "label": "关闭详情", "fill": (45, 124, 255, 70), "outline": (45, 124, 255)},
-                ], stage="关闭详情", template_path=None, save_name="overlay_close_after_buy.png")
+                res_msg = {"fail": "失败", "unknown": "未知"}.get(res, "失败/未知")
+                self._log_debug(f"[购买][{it.name}] {res_msg} 用时={int((time.time()-t0)*1000)}ms")
             except Exception:
                 pass
-            self.screen.click_center(c)
-        if not (got_ok and not found_fail):
-            try:
-                self._log_debug(f"[购买][{it.name}] 失败/放弃 用时={int((time.time()-t0)*1000)}ms")
-            except Exception:
-                pass
-            # 连续失败计数 + 强制重定位（超过阈值）
             try:
                 _id = str(it.id)
                 self._fail_counts[_id] = int(self._fail_counts.get(_id, 0)) + 1
                 if int(self._fail_counts[_id]) >= max(1, int(getattr(self, "_relocate_after_fail", 3))):
-                    # 清理缓存强制下次重定位
-                    try:
-                        self._card_cache.pop(_id, None)
-                        self._mid_cache.pop(_id, None)
-                    except Exception:
-                        pass
+                    self._card_cache.pop(_id, None)
+                    self._mid_cache.pop(_id, None)
                     self._fail_counts[_id] = 0
                     self._log_debug(f"[恢复][{it.name}] 连续失败，已清空缓存强制重定位")
             except Exception:
                 pass
             return False, 0
-        # 购买增量：参考 task_runner 的逻辑
-        try:
-            is_ammo = (getattr(it, "big_category", "") or "").strip() == "弹药"
-        except Exception:
-            is_ammo = False
-        inc = (120 if used_max else 10) if is_ammo else (5 if used_max else 1)
-        try:
-            self._log_debug(f"[购买][{it.name}] 成功 数量+={int(inc)} 总用时={int((time.time()-t0)*1000)}ms")
-        except Exception:
-            pass
-        # 成功：清零连续失败计数
+
+        # 快速连击模式：一次 OCR 后多次购买
+        total_inc = 0
+        chain_count = 0
+        while chain_count < fast_max:
+            res = self._wait_buy_result_window()
+            if res != "ok":
+                _ = self._close_detail_with_wait()
+                try:
+                    res_msg = {"fail": "失败", "unknown": "未知"}.get(res, "失败/未知")
+                    self._log_debug(f"[购买][{it.name}] 快速连击提前结束({res_msg}) 成功次数={chain_count} 用时={int((time.time()-t0)*1000)}ms")
+                except Exception:
+                    pass
+                if total_inc > 0:
+                    try:
+                        self._fail_counts[str(it.id)] = 0
+                    except Exception:
+                        pass
+                    return True, total_inc
+                try:
+                    _id = str(it.id)
+                    self._fail_counts[_id] = int(self._fail_counts.get(_id, 0)) + 1
+                    if int(self._fail_counts[_id]) >= max(1, int(getattr(self, "_relocate_after_fail", 3))):
+                        self._card_cache.pop(_id, None)
+                        self._mid_cache.pop(_id, None)
+                        self._fail_counts[_id] = 0
+                        self._log_debug(f"[恢复][{it.name}] 快速连击失败，已清空缓存强制重定位")
+                except Exception:
+                    pass
+                return False, 0
+
+            inc = _calc_inc()
+            total_inc += int(inc)
+            chain_count += 1
+            try:
+                self._log_debug(f"[购买][{it.name}] 快速连击第{chain_count}次成功(+{inc})")
+            except Exception:
+                pass
+
+            # 达到上限：仅关闭遮罩，退出详情
+            if chain_count >= fast_max:
+                self._fast_close_success_overlay(b, max(fast_interval_sec, float(getattr(self, "_post_success_click_sec", 0.3))))
+                break
+            # 未达上限：关闭遮罩并在同一位置再次点击
+            self._fast_close_and_rebuy(b, fast_interval_sec)
+            self._log_debug(f"[购买][{it.name}] 快速连击准备下一次 (max={fast_max})")
+
+        # 连击结束后关闭详情
+        _ = self._close_detail_with_wait()
         try:
             self._fail_counts[str(it.id)] = 0
         except Exception:
             pass
-        return True, int(inc)
+        try:
+            self._log_debug(f"[购买][{it.name}] 快速连击完成 次数={chain_count} 数量+={total_inc} 总用时={int((time.time()-t0)*1000)}ms")
+        except Exception:
+            pass
+        return True, total_inc
 
     # ---------- 跑一轮并购买 ----------
     def run_once(self) -> Dict[str, Any]:
@@ -1627,6 +1879,12 @@ class MultiSnipeRunner:
                 loop_name = f"{ts}_loop-{self._loop_no:04d}"
                 self._loop_dir = os.path.join(self._debug_overlay_dir, loop_name)
                 os.makedirs(self._loop_dir, exist_ok=True)
+        except Exception:
+            pass
+        # 周期性重启（对齐单品 v2），0 表示禁用
+        try:
+            if self._should_restart_now():
+                self._do_soft_restart()
         except Exception:
             pass
         t0 = time.time()

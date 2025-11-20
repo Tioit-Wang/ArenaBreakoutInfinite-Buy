@@ -220,6 +220,31 @@ class SinglePurchaseBuyerV2:
         if saved:
             self._log_debug(item_disp, purchased_str, f"已保存 ROI 调试图：{len(saved)} 张 -> {out_dir}")
 
+    # -------------------- 工具：价格合法性校验（半阈下限） --------------------
+    def _is_price_legal_for_history(self, unit_price: int, task: Dict[str, Any]) -> Tuple[bool, int, int]:
+        """判断 OCR 读数是否“价格合理”，用于决定是否写入价格历史。
+
+        规则：
+        - 使用 `max(price_threshold, restock_price)` 作为基准阈值 B（取>0的最大值；若均<=0则不启用校验）。
+        - 合理性条件：`unit_price > B/2`（严格大于二分之一）。
+
+        返回 (是否合理, 基准阈值B, 下限 floor=B//2)。
+        """
+        try:
+            thr = int(task.get("price_threshold", 0) or 0)
+        except Exception:
+            thr = 0
+        try:
+            restock = int(task.get("restock_price", 0) or 0)
+        except Exception:
+            restock = 0
+        base = max(int(thr), int(restock))
+        if base <= 0:
+            return True, 0, 0
+        # 严格大于二分之一：unit_price * 2 > base
+        ok = int(unit_price) * 2 > int(base)
+        return ok, int(base), int(base // 2)
+
     @property
     def _pg(self):  # type: ignore
         import pyautogui  # type: ignore
@@ -248,6 +273,56 @@ class SinglePurchaseBuyerV2:
             # 回退：用 ScreenOps 普通点击（不复位）
             try:
                 self.screen.click_center(box)
+            except Exception:
+                pass
+
+    def _fast_close_success_overlay(
+        self,
+        btn_box: Tuple[int, int, int, int],
+        interval_sec: float,
+    ) -> None:
+        """快速关闭购买成功遮罩。
+
+        - 假定当前已出现购买成功遮罩，且点击购买按钮位置可以关闭遮罩；
+        - 在按钮中心点击一次并等待短暂渲染时间；
+        - 若失败则回退到通用遮罩关闭逻辑。
+        """
+
+        try:
+            cx, cy = self._center_of(btn_box)
+            self.screen.click_point(cx, cy, clicks=1)
+            safe_sleep(max(interval_sec, 0.03))
+        except Exception:
+            try:
+                self._dismiss_success_overlay_with_wait("全局", "-", goods=None)
+            except Exception:
+                pass
+
+    def _fast_close_and_rebuy(
+        self,
+        btn_box: Tuple[int, int, int, int],
+        interval_sec: float,
+    ) -> None:
+        """关闭成功遮罩并在同一位置快速再次点击一次以发起下一次购买。
+
+        - 第一次点击：关闭成功遮罩；
+        - 等待 interval_sec（≥30ms），确保界面渲染；
+        - 第二次点击：在同一位置再次点击，作为下一次购买操作；
+        - 若过程中异常，则回退为“关闭遮罩 + 普通点击购买”。
+        """
+
+        try:
+            cx, cy = self._center_of(btn_box)
+            self.screen.click_point(cx, cy, clicks=1)
+            safe_sleep(max(interval_sec, 0.03))
+            self.screen.click_point(cx, cy, clicks=1)
+        except Exception:
+            try:
+                self._dismiss_success_overlay_with_wait("全局", "-", goods=None)
+            except Exception:
+                pass
+            try:
+                self.screen.click_center(btn_box)
             except Exception:
                 pass
 
@@ -635,8 +710,8 @@ class SinglePurchaseBuyerV2:
         - ROI 公式：distance_from_buy_top=5（兑换+30）、height=45、scale∈[0.6,2.5]；
         - 分割与二值化：上下半分割；优先 Otsu，回退灰度固定阈值；
         - 识别策略：仅使用上半（平均单价）→ 数字识别优先，失败再文本解析；不使用下半兜底；
-        - 不在此阶段做阈值过滤：任何正整数即视为识别成功，是否合格交由外层决策；
-        - 产物：成功写入价格历史，可选保存 ROI。
+        - 不在此阶段做阈值过滤与历史写入：任何正整数即视为 OCR 成功并返回，历史写入与阈值合法性校验交由调用方处理；
+        - 产物：返回识别到的平均单价，可选保存 ROI（调试）。
         """
 
         # 购买按钮锚点（带邻域重定位）
@@ -815,24 +890,14 @@ class SinglePurchaseBuyerV2:
             ocr_ms = -1
 
         def _accept_and_record(v: int) -> Optional[int]:
-            """任何正整数即视为识别成功（阈值合格性在外层判断）。"""
+            """任何正整数即视为 OCR 成功（阈值合规与历史写入由外层处理）。"""
             if not isinstance(v, int) or v <= 0:
                 self._last_avg_ocr_ok = False
                 self._avg_ocr_streak += 1
                 return None
-            try:
-                append_price(
-                    item_id=goods.id,
-                    item_name=goods.name or goods.search_name or item_disp,
-                    price=int(v),
-                    category=(goods.big_category or "") or None,
-                    paths=self.history_paths,
-                )
-            except Exception:
-                pass
             self._last_avg_ocr_ok = True
             self._avg_ocr_streak = 0
-            self._log_info(item_disp, purchased_str, f"平均价 OCR 成功 值={v} 阈下限={expected_floor or 0}")
+            self._log_info(item_disp, purchased_str, f"平均价 OCR 成功 值={v}")
             return int(v)
 
         if isinstance(val, int) and val > 0:
@@ -937,11 +1002,7 @@ class SinglePurchaseBuyerV2:
             restock = int(task.get("restock_price", 0) or 0)
         except Exception:
             restock = 0
-        try:
-            r_prem = float(task.get("restock_premium_pct", 0.0) or 0.0)
-        except Exception:
-            r_prem = 0.0
-        restock_limit = restock + int(round(restock * max(0.0, r_prem) / 100.0)) if restock > 0 else 0
+        # 严格规则：补货上限不使用溢价，直接使用 restock 作为上限
         # 会话准备：弹药 Max / 非弹药数量
         is_ammo = (goods.big_category or "").strip() == "弹药"
         used_max = False
@@ -977,7 +1038,28 @@ class SinglePurchaseBuyerV2:
                 self.step3_clear_obstacles()
                 self._log_info(item_disp, purchased_str, "平均价识别失败（补货，识别轮超时），已执行障碍清理")
                 return bought, True
-            ok_restock = (restock > 0) and (unit_price <= restock_limit)
+            # 价格合理性（半阈下限）校验 → 决定是否写入历史
+            legal, base_thr, floor_half = self._is_price_legal_for_history(int(unit_price), task)
+            if not legal:
+                _ = self._close_detail_with_wait(goods)
+                self._log_info(
+                    item_disp,
+                    purchased_str,
+                    f"均价={int(unit_price)} 不满足下限>max(阈,补)/2（B={base_thr} 下限={floor_half}），以不符合价格阈值处理",
+                )
+                return bought, True
+            # 合理：写入价格历史
+            try:
+                append_price(
+                    item_id=goods.id,
+                    item_name=goods.name or goods.search_name or item_disp,
+                    price=int(unit_price),
+                    category=(goods.big_category or "") or None,
+                    paths=self.history_paths,
+                )
+            except Exception:
+                pass
+            ok_restock = (restock > 0) and (unit_price <= restock)
             if not ok_restock:
                 _ = self._close_detail_with_wait(goods)
                 return bought, True
@@ -1081,31 +1163,55 @@ class SinglePurchaseBuyerV2:
                 self._log_info(item_disp, purchased_str, "平均单价识别失败（识别轮超时），已执行障碍清理")
                 return bought, True
 
-            # 价格阈值/补货上限解析与判定
-            # 约定：任何阈值为 0 均表示“不购买/禁用”。当同时配置补货与普通阈值时，优先补货；
-            # 若补货不满足，再回退普通阈值判定。
+            # 价格合理性（半阈下限）校验 → 决定是否写入历史
+            legal, base_thr, floor_half = self._is_price_legal_for_history(int(unit_price), task)
+            if not legal:
+                self._log_info(
+                    item_disp,
+                    purchased_str,
+                    f"均价={int(unit_price)} 不满足下限>max(阈,补)/2（B={base_thr} 下限={floor_half}），以不符合价格阈值处理",
+                )
+                _ = self._close_detail_with_wait(goods)
+                return bought, True
+            # 合理：写入价格历史
+            try:
+                append_price(
+                    item_id=goods.id,
+                    item_name=goods.name or goods.search_name or item_disp,
+                    price=int(unit_price),
+                    category=(goods.big_category or "") or None,
+                    paths=self.history_paths,
+                )
+            except Exception:
+                pass
+
+            # 价格阈值/补货上限解析与判定（严格≤阈值，不使用溢价）
+            # 约定：任何阈值为 0 表示“不购买/禁用”。当同时配置补货与普通阈值时，优先补货；
             thr = int(task.get("price_threshold", 0) or 0)
-            prem = float(task.get("price_premium_pct", 0.0) or 0.0)
-            limit = thr + int(round(thr * max(0.0, prem) / 100.0)) if thr > 0 else 0
             restock = int(task.get("restock_price", 0) or 0)
-            r_prem = float(task.get("restock_premium_pct", 0.0) or 0.0)
-            rest_limit = restock + int(round(restock * max(0.0, r_prem) / 100.0)) if restock > 0 else 0
-            ok_restock = (restock > 0) and (unit_price <= rest_limit)
-            # 修正：阈值为 0 表示禁用，因此普通判定仅在 limit>0 时生效
-            ok_normal = (limit > 0) and (unit_price <= limit)
+            ok_restock = (restock > 0) and (unit_price <= restock)
+            ok_normal = (thr > 0) and (unit_price <= thr)
 
             # 信息日志：输出两条路径的阈值线，便于人工核对
             if restock > 0:
-                self._log_info(item_disp, purchased_str, f"均价={unit_price} 阈≤{limit}(+{int(prem)}%) 补≤{rest_limit}(+{int(r_prem)}%)")
+                self._log_info(
+                    item_disp,
+                    purchased_str,
+                    f"均价={unit_price} 普≤{thr if thr>0 else 0} 补≤{restock} (下限>{max(thr, restock)//2})",
+                )
             else:
-                self._log_info(item_disp, purchased_str, f"均价={unit_price} 阈≤{limit}(+{int(prem)}%)")
+                self._log_info(
+                    item_disp,
+                    purchased_str,
+                    f"均价={unit_price} 阈≤{thr if thr>0 else 0} (下限>{thr//2 if thr>0 else 0})",
+                )
 
             # 决策点（仅一条 debug，收敛但足够排障）
             if ok_restock:
                 self._log_debug(
                     item_disp,
                     purchased_str,
-                    f"决策=补货 | unit={unit_price} limit={limit} rest_limit={rest_limit} thr={thr} prem={int(prem)}% restock={restock} r_prem={int(r_prem)}%",
+                    f"决策=补货 | unit={unit_price} thr={thr} restock={restock}",
                 )
                 got_more, cont = self._restock_fast_loop(goods, task, purchased_so_far + bought)
                 bought += int(got_more)
@@ -1114,28 +1220,94 @@ class SinglePurchaseBuyerV2:
                 self._log_debug(
                     item_disp,
                     purchased_str,
-                    f"决策=普通 | unit={unit_price} limit={limit} rest_limit={rest_limit} thr={thr} prem={int(prem)}% restock={restock} r_prem={int(r_prem)}%",
+                    f"决策=普通 | unit={unit_price} thr={thr} restock={restock}",
                 )
             else:
                 self._log_debug(
                     item_disp,
                     purchased_str,
-                    f"决策=放弃 | unit={unit_price} limit={limit} rest_limit={rest_limit} thr={thr} prem={int(prem)}% restock={restock} r_prem={int(r_prem)}%",
+                    f"决策=放弃 | unit={unit_price} thr={thr} restock={restock}",
                 )
                 _ = self._close_detail_with_wait(goods)
                 return bought, True
+
+            # 统一读取快速连击参数（按任务高级配置注入）
+            fast_mode = bool(getattr(self, "_fast_chain_mode", False))
+            try:
+                fast_max = int(getattr(self, "_fast_chain_max", 10) or 10)
+            except Exception:
+                fast_max = 10
+            try:
+                fast_interval_sec = float(getattr(self, "_fast_chain_interval_ms", 35.0) or 35.0) / 1000.0
+            except Exception:
+                fast_interval_sec = 0.035
+            fast_interval_sec = max(0.03, fast_interval_sec)
 
             b = self._first_detail_buttons.get(goods.id, {}).get("btn_buy") or self.screen.locate("btn_buy", timeout=0.4)
             if b is None:
                 _ = self._close_detail_with_wait(goods)
                 self._log_info(item_disp, purchased_str, "未找到购买按钮，已关闭详情")
                 return bought, True
-            # 点击购买（调试记录）
-            self._log_debug(item_disp, purchased_str, f"已点击购买 按钮框={b}")
+
+            # 非快速连击模式：保持原有“一次 OCR 一次购买”的节奏
+            if (not fast_mode) or fast_max <= 1:
+                self._log_debug(
+                    item_disp,
+                    purchased_str,
+                    "决策=普通(单次) | 未启用快速连击模式",
+                )
+                self._log_debug(item_disp, purchased_str, f"已点击购买 按钮框={b}")
+                self.screen.click_center(b)
+                _res = self._wait_buy_result_window(item_disp, purchased_str)
+                if _res == "ok":
+                    is_ammo = (goods.big_category or "").strip() == "弹药"
+                    inc = 10 if is_ammo else 1
+                    bought += int(inc)
+                    try:
+                        append_purchase(
+                            item_id=goods.id,
+                            item_name=goods.name or goods.search_name or str(task.get("item_name", "")),
+                            price=int(unit_price or 0),
+                            qty=int(inc),
+                            task_id=str(task.get("id", "")) if task.get("id") else None,
+                            task_name=str(task.get("item_name", "")) or None,
+                            category=(goods.big_category or "") or None,
+                            used_max=False,
+                            paths=self.history_paths,
+                        )
+                    except Exception:
+                        pass
+                    self._dismiss_success_overlay_with_wait(item_disp, purchased_str, goods=goods)
+                    continue
+                if _res == "fail":
+                    _ = self._close_detail_with_wait(goods)
+                    self._log_info(item_disp, purchased_str, "购买失败，已关闭详情")
+                    return bought, True
+                _ = self._close_detail_with_wait(goods)
+                self._log_info(item_disp, purchased_str, "结果未知，已关闭详情")
+                return bought, True
+
+            # 快速连击模式：一次 OCR 后连续多次购买，达到上限或失败后重新 OCR
+            self._log_debug(
+                item_disp,
+                purchased_str,
+                f"决策=普通(快速连击) | unit={unit_price} thr={thr} restock={restock} max_chain={fast_max}",
+            )
+
+            chain_count = 0
+            # 首次点击：发起第一笔购买
+            self._log_debug(item_disp, purchased_str, f"快速连击：首次点击购买 按钮框={b}")
             self.screen.click_center(b)
-            # 结果识别轮（汇总级日志）
-            _res = self._wait_buy_result_window(item_disp, purchased_str)
-            if _res == "ok":
+
+            while chain_count < fast_max:
+                _res = self._wait_buy_result_window(item_disp, purchased_str)
+                if _res != "ok":
+                    # 未识别到购买成功视为失败：关闭详情并交由外层重新 OCR 判断
+                    _ = self._close_detail_with_wait(goods)
+                    self._log_info(item_disp, purchased_str, "快速连击：未识别到购买成功，已关闭详情并准备重新识别价格")
+                    return bought, True
+
+                # 识别到一次成功购买
                 is_ammo = (goods.big_category or "").strip() == "弹药"
                 inc = 10 if is_ammo else 1
                 bought += int(inc)
@@ -1153,16 +1325,24 @@ class SinglePurchaseBuyerV2:
                     )
                 except Exception:
                     pass
-                self._dismiss_success_overlay_with_wait(item_disp, purchased_str, goods=goods)
-                continue
-            if _res == "fail":
-                _ = self._close_detail_with_wait(goods)
-                self._log_info(item_disp, purchased_str, "购买失败，已关闭详情")
-                return bought, True
-            # 未知
-            _ = self._close_detail_with_wait(goods)
-            self._log_info(item_disp, purchased_str, "结果未知，已关闭详情")
-            return bought, True
+
+                chain_count += 1
+                self._log_debug(
+                    item_disp,
+                    purchased_str,
+                    f"快速连击：第{chain_count}次购买成功(本轮最多 {fast_max} 次)",
+                )
+
+                # 连击达到上限：只关闭遮罩，跳出本轮，回到 OCR 流程
+                if chain_count >= fast_max:
+                    self._fast_close_success_overlay(b, fast_interval_sec)
+                    break
+
+                # 未达到上限：关闭遮罩并在同一位置再次点击一次，发起下一次购买
+                self._fast_close_and_rebuy(b, fast_interval_sec)
+
+            # 跳出快速连击循环后，继续最外层 while True，进入下一轮 OCR
+            continue
 
     # 工具：清理临时卡片坐标缓存
     def clear_pos(self, goods_id: Optional[str] = None) -> None:
@@ -1245,10 +1425,14 @@ class SinglePurchaseTaskRunnerV2:
         except Exception:
             tuning = {}
         timings = Timings(
-            step_delay=step_delay,
+            post_close_detail=float(tuning.get("post_close_detail_sec", 0.1) or 0.1),
+            post_success_click=float(tuning.get("post_success_click_sec", 0.3) or 0.3),
+            post_nav=float(tuning.get("post_nav_sec", 0.1) or 0.1),
             buy_result_timeout=float(tuning.get("buy_result_timeout_sec", 0.8) or 0.8),
             buy_result_poll_step=float(tuning.get("buy_result_poll_step_sec", 0.02) or 0.02),
             poll_step=float(tuning.get("poll_step_sec", 0.02) or 0.02),
+            ocr_min_wait=float(tuning.get("ocr_min_wait_sec", 0.05) or 0.05),
+            step_delay=step_delay,
             ocr_round_window=float(tuning.get("ocr_round_window_sec", 0.5) or 0.5),
             ocr_round_step=float(tuning.get("ocr_round_step_sec", 0.02) or 0.02),
             ocr_round_fail_limit=int(tuning.get("ocr_round_fail_limit", 10) or 10),
@@ -1270,6 +1454,29 @@ class SinglePurchaseTaskRunnerV2:
         self._penalty_confirm_delay_sec = float(tuning.get("penalty_confirm_delay_sec", 5.0) or 5.0)
         self._penalty_wait_after_confirm_sec = float(tuning.get("penalty_wait_sec", 180.0) or 180.0)
         self._last_avg_ok_ts: float = 0.0
+
+        # 快速连击参数（从任务高级配置注入，设置默认值）
+        try:
+            adv_global = self.tasks_data.get("advanced") if isinstance(self.tasks_data.get("advanced"), dict) else {}
+        except Exception:
+            adv_global = {}
+        fast_mode = bool((adv_global or {}).get("fast_chain_mode", False))
+        try:
+            fast_max = int((adv_global or {}).get("fast_chain_max", 10) or 10)
+        except Exception:
+            fast_max = 10
+        try:
+            fast_interval_ms = float((adv_global or {}).get("fast_chain_interval_ms", 35.0) or 35.0)
+        except Exception:
+            fast_interval_ms = 35.0
+        # 写入 buyer 实例供内部读取
+        try:
+            setattr(self.buyer, "_fast_chain_mode", fast_mode)
+            setattr(self.buyer, "_fast_chain_max", max(1, fast_max))
+            # 确保间隔不少于 30ms
+            setattr(self.buyer, "_fast_chain_interval_ms", max(30.0, fast_interval_ms))
+        except Exception:
+            pass
 
         # 模式/日志/重启
         self.mode = str(self.tasks_data.get("task_mode", "time"))
@@ -1465,6 +1672,15 @@ class SinglePurchaseTaskRunnerV2:
             # 失败：清理 + 处罚判定 + 退避
             try:
                 self.buyer.step3_clear_obstacles()
+            except Exception:
+                pass
+            # 尝试立即检测处罚提示，预缓存阶段也要处理
+            try:
+                warn_box = self.screen.locate("penalty_warning", timeout=0.3)
+                if warn_box is not None:
+                    self._check_and_handle_penalty()
+                    # 处罚处理中，直接进入下一轮，不再叠加退避
+                    backoff = max(1.0, backoff)
             except Exception:
                 pass
             # 处罚统计更新

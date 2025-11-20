@@ -220,6 +220,78 @@ class MultiSnipeTab(BaseTab):
             except Exception:
                 pass
 
+        # 高级设置（购买时序 / 连击 / 重启）
+        tuning = self.cfg.get("multi_snipe_tuning") if isinstance(self.cfg.get("multi_snipe_tuning"), dict) else {}
+        def _get_f(key: str, default: float) -> float:
+            try:
+                v = float(tuning.get(key, default) or default)
+            except Exception:
+                v = default
+            return v
+        def _get_i(key: str, default: int) -> int:
+            try:
+                v = int(tuning.get(key, default) or default)
+            except Exception:
+                v = default
+            return v
+        self.var_ms_buy_timeout = tk.DoubleVar(value=_get_f("buy_result_timeout_sec", 0.8))
+        self.var_ms_buy_poll = tk.DoubleVar(value=_get_f("buy_result_poll_step_sec", 0.02))
+        self.var_ms_post_success = tk.DoubleVar(value=_get_f("post_success_click_sec", 0.3))
+        self.var_ms_post_close = tk.DoubleVar(value=_get_f("post_close_detail_sec", 0.1))
+        self.var_ms_post_nav = tk.DoubleVar(value=_get_f("post_nav_sec", 0.1))
+        try:
+            self.var_ms_fast_mode = tk.BooleanVar(value=bool(tuning.get("fast_chain_mode", True)))
+        except Exception:
+            self.var_ms_fast_mode = tk.BooleanVar(value=True)
+        self.var_ms_fast_max = tk.IntVar(value=_get_i("fast_chain_max", 10))
+        self.var_ms_fast_interval = tk.DoubleVar(value=_get_f("fast_chain_interval_ms", 35.0))
+        self.var_ms_restart_min = tk.IntVar(value=_get_i("restart_every_min", 0))
+
+        box_adv = ttk.LabelFrame(frm, text="高级设置（购买/连击/重启）")
+        box_adv.pack(fill=tk.X, padx=4, pady=(0, 6))
+        # 行1：结果窗口与轮询
+        ttk.Label(box_adv, text="结果超时(秒)").grid(row=0, column=0, sticky="e", padx=6, pady=6)
+        ttk.Spinbox(box_adv, from_=0.1, to=5.0, increment=0.05, width=8, textvariable=self.var_ms_buy_timeout).grid(row=0, column=1, sticky="w")
+        ttk.Label(box_adv, text="轮询步进(秒)").grid(row=0, column=2, sticky="e", padx=12)
+        ttk.Spinbox(box_adv, from_=0.005, to=0.5, increment=0.005, width=8, textvariable=self.var_ms_buy_poll).grid(row=0, column=3, sticky="w")
+        # 行2：遮罩/关闭/导航等待
+        ttk.Label(box_adv, text="成功遮罩等待(秒)").grid(row=1, column=0, sticky="e", padx=6, pady=6)
+        ttk.Spinbox(box_adv, from_=0.0, to=1.0, increment=0.01, width=8, textvariable=self.var_ms_post_success).grid(row=1, column=1, sticky="w")
+        ttk.Label(box_adv, text="关闭详情等待(秒)").grid(row=1, column=2, sticky="e", padx=12)
+        ttk.Spinbox(box_adv, from_=0.0, to=1.0, increment=0.01, width=8, textvariable=self.var_ms_post_close).grid(row=1, column=3, sticky="w")
+        ttk.Label(box_adv, text="导航等待(秒)").grid(row=1, column=4, sticky="e", padx=12)
+        ttk.Spinbox(box_adv, from_=0.0, to=1.0, increment=0.01, width=8, textvariable=self.var_ms_post_nav).grid(row=1, column=5, sticky="w", padx=(0,6))
+        # 行3：快速连击
+        ttk.Checkbutton(box_adv, text="开启快速连击", variable=self.var_ms_fast_mode).grid(row=2, column=0, sticky="w", padx=6, pady=6)
+        ttk.Label(box_adv, text="连击上限(次)").grid(row=2, column=1, sticky="e", padx=6)
+        ttk.Spinbox(box_adv, from_=1, to=30, increment=1, width=6, textvariable=self.var_ms_fast_max).grid(row=2, column=2, sticky="w")
+        ttk.Label(box_adv, text="连击间隔(ms，≥30)").grid(row=2, column=3, sticky="e", padx=12)
+        ttk.Spinbox(box_adv, from_=30, to=500, increment=5, width=8, textvariable=self.var_ms_fast_interval).grid(row=2, column=4, sticky="w")
+        # 行4：重启
+        ttk.Label(box_adv, text="重启周期(分钟，0=不重启)").grid(row=3, column=0, sticky="e", padx=6, pady=6)
+        ttk.Spinbox(box_adv, from_=0, to=1440, increment=5, width=8, textvariable=self.var_ms_restart_min).grid(row=3, column=1, sticky="w")
+        ttk.Label(box_adv, text="注意：开启后将周期性重启游戏进程", foreground="#c0392b").grid(row=3, column=2, columnspan=4, sticky="w", padx=12)
+        for c in range(0, 6):
+            try:
+                box_adv.columnconfigure(c, weight=0)
+            except Exception:
+                pass
+        for v in [
+            self.var_ms_buy_timeout,
+            self.var_ms_buy_poll,
+            self.var_ms_post_success,
+            self.var_ms_post_close,
+            self.var_ms_post_nav,
+            self.var_ms_fast_mode,
+            self.var_ms_fast_max,
+            self.var_ms_fast_interval,
+            self.var_ms_restart_min,
+        ]:
+            try:
+                v.trace_add("write", lambda *_: self._schedule_autosave())
+            except Exception:
+                pass
+
         # 任务列表改为弹窗进行配置；此处仅提供预览与控制入口。
         # 选择商品预览：弹出与任务配置相同的“选择物品”弹窗；
         # 选择后在屏幕上定位卡片中间模板，依此推断价格区域并将鼠标先移动到“商品（中间图片）”位置，
@@ -684,6 +756,10 @@ class MultiSnipeTab(BaseTab):
 
         # 构造运行器：在本页注入调试覆盖（仅本页面生效，不落盘）
         try:
+            self._save_templates_into_cfg()
+        except Exception:
+            pass
+        try:
             import copy as _copy
             cfg_copy = _copy.deepcopy(self.cfg)
         except Exception:
@@ -702,6 +778,25 @@ class MultiSnipeTab(BaseTab):
             cfg_copy["debug"] = dbg_new
         except Exception:
             cfg_copy["debug"] = overrides or dbg_base
+
+        # 启动前打印高级设置摘要
+        try:
+            tcfg = self._collect_tuning_from_ui()
+            fast_tag = "开" if tcfg.get("fast_chain_mode") else "关"
+            self._append_multi_log(
+                "【INFO】高级设置：超时={:.2f}s 步进={:.3f}s 成功等待={:.2f}s 关闭等待={:.2f}s 连击={} max={} 间隔={}ms 重启={}min".format(
+                    tcfg.get("buy_result_timeout_sec", 0.0),
+                    tcfg.get("buy_result_poll_step_sec", 0.0),
+                    tcfg.get("post_success_click_sec", 0.0),
+                    tcfg.get("post_close_detail_sec", 0.0),
+                    fast_tag,
+                    int(tcfg.get("fast_chain_max", 0) or 0),
+                    int(round(float(tcfg.get("fast_chain_interval_ms", 0.0) or 0.0))),
+                    int(tcfg.get("restart_every_min", 0) or 0),
+                )
+            )
+        except Exception:
+            pass
 
         runner = MultiSnipeRunner(cfg_copy, items_raw, on_log=lambda s: self._append_multi_log(s))
         self._snipe_runner = runner
@@ -881,6 +976,11 @@ class MultiSnipeTab(BaseTab):
                     tpls[key]["confidence"] = float(row.get_confidence())
                 except Exception:
                     pass
+            try:
+                tcfg = self.cfg.setdefault("multi_snipe_tuning", {})
+                tcfg.update(self._collect_tuning_from_ui())
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -926,6 +1026,42 @@ class MultiSnipeTab(BaseTab):
             "step_sleep": float(st),
             "save_overlay_images": save_imgs,
             "overlay_dir": od,
+        }
+
+    def _collect_tuning_from_ui(self) -> Dict[str, Any]:
+        """收集并裁剪多商品高级设置，写入 cfg.multi_snipe_tuning。"""
+        def _clamp_float(val, lo, hi, default):
+            try:
+                v = float(val)
+            except Exception:
+                return float(default)
+            if v < lo:
+                v = lo
+            if v > hi:
+                v = hi
+            return float(v)
+
+        def _clamp_int(val, lo, hi, default):
+            try:
+                v = int(val)
+            except Exception:
+                return int(default)
+            if v < lo:
+                v = lo
+            if v > hi:
+                v = hi
+            return int(v)
+
+        return {
+            "buy_result_timeout_sec": _clamp_float(self.var_ms_buy_timeout.get() if hasattr(self, "var_ms_buy_timeout") else 0.8, 0.1, 5.0, 0.8),
+            "buy_result_poll_step_sec": _clamp_float(self.var_ms_buy_poll.get() if hasattr(self, "var_ms_buy_poll") else 0.02, 0.005, 0.5, 0.02),
+            "post_success_click_sec": _clamp_float(self.var_ms_post_success.get() if hasattr(self, "var_ms_post_success") else 0.3, 0.0, 1.0, 0.3),
+            "post_close_detail_sec": _clamp_float(self.var_ms_post_close.get() if hasattr(self, "var_ms_post_close") else 0.1, 0.0, 1.0, 0.1),
+            "post_nav_sec": _clamp_float(self.var_ms_post_nav.get() if hasattr(self, "var_ms_post_nav") else 0.1, 0.0, 1.0, 0.1),
+            "fast_chain_mode": bool(self.var_ms_fast_mode.get()) if hasattr(self, "var_ms_fast_mode") else True,
+            "fast_chain_max": _clamp_int(self.var_ms_fast_max.get() if hasattr(self, "var_ms_fast_max") else 10, 1, 30, 10),
+            "fast_chain_interval_ms": _clamp_float(self.var_ms_fast_interval.get() if hasattr(self, "var_ms_fast_interval") else 35.0, 30.0, 500.0, 35.0),
+            "restart_every_min": _clamp_int(self.var_ms_restart_min.get() if hasattr(self, "var_ms_restart_min") else 0, 0, 1440, 0),
         }
 
     def _debug_test_overlay(self) -> None:

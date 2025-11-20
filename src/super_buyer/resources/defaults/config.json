@@ -17,6 +17,20 @@
   "paths": {
     "output_dir": "C:\\Code\\PythonProjects\\ArenaBreakoutInfinite-Buy\\data\\output"
   },
+  "multi_snipe_tuning": {
+    "buy_result_timeout_sec": 0.35,
+    "buy_result_poll_step_sec": 0.01,
+    "poll_step_sec": 0.02,
+    "ocr_round_window_sec": 0.35,
+    "ocr_round_step_sec": 0.015,
+    "ocr_round_fail_limit": 10,
+    "post_close_detail_sec": 0.08,
+    "post_success_click_sec": 0.08,
+    "post_nav_sec": 0.08,
+    "ocr_miss_penalty_threshold": 10,
+    "penalty_confirm_delay_sec": 5.0,
+    "penalty_wait_sec": 180.0
+  },
   "hotkeys": {
     "toggle": "<Control-Alt-t>"
   },
