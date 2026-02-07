@@ -380,6 +380,26 @@ class MultiSnipeRunner:
             except Exception:
                 pass
 
+    def _dismiss_success_overlay_with_wait(self) -> None:
+        """尽量关闭购买成功遮罩，并等待渲染时间。
+
+        设计目标：
+        - 普通模式下避免在购买按钮位置二次点击（遮罩若已消失可能触发误下单）；
+        - 优先点击 `buy_ok` 模板区域（若存在）；
+        - 无论是否命中都等待 post_success_click_sec，给 UI 足够刷新时间。
+        """
+
+        try:
+            ok_box = self.screen.locate("buy_ok", timeout=0.2)
+            if ok_box is not None:
+                self.screen.click_center(ok_box)
+        except Exception:
+            pass
+        try:
+            time.sleep(max(0.0, float(getattr(self, "_post_success_click_sec", 0.3))))
+        except Exception:
+            pass
+
     def _close_detail_with_wait(self) -> bool:
         """关闭详情并按配置等待，成功返回 True。"""
         c = self.screen.locate("btn_close", timeout=0.4)
@@ -1774,8 +1794,13 @@ class MultiSnipeRunner:
                         ], stage="购买结果-成功", template_path=(ok_tpl if ok_tpl and os.path.exists(ok_tpl) else None), save_name="overlay_buy_ok.png")
                 except Exception:
                     pass
-                time.sleep(max(fast_interval_sec, float(getattr(self, "_post_success_click_sec", 0.3))))
-                _ = self._close_detail_with_wait()
+                # 显式尝试关闭成功遮罩，避免遮罩残留导致无法定位关闭按钮
+                self._dismiss_success_overlay_with_wait()
+                # 关闭详情：若第一次失败，再尝试一次（遮罩可能未完全消失）
+                closed = bool(self._close_detail_with_wait())
+                if not closed:
+                    self._dismiss_success_overlay_with_wait()
+                    _ = self._close_detail_with_wait()
                 try:
                     self._log_debug(f"[购买][{it.name}] 成功 数量+={int(inc)} 总用时={int((time.time()-t0)*1000)}ms")
                 except Exception:

@@ -225,7 +225,8 @@ class SinglePurchaseBuyerV2:
         """判断 OCR 读数是否“价格合理”，用于决定是否写入价格历史。
 
         规则：
-        - 使用 `max(price_threshold, restock_price)` 作为基准阈值 B（取>0的最大值；若均<=0则不启用校验）。
+        - 使用“有效阈值基准”作为 B：若配置了 `restock_price>0` 则优先使用补货上限；否则使用 `price_threshold`。
+          说明：补货与普通阈值同时存在时，补货优先，避免高普通阈值误伤补货分支。
         - 合理性条件：`unit_price > B/2`（严格大于二分之一）。
 
         返回 (是否合理, 基准阈值B, 下限 floor=B//2)。
@@ -238,7 +239,9 @@ class SinglePurchaseBuyerV2:
             restock = int(task.get("restock_price", 0) or 0)
         except Exception:
             restock = 0
-        base = max(int(thr), int(restock))
+        # 补货优先：当配置补货上限时，用补货阈值作为“异常过滤”的基准。
+        # 否则回退到普通阈值。
+        base = int(restock) if int(restock) > 0 else int(thr)
         if base <= 0:
             return True, 0, 0
         # 严格大于二分之一：unit_price * 2 > base
@@ -845,11 +848,13 @@ class SinglePurchaseBuyerV2:
                     bin_bot = _PIL.fromarray(th)
         except Exception:
             try:
-                bin_top = img_top.convert("L").point(lambda p: 255 if p > 128 else 0)
+                _lut = [255 if i > 128 else 0 for i in range(256)]
+                bin_top = img_top.convert("L").point(_lut)
             except Exception:
                 bin_top = img_top
             try:
-                bin_bot = img_bot.convert("L").point(lambda p: 255 if p > 128 else 0)
+                _lut = [255 if i > 128 else 0 for i in range(256)]
+                bin_bot = img_bot.convert("L").point(_lut)
             except Exception:
                 bin_bot = img_bot
 
@@ -1025,7 +1030,8 @@ class SinglePurchaseBuyerV2:
                 thr_base = int(task.get("price_threshold", 0) or 0)
             except Exception:
                 thr_base = 0
-            base = thr_base if thr_base > 0 else restock
+            # 补货优先：补货循环以 restock 为基准，避免普通阈值过高导致识别过滤过严。
+            base = restock if restock > 0 else thr_base
             unit_price = self._read_avg_price_with_rounds(
                 goods,
                 item_disp,
@@ -1045,7 +1051,7 @@ class SinglePurchaseBuyerV2:
                 self._log_info(
                     item_disp,
                     purchased_str,
-                    f"均价={int(unit_price)} 不满足下限>max(阈,补)/2（B={base_thr} 下限={floor_half}），以不符合价格阈值处理",
+                    f"均价={int(unit_price)} 不满足下限>基准/2（B={base_thr} 下限={floor_half}），以不符合价格阈值处理",
                 )
                 return bought, True
             # 合理：写入价格历史
@@ -1149,7 +1155,8 @@ class SinglePurchaseBuyerV2:
                 rest_base = int(task.get("restock_price", 0) or 0)
             except Exception:
                 rest_base = 0
-            base = thr_base if thr_base > 0 else rest_base
+            # 补货优先：当同时配置补货上限与普通阈值时，优先以补货为识别过滤基准。
+            base = rest_base if rest_base > 0 else thr_base
             unit_price = self._read_avg_price_with_rounds(
                 goods,
                 item_disp,
@@ -1169,7 +1176,7 @@ class SinglePurchaseBuyerV2:
                 self._log_info(
                     item_disp,
                     purchased_str,
-                    f"均价={int(unit_price)} 不满足下限>max(阈,补)/2（B={base_thr} 下限={floor_half}），以不符合价格阈值处理",
+                    f"均价={int(unit_price)} 不满足下限>基准/2（B={base_thr} 下限={floor_half}），以不符合价格阈值处理",
                 )
                 _ = self._close_detail_with_wait(goods)
                 return bought, True
@@ -1197,7 +1204,7 @@ class SinglePurchaseBuyerV2:
                 self._log_info(
                     item_disp,
                     purchased_str,
-                    f"均价={unit_price} 普≤{thr if thr>0 else 0} 补≤{restock} (下限>{max(thr, restock)//2})",
+                    f"均价={unit_price} 普≤{thr if thr>0 else 0} 补≤{restock} (下限>{(restock//2) if restock>0 else (thr//2 if thr>0 else 0)})",
                 )
             else:
                 self._log_info(
