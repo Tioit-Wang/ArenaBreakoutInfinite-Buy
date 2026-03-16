@@ -1413,6 +1413,38 @@ class SinglePurchaseBuyerV2:
         )
         return "unknown"
 
+    def _detail_controls_visible(self, goods: Goods) -> bool:
+        buy_box = self._locate_detail_btn_near_cache(goods, "btn_buy", timeout=0.0)
+        close_box = self._locate_detail_btn_near_cache(goods, "btn_close", timeout=0.0)
+        if (buy_box is not None) and (close_box is not None):
+            return True
+        buy_box = self.screen.locate("btn_buy", timeout=0.03)
+        close_box = self.screen.locate("btn_close", timeout=0.03)
+        if buy_box is not None:
+            self._remember_detail_btn_box(goods, "btn_buy", buy_box)
+        if close_box is not None:
+            self._remember_detail_btn_box(goods, "btn_close", close_box)
+        return (buy_box is not None) and (close_box is not None)
+
+    def _recover_unknown_result_in_place(
+        self,
+        goods: Goods,
+        item_disp: str,
+        purchased_str: str,
+        *,
+        interval_sec: float,
+    ) -> bool:
+        """针对结果未知做一次轻量补救，尽量保留详情而不是立刻关闭。"""
+        btn_box = self._cached_detail_btn_box(goods, "btn_buy") or self._get_btn_box(goods, "btn_buy", timeout=0.05)
+        if btn_box is not None:
+            try:
+                self._fast_random_dismiss_success_overlay(btn_box, interval_sec)
+            except Exception:
+                pass
+        if self._wait_buy_result_window(item_disp, purchased_str) == "ok":
+            return True
+        return self._detail_controls_visible(goods)
+
     def _wait_qty_anchor_ready(self, timeout: float = 0.18) -> Optional[Tuple[int, int]]:
         deadline = time.time() + max(0.0, float(timeout or 0.0))
         mid = self._find_qty_midpoint()
@@ -1883,7 +1915,14 @@ class SinglePurchaseBuyerV2:
         m = self._detail_ui_cache.get("qty_minus") or self.screen.locate("qty_minus", timeout=0.2)
         p = self._detail_ui_cache.get("qty_plus") or self.screen.locate("qty_plus", timeout=0.2)
         if m is None or p is None:
-            return None
+            fallback_box = self._infer_qty_box_from_max()
+            if fallback_box is None:
+                return None
+            try:
+                self._detail_ui_cache["qty_mid"] = fallback_box
+            except Exception:
+                pass
+            return self._center_of(fallback_box)
         try:
             self._detail_ui_cache["qty_minus"] = tuple(int(v) for v in m)
             self._detail_ui_cache["qty_plus"] = tuple(int(v) for v in p)
@@ -1892,6 +1931,32 @@ class SinglePurchaseBuyerV2:
         mx, my = int(m[0] + m[2] / 2), int(m[1] + m[3] / 2)
         px, py = int(p[0] + p[2] / 2), int(p[1] + p[3] / 2)
         return int((mx + px) / 2), int((my + py) / 2)
+
+    def _infer_qty_box_from_max(self) -> Optional[Tuple[int, int, int, int]]:
+        max_box = self._detail_ui_cache.get("btn_max")
+        if max_box is None:
+            max_box = self.screen.locate("btn_max", timeout=0.12)
+        if max_box is None:
+            return None
+        try:
+            self._detail_ui_cache["btn_max"] = tuple(int(v) for v in max_box)
+        except Exception:
+            pass
+        mx, my, mw, mh = [int(v) for v in max_box]
+        width = max(80, min(140, int(mw * 2.4)))
+        gap = max(8, min(20, int(mw * 0.35)))
+        height = max(28, min(44, int(mh + 12)))
+        x = int(mx - gap - width)
+        y = int(my - max(4, int((height - mh) / 2)))
+        try:
+            sw, sh = self._pg.size()  # type: ignore[attr-defined]
+        except Exception:
+            sw, sh = 1920, 1080
+        x = max(0, min(sw - 2, x))
+        y = max(0, min(sh - 2, y))
+        width = max(1, min(width, sw - x))
+        height = max(1, min(height, sh - y))
+        return (x, y, width, height)
 
     def _focus_and_type_quantity_fast(self, qty: int) -> bool:
         """优先使用预缓存的数量输入锚点进行聚焦与输入。
@@ -1956,6 +2021,10 @@ class SinglePurchaseBuyerV2:
                 roi = None
         except Exception:
             roi = None
+        if roi is None:
+            max_box = self._infer_qty_box_from_max()
+            if max_box is not None:
+                roi = tuple(int(v) for v in max_box)
         if roi is None:
             mid_box = self._detail_ui_cache.get("qty_mid")
             if mid_box is None:
@@ -2470,6 +2539,28 @@ class SinglePurchaseBuyerV2:
                     used_max=used_max,
                     reason="buy_result_unknown",
                 )
+                if self._recover_unknown_result_in_place(
+                    goods,
+                    item_disp,
+                    purchased_str,
+                    interval_sec=fast_interval_sec,
+                ):
+                    self._log_step_info_text(
+                        item_disp,
+                        purchased_str,
+                        STEP_7_NAME,
+                        phase="执行补货",
+                        message="结果未知，但详情仍可继续操作，保留当前详情并重新识别价格",
+                    )
+                    self._set_cycle_meta(
+                        reason="buy_result_unknown_keep_open",
+                        step6_result="restock_buy",
+                        step7_result="unknown",
+                        purchase_mode="restock",
+                        continue_loop=True,
+                        bought=bought,
+                    )
+                    continue
                 _ = self._close_detail_with_wait(goods)
                 self._log_step_info_text(
                     item_disp,
@@ -2500,6 +2591,7 @@ class SinglePurchaseBuyerV2:
             )
             chain_count = 0
             bought_before_chain = int(bought)
+            keep_detail_after_unknown = False
             self._log_step_debug_text(
                 item_disp,
                 purchased_str,
@@ -2511,6 +2603,35 @@ class SinglePurchaseBuyerV2:
             while chain_count < fast_max:
                 _res = self._wait_buy_result_window(item_disp, purchased_str)
                 if _res != "ok":
+                    if _res == "unknown" and self._recover_unknown_result_in_place(
+                        goods,
+                        item_disp,
+                        purchased_str,
+                        interval_sec=fast_interval_sec,
+                    ):
+                        self._log_step7(
+                            item_disp,
+                            purchased_str,
+                            int((time.perf_counter() - step7_t0) * 1000.0),
+                            "unknown",
+                            purchase_mode="restock_fast",
+                            unit_price=int(unit_price),
+                            qty=_effective_restock_qty(),
+                            bought=int(bought - bought_before_chain),
+                            chain_count=int(chain_count),
+                            max_chain=int(fast_max),
+                            used_max=used_max,
+                            reason="buy_result_unknown_keep_open",
+                        )
+                        self._log_step_info_text(
+                            item_disp,
+                            purchased_str,
+                            STEP_7_NAME,
+                            phase="补货连击",
+                            message="未识别到成功提示，但详情仍可继续操作，保留当前详情并重新识别价格",
+                        )
+                        keep_detail_after_unknown = True
+                        break
                     step7_result = "fail" if _res == "fail" else ("partial_success" if bought > bought_before_chain else "unknown")
                     reason = "buy_fail" if _res == "fail" else "buy_result_unknown"
                     self._log_step7(
@@ -2621,6 +2742,17 @@ class SinglePurchaseBuyerV2:
                     break
 
                 self._fast_random_dismiss_and_rebuy(b, fast_interval_sec)
+
+            if keep_detail_after_unknown:
+                self._set_cycle_meta(
+                    reason="buy_result_unknown_keep_open",
+                    step6_result="restock_buy",
+                    step7_result="unknown",
+                    purchase_mode="restock_fast",
+                    continue_loop=True,
+                    bought=bought,
+                )
+                continue
 
             self._set_cycle_meta(
                 reason="chain_limit_reached",
