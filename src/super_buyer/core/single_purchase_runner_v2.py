@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 import os
-import random
 import threading
 import time
 from dataclasses import dataclass
@@ -593,7 +592,7 @@ class SinglePurchaseBuyerV2:
         try:
             cx, cy = self._center_of(btn_box)
             self.screen.click_point(cx, cy, clicks=1)
-            safe_sleep(max(interval_sec, 0.03))
+            safe_sleep(max(interval_sec, float(getattr(self.timings, "post_success_click", 0.05) or 0.05), 0.03))
         except Exception:
             try:
                 self._dismiss_success_overlay_with_wait("全局", "-", goods=None)
@@ -616,7 +615,7 @@ class SinglePurchaseBuyerV2:
         try:
             cx, cy = self._center_of(btn_box)
             self.screen.click_point(cx, cy, clicks=1)
-            safe_sleep(max(interval_sec, 0.03))
+            safe_sleep(max(interval_sec, float(getattr(self.timings, "post_success_click", 0.05) or 0.05), 0.03))
             self.screen.click_point(cx, cy, clicks=1)
         except Exception:
             try:
@@ -2114,45 +2113,19 @@ class SinglePurchaseBuyerV2:
         )
         return int(val) if isinstance(val, int) and val > 0 else None
 
-    def _random_overlay_dismiss_point(self) -> Tuple[int, int]:
-        try:
-            sw, sh = self._pg.size()  # type: ignore[attr-defined]
-        except Exception:
-            sw, sh = 1920, 1080
-        x = random.randint(max(20, int(sw * 0.30)), max(21, int(sw * 0.70)))
-        y = random.randint(max(20, int(sh * 0.25)), max(21, int(sh * 0.65)))
-        return int(x), int(y)
-
     def _fast_random_dismiss_success_overlay(
         self,
         btn_box: Tuple[int, int, int, int],
         interval_sec: float,
     ) -> None:
-        try:
-            rx, ry = self._random_overlay_dismiss_point()
-            self.screen.click_point(rx, ry, clicks=1)
-            safe_sleep(max(interval_sec, 0.03))
-        except Exception:
-            try:
-                self._fast_close_success_overlay(btn_box, interval_sec)
-            except Exception:
-                pass
+        self._fast_close_success_overlay(btn_box, interval_sec)
 
     def _fast_random_dismiss_and_rebuy(
         self,
         btn_box: Tuple[int, int, int, int],
         interval_sec: float,
     ) -> None:
-        try:
-            rx, ry = self._random_overlay_dismiss_point()
-            self.screen.click_point(rx, ry, clicks=1)
-            safe_sleep(max(interval_sec, 0.03))
-            self.screen.click_center(btn_box)
-        except Exception:
-            try:
-                self._fast_close_and_rebuy(btn_box, interval_sec)
-            except Exception:
-                pass
+        self._fast_close_and_rebuy(btn_box, interval_sec)
 
     def _restock_fast_loop(
         self,
