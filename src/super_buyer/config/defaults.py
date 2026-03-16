@@ -20,6 +20,28 @@ def _asset_path(name: str) -> str:
         return os.path.join("images", name)
 
 
+DEFAULT_MULTI_SNIPE_TUNING: Dict[str, Any] = {
+    "buy_result_timeout_sec": 0.35,
+    "buy_result_poll_step_sec": 0.01,
+    "poll_step_sec": 0.02,
+    "ocr_round_window_sec": 0.25,
+    "ocr_round_step_sec": 0.015,
+    "ocr_round_fail_limit": 6,
+    "post_close_detail_sec": 0.05,
+    "post_success_click_sec": 0.05,
+    "post_nav_sec": 0.05,
+    "detail_open_settle_sec": 0.05,
+    "detail_cache_verify_timeout_sec": 0.18,
+    "anchor_stabilize_sec": 0.05,
+    "ocr_miss_penalty_threshold": 10,
+    "penalty_confirm_delay_sec": 5.0,
+    "penalty_wait_sec": 180.0,
+    "fast_chain_mode": True,
+    "fast_chain_max": 10,
+    "fast_chain_interval_ms": 35.0,
+}
+
+
 DEFAULT_CONFIG: Dict[str, Any] = {
     "game": {
         "exe_path": "",
@@ -29,6 +51,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "umi_ocr": {
         "base_url": "http://127.0.0.1:1224",
         "timeout_sec": 2.5,
+        "auto_start": True,
+        "startup_wait_sec": 20.0,
+        "exe_path": "",
         "options": {
             "data.format": "text",
         },
@@ -74,6 +99,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "default_buy_qty": 1,
     },
     "purchase_items": [],
+    "multi_snipe_tuning": dict(DEFAULT_MULTI_SNIPE_TUNING),
     "price_roi": {
         "top_template": str(image_path("buy_data_top.png")),
         "top_threshold": 0.55,

@@ -13,6 +13,7 @@ from .defaults import DEFAULT_CONFIG
 from .migrations import (
     deep_merge,
     migrate_from_key_mapping,
+    migrate_multi_snipe_tuning_defaults,
     normalize_template_keys,
     migrate_template_paths_to_resources,
     migrate_debug_overlay_dir_to_output,
@@ -92,6 +93,10 @@ def load_config(
             changed = migrate_debug_overlay_dir_to_output(cfg, output_dir=out_dir or (paths.output_dir if paths else "output")) or changed
         except Exception:
             pass
+    try:
+        changed = migrate_multi_snipe_tuning_defaults(cfg) or changed
+    except Exception:
+        pass
 
     if changed:
         try:
@@ -137,6 +142,47 @@ def _resolve_relative_paths_in_memory(cfg: Dict[str, Any], *, base_dir: str | Pa
                 roi[key] = str((base / pp).resolve())
 
 
+def _relativize_path_for_save(path_value: str, *, base_dir: str | Path) -> str:
+    """将位于配置目录下的绝对路径转回相对路径，便于可移植保存。"""
+    raw = str(path_value or "").strip()
+    if not raw:
+        return raw
+    try:
+        pp = Path(raw)
+        if not pp.is_absolute():
+            return raw.replace("\\", "/")
+        rel = pp.resolve().relative_to(Path(base_dir).resolve())
+        return rel.as_posix()
+    except Exception:
+        return raw
+
+
+def _prepare_config_for_save(data: Dict[str, Any], *, base_dir: str | Path) -> Dict[str, Any]:
+    """生成用于落盘的配置副本，不修改调用方传入的内存态配置。"""
+    try:
+        payload = json.loads(json.dumps(data, ensure_ascii=False))
+    except Exception:
+        payload = dict(data)
+
+    tmpls = payload.get("templates")
+    if isinstance(tmpls, dict):
+        for value in tmpls.values():
+            if not isinstance(value, dict):
+                continue
+            p = value.get("path")
+            if isinstance(p, str):
+                value["path"] = _relativize_path_for_save(p, base_dir=base_dir)
+
+    roi = payload.get("price_roi")
+    if isinstance(roi, dict):
+        for key in ("top_template", "bottom_template"):
+            p = roi.get(key)
+            if isinstance(p, str):
+                roi[key] = _relativize_path_for_save(p, base_dir=base_dir)
+
+    return payload
+
+
 def save_config(
     data: Dict[str, Any],
     *,
@@ -146,6 +192,7 @@ def save_config(
     """保存配置到指定路径。"""
     cfg_path = Path(path or "config.json")
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = _prepare_config_for_save(data, base_dir=cfg_path.parent)
     with cfg_path.open("w", encoding="utf-8") as fh:
-        json.dump(data, fh, ensure_ascii=False, indent=indent)
+        json.dump(payload, fh, ensure_ascii=False, indent=indent)
     return cfg_path

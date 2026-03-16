@@ -32,10 +32,15 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
-packages = ["super_buyer"]
 include-package-data = true
+py-modules = ["history_store"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["super_buyer*"]
 
 [tool.setuptools.package-data]
+"super_buyer" = ["py.typed"]
 "super_buyer.resources.images" = ["**/*"]
 "super_buyer.resources.assets" = ["**/*"]
 "super_buyer.resources.defaults" = ["**/*"]

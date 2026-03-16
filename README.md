@@ -14,7 +14,7 @@ uv run wg1
 或直接运行模块：
 
 ```bash
-uv run python -m wg1
+uv run python -m super_buyer
 ```
 
 ## 功能概览
@@ -73,4 +73,5 @@ wg1/
 
 - 仅支持 Umi-OCR（HTTP）。默认地址：`http://127.0.0.1:1224/api/ocr`。
   - 可在 `config.json` 的 `umi_ocr` 节调整 `base_url`、`timeout_sec` 与 `options`。
+  - 当前打包方案支持将 `Umi-OCR` 目录随应用一起分发；当 `base_url` 指向本地回环地址时，应用启动后会尝试自动拉起同目录下的 `Umi-OCR.exe`，退出时会一并关闭由本应用启动的进程。
   - 全局可选的字符白名单通过 `ocr_allowlist` 配置，用于本地清洗与透传到 Umi 端（是否生效取决于 Umi 实现）。

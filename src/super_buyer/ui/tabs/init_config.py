@@ -766,6 +766,18 @@ class InitConfigTab(BaseTab):
             pass
 
         # 调试模式（已迁移至“多商品抢购模式”页面）
+        def _refresh_scroll_state() -> None:
+            try:
+                self.tab1_inner.update_idletasks()
+                self.tab1_canvas.itemconfigure(self.tab1_window, width=self.tab1_canvas.winfo_width())
+                self.tab1_canvas.configure(scrollregion=self.tab1_canvas.bbox("all"))
+            except Exception:
+                pass
+
+        try:
+            self.after_idle(_refresh_scroll_state)
+        except Exception:
+            _refresh_scroll_state()
 
     def _on_hotkey_change(self, *_: object) -> None:
         """变量变动时刷新展示并触发自动保存。"""
@@ -878,7 +890,7 @@ class InitConfigTab(BaseTab):
         # Flush templates
         for key, row in self.template_rows.items():
             self.cfg.setdefault("templates", {}).setdefault(key, {})
-            self.cfg["templates"][key]["path"] = row.get_path()
+            self.cfg["templates"][key]["path"] = row.get_abs_path()
             self.cfg["templates"][key]["confidence"] = float(row.get_confidence())
 
         # Flush game launcher
@@ -907,9 +919,9 @@ class InitConfigTab(BaseTab):
 
         # Flush ROI config
         self.cfg.setdefault("price_roi", {})
-        self.cfg["price_roi"]["top_template"] = self.var_roi_top_tpl.get().strip()
+        self.cfg["price_roi"]["top_template"] = self.row_roi_top.get_abs_path()
         self.cfg["price_roi"]["top_threshold"] = float(self.var_roi_top_thr.get() or 0.55)
-        self.cfg["price_roi"]["bottom_template"] = self.var_roi_btm_tpl.get().strip()
+        self.cfg["price_roi"]["bottom_template"] = self.row_roi_btm.get_abs_path()
         self.cfg["price_roi"]["bottom_threshold"] = float(self.var_roi_btm_thr.get() or 0.55)
         self.cfg["price_roi"]["top_offset"] = int(self.var_roi_top_off.get() or 0)
         self.cfg["price_roi"]["bottom_offset"] = int(self.var_roi_btm_off.get() or 0)
@@ -944,41 +956,10 @@ class InitConfigTab(BaseTab):
         except Exception:
             pass
 
-        # Flush debug config
+        # Flush debug config（本页仅负责 ROI 失败截图开关；
+        # 多商品页自己的调试选项由 MultiSnipeTab 刷入 cfg）
         try:
             self.cfg.setdefault("debug", {})
-            self.cfg["debug"]["enabled"] = bool(self.var_debug_enabled.get())
-            try:
-                ov = float(self.var_debug_overlay.get() or 5.0)
-            except Exception:
-                ov = 5.0
-            if ov < 0.5:
-                ov = 0.5
-            if ov > 15.0:
-                ov = 15.0
-            self.cfg["debug"]["overlay_sec"] = float(ov)
-            try:
-                st = float(self.var_debug_step.get() or 0.0)
-            except Exception:
-                st = 0.0
-            if st < 0.0:
-                st = 0.0
-            if st > 1.0:
-                st = 1.0
-            self.cfg["debug"]["step_sleep"] = float(st)
-            # 新增：保存可视化截图与目录
-            try:
-                self.cfg["debug"]["save_overlay_images"] = bool(self.var_debug_save_imgs.get())
-            except Exception:
-                self.cfg["debug"]["save_overlay_images"] = False
-            try:
-                _dir = (self.var_debug_overlay_dir.get() or "").strip()
-            except Exception:
-                _dir = ""
-            if not _dir:
-                _dir = self._images_path("debug", "可视化调试", ensure_parent=True)
-            self.cfg["debug"]["overlay_dir"] = _dir
-            # 新增：识别轮最终失败时保存 ROI 图（默认关闭）
             try:
                 self.cfg["debug"]["save_roi_on_fail"] = bool(self.var_save_roi_on_fail.get())
             except Exception:
@@ -1202,8 +1183,8 @@ class InitConfigTab(BaseTab):
         if r_minus is None or r_plus is None:
             messagebox.showwarning("数量输入区域", "未找到‘数量-’或‘数量+’模板行，请先在模板管理中配置。")
             return None, None
-        p_m = (r_minus.get_path() or "").strip()
-        p_p = (r_plus.get_path() or "").strip()
+        p_m = r_minus.get_abs_path()
+        p_p = r_plus.get_abs_path()
         if not p_m or not os.path.exists(p_m):
             messagebox.showwarning("数量输入区域", "‘数量-’模板路径为空或文件不存在。")
             return None, None
@@ -1373,7 +1354,7 @@ class InitConfigTab(BaseTab):
         try:
             tpls = self.cfg.get("templates", {}) if isinstance(self.cfg.get("templates"), dict) else {}
             d = tpls.get(key, {}) if isinstance(tpls, dict) else {}
-            p = str((d or {}).get("path", ""))
+            p = self._resolve_data_path(str((d or {}).get("path", "")))
             if not p:
                 p = self._images_path(f"{key}.png")
             try:
@@ -1686,6 +1667,7 @@ class InitConfigTab(BaseTab):
         return f"tpl_{abs(hash(name)) % 100000}"
 
     def _preview_image(self, path: str, title: str = "预览") -> None:
+        path = self._resolve_data_path(path)
         if not path or not os.path.exists(path):
             messagebox.showwarning("预览", "图片不存在或路径为空。")
             return
@@ -1893,9 +1875,14 @@ class InitConfigTab(BaseTab):
         if buy_row is None:
             messagebox.showwarning("预览", "未在模板管理中找到‘购买按钮’模板，请先配置并截图保存。")
             return
-        path = buy_row.get_path()
+        raw_path = buy_row.get_path()
+        # 与 TemplateRow 的“测试/预览”保持一致：相对路径需要基于 data 根目录解析。
+        path = buy_row.get_abs_path()
         if not path or not os.path.exists(path):
-            messagebox.showwarning("预览", "‘购买按钮’模板路径为空或文件不存在。")
+            messagebox.showwarning(
+                "预览",
+                f"‘购买按钮’模板路径为空或文件不存在。\n配置值: {raw_path or '(空)'}\n解析后: {path or '(空)'}",
+            )
             return
         try:
             conf = float(buy_row.get_confidence() or 0.85)

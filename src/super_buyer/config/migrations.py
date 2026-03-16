@@ -11,6 +11,7 @@ import os
 from typing import Any, Dict, Tuple
 from pathlib import Path
 
+from super_buyer.config.defaults import DEFAULT_MULTI_SNIPE_TUNING
 from super_buyer.resources.paths import image_path
 
 
@@ -232,4 +233,52 @@ def migrate_debug_overlay_dir_to_output(
         dbg["overlay_dir"] = str(Path(out_root) / "debug" / tail)
         return True
     return False
+
+
+def migrate_multi_snipe_tuning_defaults(cfg: Dict[str, Any]) -> bool:
+    """将已知旧版默认值平滑迁移到新的多商品时序默认值。
+
+    仅在以下场景自动更新：
+    - 配置缺失字段，补齐为新的默认值；
+    - 字段值仍等于历史出厂默认值，说明用户大概率未手动调整，此时升级为新的默认值。
+
+    若用户已经显式改过某项参数，则保持原值不动。
+    """
+
+    tuning = cfg.get("multi_snipe_tuning")
+    if not isinstance(tuning, dict):
+        cfg["multi_snipe_tuning"] = dict(DEFAULT_MULTI_SNIPE_TUNING)
+        return True
+
+    changed = False
+    legacy_defaults: Dict[str, Any] = {
+        "buy_result_timeout_sec": 0.35,
+        "buy_result_poll_step_sec": 0.01,
+        "poll_step_sec": 0.02,
+        "ocr_round_window_sec": 0.35,
+        "ocr_round_step_sec": 0.015,
+        "ocr_round_fail_limit": 10,
+        "post_close_detail_sec": 0.08,
+        "post_success_click_sec": 0.08,
+        "post_nav_sec": 0.08,
+        "ocr_miss_penalty_threshold": 10,
+        "penalty_confirm_delay_sec": 5.0,
+        "penalty_wait_sec": 180.0,
+        "fast_chain_mode": True,
+        "fast_chain_max": 10,
+        "fast_chain_interval_ms": 35.0,
+    }
+
+    for key, new_value in DEFAULT_MULTI_SNIPE_TUNING.items():
+        if key not in tuning:
+            tuning[key] = new_value
+            changed = True
+            continue
+        legacy_value = legacy_defaults.get(key)
+        if legacy_value is None:
+            continue
+        if tuning.get(key) == legacy_value and legacy_value != new_value:
+            tuning[key] = new_value
+            changed = True
+    return changed
 

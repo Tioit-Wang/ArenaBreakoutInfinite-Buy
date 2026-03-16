@@ -1409,17 +1409,10 @@ class TaskRunner:
         # 成功时间戳：用于抑制“刚识别过又检查处罚”的抖动
         self._last_avg_ok_ts: float = 0.0
 
-        # 模式、日志与重启
+        # 模式、日志
         self.mode = str(self.tasks_data.get("task_mode", "time"))
         # 日志等级（debug/info/error），默认 info
         self.log_level: str = _level_name(str(self.tasks_data.get("log_level", "info")))
-        try:
-            self.restart_every_min = int(
-                self.tasks_data.get("restart_every_min", 0) or 0
-            )
-        except Exception:
-            self.restart_every_min = 0
-        self._next_restart_ts: Optional[float] = None
         # 降噪用：空闲提示的节流时间戳
         self._last_idle_log_ts: float = 0.0
 
@@ -1887,61 +1880,6 @@ class TaskRunner:
         # 使用 Buyer 内部的更稳健的启动流程
         return self.buyer._ensure_ready_v2()
 
-    def _should_restart_now(self) -> bool:
-        if self.restart_every_min <= 0:
-            return False
-        if self._next_restart_ts is None:
-            self._next_restart_ts = time.time() + self.restart_every_min * 60
-            return False
-        return time.time() >= self._next_restart_ts
-
-    def _do_soft_restart(self, goods: Optional[Goods] = None) -> float:
-        """严格按文档执行软重启步骤，返回本次重启耗时（秒）。"""
-        t0 = time.time()
-        self._relay_log(f"【{_now_label()}】【全局】【-】：到达重启周期，尝试重启游戏…")
-        # 1) 首页 → 等待 ~5s
-        h = self.screen.locate("btn_home", timeout=1.0)
-        if h is not None:
-            self.screen.click_center(h)
-        # 大步延迟：等待返回首页动画与资源回收（约 5s）
-        _sleep(5.0)
-        # 2) 设置 → 等待 ~5s
-        s = self.screen.locate("btn_settings", timeout=1.0)
-        if s is not None:
-            self.screen.click_center(s)
-        # 大步延迟：设置页元素加载与状态持久化（约 5s）
-        _sleep(5.0)
-        # 3) 退出 → 等待 ~5s
-        e = self.screen.locate("btn_exit", timeout=1.0)
-        if e is not None:
-            self.screen.click_center(e)
-        # 大步延迟：退出流程出现确认弹窗/黑场过渡（约 5s）
-        _sleep(5.0)
-        # 4) 退出确认 → 等待 ~30s
-        ec = self.screen.locate("btn_exit_confirm", timeout=1.0)
-        if ec is not None:
-            self.screen.click_center(ec)
-        # 超大步延迟：完全退出到桌面并释放进程（约 30s）
-        _sleep(30.0)
-        # 5) 执行统一启动流程
-        def _on_log(s: str) -> None:
-            self._relay_log(f"【{_now_label()}】【全局】【-】：{s}")
-        res = run_launch_flow(self.cfg, on_log=_on_log)
-        if not res.ok:
-            self._relay_log(f"【{_now_label()}】【全局】【-】：重启失败：{res.error or res.code}，终止任务")
-            self._stop.set()
-        # 6) 重建搜索上下文
-        if goods is not None:
-            try:
-                self.buyer.clear_pos(goods.id)
-                item_disp = goods.name or goods.search_name or "-"
-                self.buyer.ensure_search_context(goods, item_disp=item_disp, purchased_str="-")
-            except Exception:
-                pass
-        # 7) 重置重启计时点
-        self._next_restart_ts = time.time() + max(1, self.restart_every_min) * 60
-        return time.time() - t0
-
     # ------------------------------ 主循环 ------------------------------
     def _run(self) -> None:
         try:
@@ -2003,8 +1941,6 @@ class TaskRunner:
                 )
             except Exception:
                 pass
-
-            self._next_restart_ts = None
 
             if str(self.mode or "time") == "round":
                 self._run_round_robin(tasks)
@@ -2109,11 +2045,6 @@ class TaskRunner:
                 if self._stop.is_set():
                     break
 
-                # 在每轮购买循环开始前检查重启（且暂停片段计时）
-                if self._should_restart_now():
-                    paused = self._do_soft_restart(goods)
-                    seg_paused_sec += max(0.0, float(paused))
-                    search_ready = False
                 if not search_ready:
                     # 精确地再执行一次“进入搜索结果页”
                     self.buyer.clear_pos(goods.id)
@@ -2261,10 +2192,6 @@ class TaskRunner:
                     _sleep(0.2)
                 if self._stop.is_set():
                     break
-                # 重启检查（不涉及片段时长暂停）
-                if self._should_restart_now():
-                    self._do_soft_restart(goods)
-                    search_ready = False
                 if not search_ready:
                     # 重启后重新建立搜索上下文
                     _ = self.buyer.ensure_search_context(

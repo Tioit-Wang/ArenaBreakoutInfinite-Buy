@@ -49,7 +49,6 @@ except Exception:
     ImageTk = None  # type: ignore
 
 from super_buyer.core.common import parse_price_text as _parse_price_text
-from super_buyer.core.launcher import run_launch_flow
 from super_buyer.services.font_loader import draw_text, pil_font, tk_font
 from super_buyer.services.ocr import recognize_numbers
 from super_buyer.services.screen_ops import ScreenOps
@@ -296,13 +295,6 @@ class MultiSnipeRunner:
             self._penalty_wait_after_confirm_sec = float(tuning.get("penalty_wait_sec", 180.0) or 180.0)
         except Exception:
             self._penalty_wait_after_confirm_sec = 180.0
-        # 重启周期（分钟），0 表示不重启
-        try:
-            self.restart_every_min = int(tuning.get("restart_every_min", 0) or 0)
-        except Exception:
-            self.restart_every_min = 0
-        self._next_restart_ts: Optional[float] = None
-
         # 连续失败计数器：item.id -> count
         self._fail_counts: Dict[str, int] = {}
         # OCR 连续未识别计数器（整轮计数）
@@ -414,66 +406,6 @@ class MultiSnipeRunner:
         self.screen.click_center(c)
         time.sleep(max(0.0, float(getattr(self, "_post_close_detail_sec", 0.1))))
         return True
-
-    def _should_restart_now(self) -> bool:
-        """检查是否到达重启周期。"""
-        if int(getattr(self, "restart_every_min", 0) or 0) <= 0:
-            return False
-        if self._next_restart_ts is None:
-            self._next_restart_ts = time.time() + int(self.restart_every_min) * 60
-            return False
-        return time.time() >= float(self._next_restart_ts)
-
-    def _do_soft_restart(self) -> None:
-        """简化版软重启：退出并重新进入游戏、清理缓存。"""
-        self._log_info("[重启] 到达重启周期，尝试重启…")
-        try:
-            h = self.screen.locate("btn_home", timeout=1.0)
-            if h is not None:
-                self.screen.click_center(h)
-            time.sleep(max(0.0, float(getattr(self, "_post_nav_sec", 0.1))))
-        except Exception:
-            pass
-        try:
-            s = self.screen.locate("btn_settings", timeout=1.0)
-            if s is not None:
-                self.screen.click_center(s)
-            time.sleep(5.0)
-            e = self.screen.locate("btn_exit", timeout=1.0)
-            if e is not None:
-                self.screen.click_center(e)
-            time.sleep(5.0)
-            ec = self.screen.locate("btn_exit_confirm", timeout=1.0)
-            if ec is not None:
-                self.screen.click_center(ec)
-        except Exception:
-            pass
-        # 等待恢复并重新启动
-        time.sleep(30.0)
-        res = run_launch_flow(self.cfg, on_log=lambda s: self._log_info(f"[重启]{s}"))
-        if not res.ok:
-            self._log_error(f"[重启] 失败：{res.error or res.code}")
-        # 重建简单上下文：清缓存
-        try:
-            self._card_cache.clear()
-            self._mid_cache.clear()
-        except Exception:
-            pass
-        # 重回市场/收藏页（保证刷新流程可用）
-        try:
-            mk = self.screen.locate("market_indicator", timeout=1.0)
-            if mk is None:
-                btn = self.screen.locate("btn_market", timeout=1.0)
-                if btn is not None:
-                    self.screen.click_center(btn)
-                    time.sleep(max(0.0, float(getattr(self, "_post_nav_sec", 0.1))))
-        except Exception:
-            pass
-        # 规划下一次重启时间
-        try:
-            self._next_restart_ts = time.time() + max(1, int(self.restart_every_min)) * 60
-        except Exception:
-            self._next_restart_ts = None
 
     def _tpl(self, key: str) -> Tuple[str, float]:
         """读取模板配置并解析相对路径为可用的绝对路径。
@@ -1904,12 +1836,6 @@ class MultiSnipeRunner:
                 loop_name = f"{ts}_loop-{self._loop_no:04d}"
                 self._loop_dir = os.path.join(self._debug_overlay_dir, loop_name)
                 os.makedirs(self._loop_dir, exist_ok=True)
-        except Exception:
-            pass
-        # 周期性重启（对齐单品 v2），0 表示禁用
-        try:
-            if self._should_restart_now():
-                self._do_soft_restart()
         except Exception:
             pass
         t0 = time.time()

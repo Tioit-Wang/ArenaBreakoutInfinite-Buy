@@ -21,10 +21,24 @@ class ScreenOps:
             import pyautogui  # type: ignore
 
             _ = getattr(pyautogui, "locateOnScreen")
+            # 统一由业务层的 step_delay 控制节奏，避免 PyAutoGUI 默认 100ms 全局暂停叠加。
+            pyautogui.PAUSE = 0.0
         except Exception as exc:
             raise RuntimeError(
                 "缺少 pyautogui 或其依赖，请安装 pyautogui + opencv-python。"
             ) from exc
+
+    @property
+    def _click_settle_delay(self) -> float:
+        return max(0.008, min(0.02, float(self.step_delay or 0.01)))
+
+    def _click_current_position_once(self) -> None:
+        try:
+            self._pg.mouseDown()
+            safe_sleep(max(0.006, min(0.015, self._click_settle_delay)))
+            self._pg.mouseUp()
+        except Exception:
+            self._pg.click()
 
     @property
     def _pg(self):  # type: ignore
@@ -75,8 +89,9 @@ class ScreenOps:
         y = int(top + height / 2)
         try:
             self._pg.moveTo(x, y)
+            safe_sleep(self._click_settle_delay)
             for idx in range(max(1, int(clicks))):
-                self._pg.click(x, y)
+                self._click_current_position_once()
                 if idx + 1 < clicks:
                     safe_sleep(interval)
         except Exception:
@@ -86,8 +101,9 @@ class ScreenOps:
     def click_point(self, x: int, y: int, *, clicks: int = 1, interval: float = 0.02) -> None:
         try:
             self._pg.moveTo(int(x), int(y))
+            safe_sleep(self._click_settle_delay)
             for idx in range(max(1, int(clicks))):
-                self._pg.click(int(x), int(y))
+                self._click_current_position_once()
                 if idx + 1 < clicks:
                     safe_sleep(interval)
         except Exception:

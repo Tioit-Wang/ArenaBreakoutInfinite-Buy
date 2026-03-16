@@ -9,6 +9,9 @@
   "umi_ocr": {
     "base_url": "http://127.0.0.1:1224",
     "timeout_sec": 2.5,
+    "auto_start": true,
+    "startup_wait_sec": 20.0,
+    "exe_path": "",
     "options": {
       "data.format": "text"
     }
@@ -17,19 +20,13 @@
   "paths": {
     "output_dir": "C:\\Code\\PythonProjects\\ArenaBreakoutInfinite-Buy\\data\\output"
   },
-  "multi_snipe_tuning": {
-    "buy_result_timeout_sec": 0.35,
-    "buy_result_poll_step_sec": 0.01,
-    "poll_step_sec": 0.02,
-    "ocr_round_window_sec": 0.35,
-    "ocr_round_step_sec": 0.015,
-    "ocr_round_fail_limit": 10,
-    "post_close_detail_sec": 0.08,
-    "post_success_click_sec": 0.08,
-    "post_nav_sec": 0.08,
-    "ocr_miss_penalty_threshold": 10,
-    "penalty_confirm_delay_sec": 5.0,
-    "penalty_wait_sec": 180.0
+  "debug": {
+    "save_roi_on_fail": false,
+    "enabled": false,
+    "overlay_sec": 5.0,
+    "step_sleep": 0.0,
+    "save_overlay_images": false,
+    "overlay_dir": "C:\\Code\\PythonProjects\\ArenaBreakoutInfinite-Buy\\data\\images\\debug\\可视化调试"
   },
   "hotkeys": {
     "toggle": "<Control-Alt-t>"
@@ -40,15 +37,15 @@
       "confidence": 0.85
     },
     "home_indicator": {
-      "path": "C:\\Code\\PythonProjects\\ArenaBreakoutInfinite-Buy\\src\\super_buyer\\resources\\images\\home_indicator.png",
+      "path": "images/home_indicator.png",
       "confidence": 0.85
     },
     "market_indicator": {
-      "path": "C:\\Code\\PythonProjects\\ArenaBreakoutInfinite-Buy\\src\\super_buyer\\resources\\images\\market_indicator.png",
+      "path": "images/market_indicator.png",
       "confidence": 0.85
     },
     "btn_market": {
-      "path": "C:\\Code\\PythonProjects\\ArenaBreakoutInfinite-Buy\\src\\super_buyer\\resources\\images\\btn_market.png",
+      "path": "images/btn_market.png",
       "confidence": 0.85
     },
     "btn_home": {
@@ -56,15 +53,15 @@
       "confidence": 0.85
     },
     "input_search": {
-      "path": "C:\\Code\\PythonProjects\\ArenaBreakoutInfinite-Buy\\src\\super_buyer\\resources\\images\\input_search.png",
+      "path": "images/input_search.png",
       "confidence": 0.85
     },
     "btn_search": {
-      "path": "C:\\Code\\PythonProjects\\ArenaBreakoutInfinite-Buy\\src\\super_buyer\\resources\\images\\btn_search.png",
+      "path": "images/btn_search.png",
       "confidence": 0.85
     },
     "btn_buy": {
-      "path": "C:\\Code\\PythonProjects\\ArenaBreakoutInfinite-Buy\\src\\super_buyer\\resources\\images\\btn_buy.png",
+      "path": "images/btn_buy.png",
       "confidence": 0.87
     },
     "buy_ok": {
@@ -72,15 +69,15 @@
       "confidence": 0.9
     },
     "buy_fail": {
-      "path": "C:\\Code\\PythonProjects\\ArenaBreakoutInfinite-Buy\\src\\super_buyer\\resources\\images\\buy_fail.png",
+      "path": "images/buy_fail.png",
       "confidence": 0.89
     },
     "btn_close": {
-      "path": "C:\\Code\\PythonProjects\\ArenaBreakoutInfinite-Buy\\src\\super_buyer\\resources\\images\\btn_close.png",
+      "path": "images/btn_close.png",
       "confidence": 0.85
     },
     "btn_refresh": {
-      "path": "C:\\Code\\PythonProjects\\ArenaBreakoutInfinite-Buy\\src\\super_buyer\\resources\\images\\btn_refresh.png",
+      "path": "images/btn_refresh.png",
       "confidence": 0.85
     },
     "btn_back": {
@@ -97,7 +94,7 @@
     },
     "qty_plus": {
       "path": "C:\\Code\\PythonProjects\\ArenaBreakoutInfinite-Buy\\src\\super_buyer\\resources\\images\\qty_plus.png",
-      "confidence": 0.85
+      "confidence": 0.84
     },
     "penalty_warning": {
       "path": "images/penalty_warning.png",
@@ -151,5 +148,24 @@
     "height": 45,
     "scale": 1.0
   },
-  "debug": {}
+  "multi_snipe_tuning": {
+    "buy_result_timeout_sec": 0.35,
+    "buy_result_poll_step_sec": 0.01,
+    "poll_step_sec": 0.02,
+    "ocr_round_window_sec": 0.25,
+    "ocr_round_step_sec": 0.015,
+    "ocr_round_fail_limit": 6,
+    "post_close_detail_sec": 0.05,
+    "post_success_click_sec": 0.05,
+    "post_nav_sec": 0.05,
+    "detail_open_settle_sec": 0.05,
+    "detail_cache_verify_timeout_sec": 0.18,
+    "anchor_stabilize_sec": 0.05,
+    "ocr_miss_penalty_threshold": 10,
+    "penalty_confirm_delay_sec": 5.0,
+    "penalty_wait_sec": 180.0,
+    "fast_chain_mode": true,
+    "fast_chain_max": 10,
+    "fast_chain_interval_ms": 35.0
+  }
 }

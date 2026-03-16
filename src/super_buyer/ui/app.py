@@ -14,6 +14,12 @@ from super_buyer.config import ConfigPaths, ensure_default_config, load_config, 
 from super_buyer.core.task_runner import TaskRunner
 from super_buyer.services.compat import ensure_pyautogui_confidence_compat
 from super_buyer.services.font_loader import setup_matplotlib_chinese
+from super_buyer.services.runtime_logs import (
+    MAX_VISIBLE_LOG_LINES,
+    append_runtime_log,
+    read_latest_runtime_logs,
+)
+from super_buyer.services.umi_runtime import ManagedUmiOcrProcess
 from super_buyer.ui.goods_market import GoodsMarketUI
 from super_buyer.ui.tabs.init_config import InitConfigTab
 from super_buyer.ui.tabs.multi_snipe import MultiSnipeTab
@@ -53,6 +59,22 @@ class App(tk.Tk):
         self.images_dir = self.paths.images_dir
         self.images_dir.mkdir(parents=True, exist_ok=True)
         self.cfg: Dict[str, Any] = load_config(paths=self.paths)
+        try:
+            umi_cfg = self.cfg.setdefault("umi_ocr", {})
+            if isinstance(umi_cfg, dict):
+                umi_cfg.setdefault("base_url", "http://127.0.0.1:1224")
+                umi_cfg.setdefault("timeout_sec", 2.5)
+                umi_cfg.setdefault("auto_start", True)
+                umi_cfg.setdefault("startup_wait_sec", 20.0)
+                umi_cfg.setdefault("exe_path", "")
+        except Exception:
+            pass
+        try:
+            tuning_cfg = self.cfg.get("multi_snipe_tuning")
+            if isinstance(tuning_cfg, dict):
+                tuning_cfg.pop("restart_every_min", None)
+        except Exception:
+            pass
         # 统一将输出目录指向 data/output（仅内存态覆盖，避免旧配置写错位置）
         try:
             paths_cfg = self.cfg.get("paths") or {}
@@ -119,6 +141,7 @@ class App(tk.Tk):
         # 单商品模式已移除
         self._log_lock = threading.Lock()
         self._exec_log_lock = threading.Lock()
+        self._umi_ocr_runtime: ManagedUmiOcrProcess | None = None
         # Test launch/exit running flags
         self._test_launch_running = False
         self._test_exit_running = False
@@ -192,6 +215,18 @@ class App(tk.Tk):
         self._runner: TaskRunner | None = None
 
         # 多商品抢购：任务与运行状态已在构建标签页前初始化
+        try:
+            self._sync_template_statuses_on_startup()
+        except Exception:
+            pass
+        try:
+            self.after(0, self._start_managed_umi_ocr)
+        except Exception:
+            pass
+        try:
+            self.protocol("WM_DELETE_WINDOW", self._on_app_close)
+        except Exception:
+            pass
 
     # ---------- 基础工具 ----------
 
@@ -214,6 +249,50 @@ class App(tk.Tk):
         except Exception:
             pass
         return data_dir
+
+    def _resolve_app_root(self) -> Path:
+        try:
+            return self.paths.root.parent.resolve()
+        except Exception:
+            return Path.cwd().resolve()
+
+    def _sync_template_statuses_on_startup(self) -> None:
+        for tab_name in ("init_tab", "multi_tab"):
+            tab = getattr(self, tab_name, None)
+            rows = getattr(tab, "template_rows", None)
+            if not isinstance(rows, dict):
+                continue
+            for _key, row in rows.items():
+                try:
+                    refresh = getattr(row, "refresh_status", None)
+                    if callable(refresh):
+                        refresh()
+                except Exception:
+                    pass
+
+    def _on_umi_ocr_event(self, level: str, message: str) -> None:
+        kind = str(level or "info").lower()
+        try:
+            if kind in {"warn", "error"}:
+                self.tip_manager.show(message, kind=kind, duration=4.0)
+            elif kind == "success":
+                self.tip_manager.show(message, kind="success", duration=2.2)
+        except Exception:
+            pass
+
+    def _start_managed_umi_ocr(self) -> None:
+        try:
+            self._umi_ocr_runtime = ManagedUmiOcrProcess(
+                self.cfg,
+                app_root=self._resolve_app_root(),
+                on_event=self._on_umi_ocr_event,
+            )
+            self._umi_ocr_runtime.start()
+        except Exception as exc:
+            try:
+                self.tip_manager.show(f"Umi-OCR 托管启动失败：{exc}", kind="warn", duration=4.0)
+            except Exception:
+                pass
 
     def _ensure_default_goods(self, path: Path) -> None:
         """确保用户数据目录下存在 goods.json。
@@ -319,6 +398,23 @@ class App(tk.Tk):
             path.parent.mkdir(parents=True, exist_ok=True)
         return str(path)
 
+    def _resolve_data_path(self, path: str) -> str:
+        """将相对 data/ 根目录的路径解析为绝对路径。"""
+        raw = str(path or "").strip()
+        if not raw:
+            return ""
+        try:
+            p = Path(raw)
+            if p.is_absolute():
+                return str(p.resolve())
+        except Exception:
+            pass
+        try:
+            norm = raw.replace("\\", "/")
+        except Exception:
+            norm = raw
+        return str((self.paths.root / norm).resolve())
+
     # ---------- Mouse wheel binding helper ----------
     def _bind_mousewheel(self, area, target=None) -> None:
         """Enable mouse wheel scrolling on `target` when cursor is over `area`.
@@ -367,29 +463,55 @@ class App(tk.Tk):
         def _on_linux_down(_e):
             _y_scroll(1)
 
-        def _bind_all(_e=None):
-            try:
-                area.bind_all("<MouseWheel>", _on_mousewheel)
-                area.bind_all("<Shift-MouseWheel>", _on_shift_mousewheel)
-                area.bind_all("<Button-4>", _on_linux_up)
-                area.bind_all("<Button-5>", _on_linux_down)
-            except Exception:
-                pass
+        wheel_bind_key = f"{str(area)}->{str(target)}"
+        wheel_flag_attr = "_arena_mousewheel_bind_keys"
+        refresh_flag_attr = "_arena_mousewheel_refresh_bound"
 
-        def _unbind_all(_e=None):
+        def _bind_widget(widget) -> None:
             try:
-                area.unbind_all("<MouseWheel>")
-                area.unbind_all("<Shift-MouseWheel>")
-                area.unbind_all("<Button-4>")
-                area.unbind_all("<Button-5>")
+                bound_keys = set(getattr(widget, wheel_flag_attr, set()))
+            except Exception:
+                bound_keys = set()
+            if wheel_bind_key not in bound_keys:
+                try:
+                    widget.bind("<MouseWheel>", _on_mousewheel, add="+")
+                    widget.bind("<Shift-MouseWheel>", _on_shift_mousewheel, add="+")
+                    widget.bind("<Button-4>", _on_linux_up, add="+")
+                    widget.bind("<Button-5>", _on_linux_down, add="+")
+                    bound_keys.add(wheel_bind_key)
+                    setattr(widget, wheel_flag_attr, bound_keys)
+                except Exception:
+                    pass
+            try:
+                refresh_bound = bool(getattr(widget, refresh_flag_attr, False))
+            except Exception:
+                refresh_bound = False
+            if not refresh_bound:
+                try:
+                    widget.bind("<Configure>", _refresh_bindings, add="+")
+                    setattr(widget, refresh_flag_attr, True)
+                except Exception:
+                    pass
+
+        def _walk_widgets(widget) -> None:
+            _bind_widget(widget)
+            try:
+                children = widget.winfo_children()
+            except Exception:
+                children = []
+            for child in children:
+                _walk_widgets(child)
+
+        def _refresh_bindings(_e=None) -> None:
+            try:
+                _walk_widgets(area)
             except Exception:
                 pass
 
         try:
-            area.bind("<Enter>", _bind_all)
-            area.bind("<Leave>", _unbind_all)
+            area.after_idle(_refresh_bindings)
         except Exception:
-            pass
+            _refresh_bindings()
 
     # ---------- Window placement helper ----------
     def _place_modal(self, top: tk.Toplevel, width: int, height: int) -> None:
@@ -534,9 +656,19 @@ class App(tk.Tk):
             pass
 
     def _debug_test_overlay(self) -> None:
+        tab = getattr(self, "multi_tab", None)
+        if tab is not None:
+            try:
+                tab._debug_test_overlay()
+                return
+            except Exception:
+                pass
         tab = getattr(self, "init_tab", None)
         if tab is not None:
-            tab._debug_test_overlay()
+            try:
+                tab._debug_test_overlay()
+            except Exception:
+                pass
 
     def _open_goods_picker(self, on_pick) -> None:
         """打开通用“选择商品”弹窗（统一出口）。
@@ -600,13 +732,7 @@ class App(tk.Tk):
                     # New defaults for task mode and restart policy
                     if str(data.get("task_mode") or "") not in ("time", "round"):
                         data["task_mode"] = "time"
-                    try:
-                        rmin = int(data.get("restart_every_min", 60) or 60)
-                    except Exception:
-                        rmin = 60
-                    if rmin <= 0:
-                        rmin = 60
-                    data["restart_every_min"] = rmin
+                    data.pop("restart_every_min", None)
                     # Ensure each task has an explicit order field
                     for i, it in enumerate(data["tasks"]):
                         if isinstance(it, dict) and "order" not in it:
@@ -618,7 +744,6 @@ class App(tk.Tk):
             "tasks": [],
             "step_delays": {"default": 0.01},
             "task_mode": "time",
-            "restart_every_min": 60,
         }
 
     def _save_tasks_data(self) -> None:
@@ -790,65 +915,166 @@ class App(tk.Tk):
         except Exception:
             pass
 
+    def _on_app_close(self) -> None:
+        """主窗口关闭前执行最后一次保存，避免去抖自动保存尚未落盘。"""
+        pending_edits: list[str] = []
+        try:
+            fast_tab = getattr(self, "fast_tab", None)
+            if fast_tab is not None and (
+                bool(getattr(fast_tab, "_task_draft_alive", False))
+                or (getattr(fast_tab, "_editing_task_index", None) is not None)
+            ):
+                pending_edits.append("单商品任务编辑")
+        except Exception:
+            pass
+        try:
+            multi_tab = getattr(self, "multi_tab", None)
+            has_pending = getattr(multi_tab, "_has_pending_snipe_editor", None)
+            if callable(has_pending) and bool(has_pending()):
+                pending_edits.append("多商品任务编辑")
+        except Exception:
+            pass
+        try:
+            goods_ui = getattr(self, "goods_ui", None)
+            is_dirty = getattr(goods_ui, "_is_manage_form_dirty", None)
+            if callable(is_dirty) and bool(is_dirty()):
+                pending_edits.append("物品市场表单")
+        except Exception:
+            pass
+        try:
+            if pending_edits:
+                detail = "、".join(pending_edits)
+                if not messagebox.askokcancel(
+                    "退出",
+                    f"当前仍有未保存的编辑：{detail}。\n退出后这些更改会丢失，是否继续？",
+                ):
+                    return
+        except Exception:
+            pass
+        try:
+            after_id = getattr(self, "_autosave_after_id", None)
+            if after_id is not None:
+                try:
+                    self.after_cancel(after_id)
+                except Exception:
+                    pass
+                self._autosave_after_id = None
+        except Exception:
+            pass
+        try:
+            fast_tab = getattr(self, "fast_tab", None)
+            flush = getattr(fast_tab, "_flush_advanced_settings", None)
+            if callable(flush):
+                flush()
+        except Exception:
+            pass
+        try:
+            self.save_config(silent=True)
+        except Exception:
+            pass
+        try:
+            umi_runtime = getattr(self, "_umi_ocr_runtime", None)
+            if umi_runtime is not None:
+                umi_runtime.stop()
+        except Exception:
+            pass
+        try:
+            self.destroy()
+        except Exception:
+            pass
+
     # ---------- Tab1 ----------
     # ---------- Tab3: OCR Lab（已移除） ----------
 
-    # ---------- 执行日志（新逻辑） ----------
-    def _append_log(self, s: str) -> None:
-        # 确保在主线程更新 Tk 组件；后台线程调用时通过 after 切回主线程
+    # ---------- 执行日志（统一详细模式） ----------
+    def _trim_log_widget_lines(self, widget: tk.Text, *, limit: int = MAX_VISIBLE_LOG_LINES) -> None:
         try:
-            import threading as _th  # type: ignore
+            line_count = int(str(widget.index("end-1c")).split(".")[0])
+        except Exception:
+            return
+        overflow = max(0, line_count - int(limit))
+        if overflow <= 0:
+            return
+        try:
+            widget.delete("1.0", f"{overflow + 1}.0")
+        except Exception:
+            pass
+
+    def _restore_runtime_log_widget(self, channel: str, widget: tk.Text | None) -> None:
+        if widget is None:
+            return
+        try:
+            lines = read_latest_runtime_logs(self.paths.output_dir, channel, limit=MAX_VISIBLE_LOG_LINES)
+        except Exception:
+            lines = []
+        try:
+            widget.configure(state=tk.NORMAL)
+            widget.delete("1.0", tk.END)
+            if lines:
+                widget.insert(tk.END, "\n".join(lines) + "\n")
+                widget.see(tk.END)
+            widget.configure(state=tk.DISABLED)
+        except Exception:
+            try:
+                widget.configure(state=tk.DISABLED)
+            except Exception:
+                pass
+
+    def _append_runtime_log(
+        self,
+        channel: str,
+        s: str,
+        *,
+        widget: tk.Text | None,
+        lock: Any,
+        echo_to_console: bool = False,
+    ) -> None:
+        try:
+            import threading as _th
 
             if _th.current_thread() is not _th.main_thread():
                 try:
-                    self.after(0, self._append_log, s)
+                    self.after(
+                        0,
+                        lambda: self._append_runtime_log(
+                            channel,
+                            s,
+                            widget=widget,
+                            lock=lock,
+                            echo_to_console=echo_to_console,
+                        ),
+                    )
                 except Exception:
                     pass
                 return
         except Exception:
-            # 回退：继续尝试直接写入（不推荐，但避免静默失败）
             pass
 
-        # 过滤：根据“运行日志”选择的等级
         try:
-            lvl = self._parse_log_level(s)
-            if self._level_value(lvl) < self._level_value(
-                self.run_log_level_var.get()
-                if hasattr(self, "run_log_level_var")
-                else "info"
-            ):
-                return
+            normalized = append_runtime_log(self.paths.output_dir, channel, s)
         except Exception:
-            pass
-        with self._log_lock:
-            txt = getattr(self, "txt", None)
-            if txt is None:
+            normalized = str(s or "").strip()
+
+        if widget is None:
+            if echo_to_console and normalized:
                 try:
-                    print(s)
+                    print(normalized)
                 except Exception:
                     pass
-                return
-            txt.configure(state=tk.NORMAL)
-            txt.insert(tk.END, time.strftime("[%H:%M:%S] ") + s + "\n")
-            txt.see(tk.END)
-            txt.configure(state=tk.DISABLED)
+            return
 
-    # 日志等级解析与比较
-    def _parse_log_level(self, s: str) -> str:
-        try:
-            if "【ERROR】" in s:
-                return "error"
-            if "【DEBUG】" in s:
-                return "debug"
-            if "【INFO】" in s:
-                return "info"
-        except Exception:
-            pass
-        return "info"
+        with lock:
+            try:
+                widget.configure(state=tk.NORMAL)
+                widget.insert(tk.END, normalized + "\n")
+                self._trim_log_widget_lines(widget)
+                widget.see(tk.END)
+            finally:
+                widget.configure(state=tk.DISABLED)
 
-    def _level_value(self, name: str) -> int:
-        m = {"debug": 10, "info": 20, "error": 40}
-        return m.get(str(name or "").lower(), 20)
+    def _append_log(self, s: str) -> None:
+        txt = getattr(self, "txt", None)
+        self._append_runtime_log("run", s, widget=txt, lock=self._log_lock, echo_to_console=(txt is None))
 
     # 旧自动购买相关方法已移除
 
@@ -962,7 +1188,7 @@ class App(tk.Tk):
             if recs_m:
                 for r in recs_m:
                     try:
-                        ts = float(r.get("ts_min", 0.0))
+                        ts = float(r.get("ts", r.get("ts_min", 0.0)) or 0.0)
                         vmin = int(r.get("min", 0))
                         vmax = int(r.get("max", 0))
                         vavg = int(r.get("avg", 0))
@@ -1133,14 +1359,6 @@ class App(tk.Tk):
                 tree.insert("", tk.END, iid=str(i), values=vs)
             # Metrics（数量、均价、最高、最低）
             m = summarize_purchases(recs)
-            # 最高/最低购买价按单价统计
-            try:
-                prices = [int(r.get("price", 0)) for r in recs]
-                p_max = max(prices) if prices else 0
-                p_min = min(prices) if prices else 0
-            except Exception:
-                p_max = 0
-                p_min = 0
 
             def fmt(n):
                 try:
@@ -1150,8 +1368,8 @@ class App(tk.Tk):
 
             lab_qty.configure(text=f"购买量: {fmt(m.get('quantity', 0))}")
             lab_avg.configure(text=f"均价: {fmt(m.get('avg_price', 0))}")
-            lab_max.configure(text=f"最高价: {fmt(p_max)}")
-            lab_min.configure(text=f"最低价: {fmt(p_min)}")
+            lab_max.configure(text=f"最高价: {fmt(m.get('max_price', 0))}")
+            lab_min.configure(text=f"最低价: {fmt(m.get('min_price', 0))}")
 
         _reload()
 
@@ -1269,13 +1487,6 @@ class App(tk.Tk):
                     vs = (iso, task_name, str(price), str(qty), str(amount))
                 tree.insert("", tk.END, iid=str(i), values=vs)
             m = summarize_purchases(recs)
-            try:
-                prices = [int(r.get("price", 0)) for r in recs]
-                p_max = max(prices) if prices else 0
-                p_min = min(prices) if prices else 0
-            except Exception:
-                p_max = 0
-                p_min = 0
 
             def fmt(n):
                 try:
@@ -1285,8 +1496,8 @@ class App(tk.Tk):
 
             lab_qty.configure(text=f"购买量: {fmt(m.get('quantity', 0))}")
             lab_avg.configure(text=f"均价: {fmt(m.get('avg_price', 0))}")
-            lab_max.configure(text=f"最高价: {fmt(p_max)}")
-            lab_min.configure(text=f"最低价: {fmt(p_min)}")
+            lab_max.configure(text=f"最高价: {fmt(m.get('max_price', 0))}")
+            lab_min.configure(text=f"最低价: {fmt(m.get('min_price', 0))}")
 
         _reload()
         btnf = ttk.Frame(top)

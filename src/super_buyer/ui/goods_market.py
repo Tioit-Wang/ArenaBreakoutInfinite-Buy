@@ -172,6 +172,7 @@ class GoodsMarketUI(ttk.Frame):
         self.images_dir.mkdir(parents=True, exist_ok=True)
         self.goods_path = Path(goods_path)
         self.goods: list[dict[str, object]] = []
+        self._suppress_manage_select_event = False
 
         # 显示与存储的分类映射
         self.cat_map_en: dict[str, str] = {
@@ -642,6 +643,12 @@ class GoodsMarketUI(ttk.Frame):
             w.destroy()
 
         items = self._filtered_goods_for_gallery()
+        try:
+            self._gallery_price_stats = self._price_stats_1d_map(
+                [str(it.get("id", "")) for it in items if isinstance(it, dict)]
+            )
+        except Exception:
+            self._gallery_price_stats = {}
         # 估算列数
         try:
             cw = max(1, self.gallery_canvas.winfo_width())
@@ -811,7 +818,7 @@ class GoodsMarketUI(ttk.Frame):
             if recs_m:
                 for r in recs_m:
                     try:
-                        ts = float(r.get("ts_min", 0.0))
+                        ts = float(r.get("ts", r.get("ts_min", 0.0)) or 0.0)
                         vmin = int(r.get("min", 0))
                         vmax = int(r.get("max", 0))
                         vavg = int(r.get("avg", 0))
@@ -1009,38 +1016,65 @@ class GoodsMarketUI(ttk.Frame):
     # 收藏功能已移除
 
     # ---------- 数据：价格统计（最近1天） ----------
+    def _price_stats_1d_map(self, item_ids: list[str]) -> dict[str, dict[str, int]]:
+        ids = {str(item_id) for item_id in item_ids if str(item_id)}
+        if not ids:
+            return {}
+
+        now = time.time()
+        cache = getattr(self, "_price_batch_cache", None)
+        if isinstance(cache, dict):
+            cache_ts = float(cache.get("ts", 0.0) or 0.0)
+            cache_ids = cache.get("item_ids")
+            cache_stats = cache.get("stats")
+            if (
+                now - cache_ts <= 10.0
+                and isinstance(cache_ids, set)
+                and cache_ids == ids
+                and isinstance(cache_stats, dict)
+            ):
+                return dict(cache_stats)
+
+        try:
+            from history_store import summarize_prices_by_item  # type: ignore
+        except Exception:
+            return {}
+
+        try:
+            stats = summarize_prices_by_item(ids, now - 24 * 3600)
+        except Exception:
+            stats = {}
+        self._price_batch_cache = {"ts": now, "item_ids": ids, "stats": stats}  # type: ignore[attr-defined]
+        return dict(stats)
+
     def _price_stats_1d(self, iid: str) -> tuple[int, int, int]:
         if not iid:
             return 0, 0, 0
-        # 简易缓存，避免频繁 I/O
-        now = time.time()
-        cache = getattr(self, "_price_cache", None)
-        if cache is None:
-            cache = {}
-            self._price_cache = cache  # type: ignore
-        ent = cache.get(iid) if isinstance(cache, dict) else None
-        if isinstance(ent, tuple) and len(ent) == 2:
-            ts, val = ent
-            if now - float(ts) <= 10.0:
-                return tuple(val)  # type: ignore
+
+        batch_stats = getattr(self, "_gallery_price_stats", None)
+        if isinstance(batch_stats, dict):
+            summary = batch_stats.get(iid)
+            if isinstance(summary, dict):
+                return (
+                    int(summary.get("max_price", 0) or 0),
+                    int(summary.get("min_price", 0) or 0),
+                    int(summary.get("avg_price", 0) or 0),
+                )
+
         try:
-            from history_store import query_price  # type: ignore
+            from history_store import query_price, summarize_prices  # type: ignore
         except Exception:
             return 0, 0, 0
-        since = now - 24 * 3600
         try:
-            recs = query_price(iid, since)
+            recs = query_price(iid, time.time() - 24 * 3600)
         except Exception:
             recs = []
-        prices = [int(r.get("price", 0)) for r in (recs or []) if int(r.get("price", 0)) > 0]
-        if not prices:
-            hi = lo = avg = 0
-        else:
-            hi = max(prices)
-            lo = min(prices)
-            avg = int(round(sum(prices) / len(prices)))
-        cache[iid] = (now, (hi, lo, avg))  # type: ignore
-        return hi, lo, avg
+        summary = summarize_prices(recs)
+        return (
+            int(summary.get("max_price", 0) or 0),
+            int(summary.get("min_price", 0) or 0),
+            int(summary.get("avg_price", 0) or 0),
+        )
 
     # ---------- 管理模态框 ----------
     def _open_item_modal(self, item: dict | None) -> None:
@@ -1383,11 +1417,91 @@ class GoodsMarketUI(ttk.Frame):
             )
             self.tree.insert("", tk.END, iid=str(it.get("id", "")), values=vals)
 
+    def _manage_form_snapshot_from_item(self, item: dict | None) -> dict[str, object]:
+        if not isinstance(item, dict):
+            return {
+                "id": "",
+                "name": "",
+                "search_name": "",
+                "big_category": "弹药",
+                "sub_category": "",
+                "exchangeable": False,
+                "craftable": False,
+                "image_path": self._ensure_default_img(),
+            }
+        return {
+            "id": str(item.get("id", "")),
+            "name": str(item.get("name", "")),
+            "search_name": str(item.get("search_name", "")),
+            "big_category": str(item.get("big_category", "")) or "杂物",
+            "sub_category": str(item.get("sub_category", "")),
+            "exchangeable": bool(item.get("exchangeable", False)),
+            "craftable": bool(item.get("craftable", False)),
+            "image_path": str(item.get("image_path", "")) or self._ensure_default_img(),
+        }
+
+    def _current_manage_form_snapshot(self) -> dict[str, object]:
+        return {
+            "id": (self.var_id.get() or "").strip(),
+            "name": (self.var_name.get() or "").strip(),
+            "search_name": (self.var_sname.get() or "").strip(),
+            "big_category": (self.var_big_cat.get() or "").strip() or "弹药",
+            "sub_category": (self.var_sub_cat.get() or "").strip(),
+            "exchangeable": bool(self.var_exch.get()),
+            "craftable": bool(self.var_craft.get()),
+            "image_path": (self.var_img.get() or "").strip() or self._ensure_default_img(),
+        }
+
+    def _is_manage_form_dirty(self) -> bool:
+        current = self._current_manage_form_snapshot()
+        iid = str(current.get("id", "") or "")
+        base_item = next((x for x in self.goods if str(x.get("id", "")) == iid), None) if iid else None
+        baseline = self._manage_form_snapshot_from_item(base_item)
+        if not iid and not base_item:
+            baseline = self._manage_form_snapshot_from_item(None)
+        return current != baseline
+
+    def _confirm_discard_manage_form_changes(self, action: str) -> bool:
+        try:
+            if not self._is_manage_form_dirty():
+                return True
+        except Exception:
+            return True
+        try:
+            return bool(
+                messagebox.askokcancel(
+                    "未保存更改",
+                    f"当前物品表单有未保存的更改，{action}会丢失这些内容，是否继续？",
+                )
+            )
+        except Exception:
+            return True
+
+    def _restore_manage_selection(self, iid: str) -> None:
+        try:
+            self._suppress_manage_select_event = True
+            if iid and self.tree.exists(iid):
+                self.tree.selection_set(iid)
+                self.tree.focus(iid)
+            else:
+                self.tree.selection_remove(self.tree.selection())
+        except Exception:
+            pass
+        finally:
+            self._suppress_manage_select_event = False
+
     def _on_select(self) -> None:
+        if bool(getattr(self, "_suppress_manage_select_event", False)):
+            return
         sel = self.tree.selection()
         if not sel:
             return
         iid = sel[0]
+        cur_iid = (self.var_id.get() or "").strip()
+        if iid != cur_iid:
+            if not self._confirm_discard_manage_form_changes("切换选中项"):
+                self._restore_manage_selection(cur_iid)
+                return
         it = next((x for x in self.goods if str(x.get("id")) == iid), None)
         if not it:
             return
@@ -1403,6 +1517,9 @@ class GoodsMarketUI(ttk.Frame):
         self._update_img_preview()
 
     def _new_item(self) -> None:
+        if not self._confirm_discard_manage_form_changes("新建物品"):
+            return
+        self._restore_manage_selection("")
         self.var_id.set("")
         self.var_name.set("")
         self.var_sname.set("")
@@ -1441,6 +1558,7 @@ class GoodsMarketUI(ttk.Frame):
         self.var_id.set(str(item["id"]))
         self._save_goods()
         self._refresh_list()
+        self._restore_manage_selection(str(item["id"]))
         messagebox.showinfo("保存", "已保存。")
 
     def _delete_selected(self) -> None:

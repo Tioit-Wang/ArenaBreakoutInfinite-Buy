@@ -141,6 +141,17 @@ class TemplateRow(ttk.Frame):
     def get_abs_path(self) -> str:
         return self._resolve_path(self.get_path())
 
+    def refresh_status(self) -> bool:
+        before_path = self.get_path()
+        before_conf = self.get_confidence()
+        self._normalize_path()
+        self._normalize_confidence()
+        self._update_status()
+        return before_path != self.get_path() or abs(before_conf - self.get_confidence()) > 1e-9
+
+    def get_status_text(self) -> str:
+        return str(self._status_text or "")
+
     # ---- 内部工具 ----
 
     def _browse_file(self) -> None:

@@ -45,8 +45,8 @@ class SingleFastBuyTab(BaseTab):
         self.cards_window: int | None = None
         self.btn_add_task: ttk.Button | None = None
         self._task_modal_top: tk.Toplevel | None = None
-        self._advanced_modal_top: tk.Toplevel | None = None
         self.lab_task_summary: ttk.Label | None = None
+        self.lab_task_modal_summary: ttk.Label | None = None
         self._build_tab_fast()
 
     def _build_tab_fast(self) -> None:
@@ -54,27 +54,19 @@ class SingleFastBuyTab(BaseTab):
         container = ttk.Frame(outer)
         container.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
 
-        box_top = ttk.Frame(container)
-        box_top.pack(fill=tk.X, pady=(0, 8))
-        ttk.Button(box_top, text="配置任务…", command=self._open_tasks_modal).pack(side=tk.LEFT)
-        ttk.Button(box_top, text="高级配置…", command=self._open_advanced_modal).pack(side=tk.LEFT, padx=(8, 0))
-        self.lab_task_summary = ttk.Label(box_top, text="", foreground="#666666")
-        self.lab_task_summary.pack(side=tk.LEFT, padx=(12, 0))
-
-        # 任务卡片容器（用于渲染任务列表）
-        self._tasks_root_frame = container
-
-        ctrl_box = ttk.LabelFrame(container, text="执行控制")
-        ctrl_box.pack(fill=tk.X, padx=0, pady=(0, 8))
-        ctrl_inner = ttk.Frame(ctrl_box)
-        ctrl_inner.pack(fill=tk.X, padx=8, pady=6)
-        self.btn_exec_start = ttk.Button(ctrl_inner, text="开始执行", command=self._exec_start)
+        ctrl_box = self._build_section(container, "任务控制")
+        ctrl = ttk.Frame(ctrl_box)
+        ctrl.pack(fill=tk.X, padx=8, pady=8)
+        self.btn_exec_start = ttk.Button(ctrl, text="开始任务", command=self._exec_start)
         self.btn_exec_start.pack(side=tk.LEFT)
-        self.btn_exec_stop = ttk.Button(ctrl_inner, text="终止", command=self._exec_stop)
-        self.btn_exec_stop.pack(side=tk.LEFT)
+        self.btn_exec_stop = ttk.Button(ctrl, text="终止任务", command=self._exec_stop)
+        self.btn_exec_stop.pack(side=tk.LEFT, padx=6)
+        ttk.Button(ctrl, text="配置任务", command=self._open_tasks_modal).pack(side=tk.LEFT, padx=(12, 0))
+        self.lab_task_summary = ttk.Label(ctrl, text="", foreground="#666666")
+        self.lab_task_summary.pack(side=tk.LEFT, padx=(12, 0))
         # 主界面：任务模式切换
         try:
-            ttk.Label(ctrl_inner, text="  任务模式").pack(side=tk.LEFT, padx=(12, 4))
+            ttk.Label(ctrl, text="  任务模式").pack(side=tk.LEFT, padx=(12, 4))
             # 使用显示文案与内部值的映射
             self._task_mode_combo_var = tk.StringVar()
             _mode_map = {"按时间区间": "time", "轮流执行": "round"}
@@ -82,7 +74,7 @@ class SingleFastBuyTab(BaseTab):
             cur_mode = str(self.tasks_data.get("task_mode", "time"))
             self._task_mode_combo_var.set(_rev_map.get(cur_mode, "按时间区间"))
             mode_combo = ttk.Combobox(
-                ctrl_inner,
+                ctrl,
                 width=10,
                 state="readonly",
                 values=list(_mode_map.keys()),
@@ -95,6 +87,7 @@ class SingleFastBuyTab(BaseTab):
                     if val not in ("time", "round"):
                         val = "time"
                     self.tasks_data["task_mode"] = val
+                    self._sync_task_mode_ui(val)
                     self._save_tasks_data()
                     # 重新渲染任务卡片以反映字段变化
                     self._render_task_cards()
@@ -105,33 +98,19 @@ class SingleFastBuyTab(BaseTab):
             self._task_mode_combo = mode_combo
         except Exception:
             self._task_mode_combo = None
-        self.lab_exec_status = ttk.Label(ctrl_inner, text="idle", foreground="#666")
+        self.lab_exec_status = ttk.Label(ctrl, text="idle", foreground="#666")
         self.lab_exec_status.pack(side=tk.RIGHT)
 
-        log_box = ttk.LabelFrame(container, text="执行日志")
-        log_box.pack(fill=tk.BOTH, expand=True)
+        self._build_step_delay_panel(container)
+
+        log_box = self._build_section(container, "执行日志", expand=True)
         log_top = ttk.Frame(log_box)
         log_top.pack(fill=tk.X, padx=8, pady=(8, 0))
-        ttk.Label(log_top, text="日志等级").pack(side=tk.LEFT)
-        self.exec_log_level_var = tk.StringVar(value="info")
-        exec_level = ttk.Combobox(
-            log_top,
-            width=8,
-            state="readonly",
-            values=["debug", "info", "error"],
-            textvariable=self.exec_log_level_var,
-        )
-        exec_level.pack(side=tk.LEFT, padx=6)
-        try:
-            exec_level.bind(
-                "<<ComboboxSelected>>",
-                lambda _e: (getattr(self, "_runner", None) and self._runner.set_log_level(self.exec_log_level_var.get())),
-            )
-        except Exception:
-            pass
+        ttk.Label(log_top, text="自动展示最详细日志，界面仅保留最新 5000 条").pack(side=tk.LEFT)
         self.exec_txt = tk.Text(log_box, height=14, wrap="word")
         self.exec_txt.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
         self.exec_txt.configure(state=tk.DISABLED)
+        self._restore_runtime_log_widget("exec", self.exec_txt)
 
         # State: whether a draft card exists
         self._task_draft_alive = False
@@ -172,9 +151,6 @@ class SingleFastBuyTab(BaseTab):
         self._update_task_summary()
 
     def _update_task_summary(self) -> None:
-        label = getattr(self, "lab_task_summary", None)
-        if label is None:
-            return
         tasks = list((self.tasks_data.get("tasks", []) or []))
         total = len(tasks)
         try:
@@ -182,10 +158,38 @@ class SingleFastBuyTab(BaseTab):
         except Exception:
             enabled = total
         text = f"任务数: {total}，启用: {enabled}"
-        try:
-            label.configure(text=text)
-        except Exception:
-            pass
+        for label in (
+            getattr(self, "lab_task_summary", None),
+            getattr(self, "lab_task_modal_summary", None),
+        ):
+            if label is None:
+                continue
+            try:
+                label.configure(text=text)
+            except Exception:
+                pass
+
+    def _sync_task_mode_ui(self, mode: str | None = None) -> str:
+        """同步主界面下拉与弹窗单选，避免任务模式展示与真实值不一致。"""
+        val = str(mode or self.tasks_data.get("task_mode", "time"))
+        if val not in ("time", "round"):
+            val = "time"
+        combo_var = getattr(self, "_task_mode_combo_var", None)
+        if isinstance(combo_var, tk.StringVar):
+            disp = "轮流执行" if val == "round" else "按时间区间"
+            try:
+                if combo_var.get() != disp:
+                    combo_var.set(disp)
+            except Exception:
+                pass
+        modal_var = getattr(self, "_task_mode_var", None)
+        if isinstance(modal_var, tk.StringVar):
+            try:
+                if modal_var.get() != val:
+                    modal_var.set(val)
+            except Exception:
+                pass
+        return val
 
     def _update_task_mode_controls_state(self) -> None:
         """Enable/disable task-mode radio buttons based on editing/draft state."""
@@ -293,6 +297,7 @@ class SingleFastBuyTab(BaseTab):
             if getattr(self, "_task_modal_top", None) is not top:
                 return
             self._task_modal_top = None
+            self.lab_task_modal_summary = None
             self.cards_inner = None
             self.cards_canvas = None
             self.cards_window = None
@@ -307,17 +312,29 @@ class SingleFastBuyTab(BaseTab):
                 _cleanup_modal()
 
         def _on_close() -> None:
+            try:
+                if self._task_draft_alive or (self._editing_task_index is not None):
+                    if not messagebox.askokcancel(
+                        "关闭",
+                        "当前有未保存的任务编辑，关闭后这些更改会丢失，是否继续？",
+                    ):
+                        return
+            except Exception:
+                pass
             if top.winfo_exists():
                 top.destroy()
 
         top.protocol("WM_DELETE_WINDOW", _on_close)
         top.bind("<Destroy>", _on_destroy)
 
-        frm = ttk.Frame(top)
-        frm.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        shell = self._build_modal_shell(
+            top,
+            title="配置单商品任务",
+            description="统一管理单商品购买条件、任务模式与时间安排。",
+        )
+        self.lab_task_modal_summary = shell["summary"]
 
-        tb = ttk.Frame(frm)
-        tb.pack(fill=tk.X)
+        tb = shell["toolbar"]
         self.btn_add_task = ttk.Button(tb, text="新增…", command=self._add_task_card)
         self.btn_add_task.pack(side=tk.LEFT)
         # 全局任务模式选择（时间区间 / 轮流执行）
@@ -331,6 +348,7 @@ class SingleFastBuyTab(BaseTab):
                         val = "time"
                     # 编辑/新增中时不允许切换（由 _update_task_mode_controls_state 控制）
                     self.tasks_data["task_mode"] = val
+                    self._sync_task_mode_ui(val)
                     self._save_tasks_data()
                     # 重新渲染任务卡片以反映字段变化
                     self._render_task_cards()
@@ -346,45 +364,16 @@ class SingleFastBuyTab(BaseTab):
         except Exception:
             self._task_mode_radios = None
 
-        wrap = ttk.Frame(frm)
-        wrap.pack(fill=tk.BOTH, expand=True, pady=(6, 6))
-        canvas = tk.Canvas(wrap, highlightthickness=0)
-        vsb = ttk.Scrollbar(wrap, orient=tk.VERTICAL, command=canvas.yview)
-        canvas.configure(yscrollcommand=vsb.set)
-        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        vsb.pack(side=tk.RIGHT, fill=tk.Y)
-        cards = ttk.Frame(canvas)
-        win = canvas.create_window((0, 0), window=cards, anchor="nw")
-
-        def _on_cards_configure(_event=None) -> None:
-            try:
-                canvas.configure(scrollregion=canvas.bbox("all"))
-            except Exception:
-                pass
-
-        def _on_canvas_configure(event) -> None:
-            try:
-                canvas.itemconfigure(win, width=event.width)
-            except Exception:
-                pass
-
-        cards.bind("<Configure>", _on_cards_configure)
-        canvas.bind("<Configure>", _on_canvas_configure)
-        try:
-            self._bind_mousewheel(cards, canvas)
-        except Exception:
-            pass
-
-        self.cards_canvas = canvas
-        self.cards_inner = cards
-        self.cards_window = win
+        scroll = self._build_scrollable_canvas(shell["content"])
+        self.cards_canvas = scroll["canvas"]
+        self.cards_inner = scroll["inner"]
+        self.cards_window = scroll["window"]
 
         self._task_draft_alive = False
         self._editing_task_index = None
         self._render_task_cards()
 
-        bf = ttk.Frame(frm)
-        bf.pack(fill=tk.X)
+        bf = shell["footer"]
         ttk.Button(bf, text="关闭", command=_on_close).pack(side=tk.RIGHT)
         # Disable task mode radios while drafting
         try:
@@ -422,11 +411,82 @@ class SingleFastBuyTab(BaseTab):
                 old.destroy()
             except Exception:
                 pass
-        panel = ttk.LabelFrame(parent, text="高级配置")
-        panel.pack(fill=tk.X, padx=8, pady=8)
+        panel = ttk.LabelFrame(parent, text="高级设置（购买/连击）")
+        panel.pack(fill=tk.X, padx=4, pady=(0, 6))
         self._step_panel = panel
-        inner = ttk.Frame(panel)
-        inner.pack(fill=tk.X, padx=8, pady=6)
+        sections = ttk.Frame(panel)
+        sections.pack(fill=tk.X, expand=True, padx=8, pady=6)
+        try:
+            sections.columnconfigure(0, weight=1)
+            sections.columnconfigure(1, weight=1)
+        except Exception:
+            pass
+
+        box_chain = ttk.LabelFrame(sections, text="购买 / 连击")
+        box_timing = ttk.LabelFrame(sections, text="OCR / 结果时序")
+        for box in (box_chain, box_timing):
+            try:
+                box.columnconfigure(0, weight=1)
+            except Exception:
+                pass
+
+        def _build_spinbox(row_parent, **kwargs):
+            try:
+                return ttk.Spinbox(row_parent, **kwargs)
+            except Exception:
+                return tk.Spinbox(row_parent, **kwargs)
+
+        def _make_row(parent_box, row_index: int, label_text: str, build_widget, *, tooltip: str | None = None, pady=(0, 6)):
+            row = ttk.Frame(parent_box)
+            row.grid(row=row_index, column=0, sticky="ew", padx=8, pady=pady)
+            try:
+                row.columnconfigure(1, weight=1)
+            except Exception:
+                pass
+            ttk.Label(row, text=label_text).grid(row=0, column=0, sticky="w")
+            widget = build_widget(row)
+            try:
+                widget.grid(row=0, column=1, sticky="ew", padx=(12, 0))
+            except Exception:
+                widget.grid(row=0, column=1, sticky="w", padx=(12, 0))
+            if tooltip:
+                try:
+                    hint = ttk.Label(row, text="？", foreground="#666666", width=2)
+                    hint.grid(row=0, column=2, sticky="w", padx=(8, 0))
+                    self._attach_tooltip(hint, tooltip)
+                except Exception:
+                    pass
+            return widget
+
+        layout_state = {"stacked": None}
+
+        def _relayout_advanced_sections(event=None) -> None:
+            try:
+                width = int(getattr(event, "width", 0) or sections.winfo_width() or 0)
+            except Exception:
+                width = 0
+            stacked = width < 900
+            if layout_state["stacked"] is stacked:
+                return
+            layout_state["stacked"] = stacked
+            try:
+                box_chain.grid_forget()
+                box_timing.grid_forget()
+            except Exception:
+                pass
+            try:
+                if stacked:
+                    sections.columnconfigure(0, weight=1)
+                    sections.columnconfigure(1, weight=0)
+                    box_chain.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+                    box_timing.grid(row=1, column=0, columnspan=2, sticky="ew")
+                else:
+                    sections.columnconfigure(0, weight=1)
+                    sections.columnconfigure(1, weight=1)
+                    box_chain.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+                    box_timing.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+            except Exception:
+                pass
 
         # 新：延时(ms)，默认15ms；保存到 tasks_data.advanced.delay_ms
         adv = self.tasks_data.get("advanced") if isinstance(self.tasks_data.get("advanced"), dict) else {}
@@ -434,100 +494,69 @@ class SingleFastBuyTab(BaseTab):
             cur_ms = int((adv or {}).get("delay_ms", 15))
         except Exception:
             cur_ms = 15
-        ttk.Label(inner, text="延时(ms)", width=14).grid(row=0, column=0, sticky="w")
         var_delay_ms = tk.IntVar(value=cur_ms)
-        sp = ttk.Spinbox(inner, from_=1, to=2000, increment=1, width=10, textvariable=var_delay_ms)
-        sp.grid(row=0, column=1, sticky="w")
-        try:
-            lbl_q_delay = ttk.Label(inner, text="？", foreground="#666666", width=2)
-            lbl_q_delay.grid(row=0, column=2, sticky="w", padx=(4, 0))
-            self._attach_tooltip(
-                lbl_q_delay,
+        sp = _make_row(
+            box_chain,
+            0,
+            "基础延时(ms)",
+            lambda row: _build_spinbox(row, from_=1, to=2000, increment=1, textvariable=var_delay_ms),
+            tooltip=(
                 "控制基础鼠标/键盘操作的等待间隔，数值越小点击越密集。\n"
-                "建议 5–20ms，过小可能在卡顿时导致点击不稳定。",
-            )
-        except Exception:
-            pass
-
-        # Restart policy: restart game every N minutes (default 60)
-        ttk.Label(inner, text="重启周期(分钟)", width=14).grid(row=1, column=0, sticky="w", pady=(6,0))
-        try:
-            cur_restart = int(self.tasks_data.get("restart_every_min", 60) or 60)
-        except Exception:
-            cur_restart = 60
-        var_restart = tk.IntVar(value=cur_restart)
-        sp2 = ttk.Spinbox(inner, from_=5, to=600, increment=5, width=10, textvariable=var_restart)
-        sp2.grid(row=1, column=1, sticky="w", pady=(6,0))
-        try:
-            lbl_q_restart = ttk.Label(inner, text="？", foreground="#666666", width=2)
-            lbl_q_restart.grid(row=1, column=2, sticky="w", padx=(4, 0))
-            self._attach_tooltip(
-                lbl_q_restart,
-                "长时间运行时定期重启游戏以降低卡死风险。\n"
-                "一般建议 30–120 分钟，过短会增加重启开销。",
-            )
-        except Exception:
-            pass
+                "建议 5–20ms，过小可能在卡顿时导致点击不稳定。"
+            ),
+        )
 
         # 快速连击模式：是否启用
         try:
             fast_mode_cur = bool((adv or {}).get("fast_chain_mode", False))
         except Exception:
             fast_mode_cur = False
-        ttk.Label(inner, text="启用快速连击模式", width=14).grid(row=2, column=0, sticky="w", pady=(6, 0))
         var_fast_mode = tk.BooleanVar(value=fast_mode_cur)
-        chk_fast = ttk.Checkbutton(inner, variable=var_fast_mode)
-        chk_fast.grid(row=2, column=1, sticky="w", pady=(6, 0))
-        try:
-            lbl_q_fast_mode = ttk.Label(inner, text="？", foreground="#666666", width=2)
-            lbl_q_fast_mode.grid(row=2, column=2, sticky="w", padx=(4, 0))
-            self._attach_tooltip(
-                lbl_q_fast_mode,
+        chk_fast = _make_row(
+            box_chain,
+            1,
+            "快速连击模式",
+            lambda row: ttk.Checkbutton(row, text="启用", variable=var_fast_mode),
+            tooltip=(
                 "开启后一次均价识别可连续多次购买，适合短时间大量挂出的抢购场景。\n"
-                "价格变化时存在多买风险，建议仅在需要极限速度的任务中开启。",
-            )
-        except Exception:
-            pass
+                "价格变化时存在多买风险，建议仅在需要极限速度的任务中开启。"
+            ),
+        )
 
         # 快速连击：每次 OCR 后最多连续购买次数
         try:
             fast_max_cur = int((adv or {}).get("fast_chain_max", 10) or 10)
         except Exception:
             fast_max_cur = 10
-        ttk.Label(inner, text="快速连击次数上限", width=14).grid(row=3, column=0, sticky="w", pady=(6, 0))
         var_fast_max = tk.IntVar(value=fast_max_cur)
-        sp_fast_max = ttk.Spinbox(inner, from_=1, to=50, increment=1, width=10, textvariable=var_fast_max)
-        sp_fast_max.grid(row=3, column=1, sticky="w", pady=(6, 0))
-        try:
-            lbl_q_fast_max = ttk.Label(inner, text="？", foreground="#666666", width=2)
-            lbl_q_fast_max.grid(row=3, column=2, sticky="w", padx=(4, 0))
-            self._attach_tooltip(
-                lbl_q_fast_max,
+        sp_fast_max = _make_row(
+            box_chain,
+            2,
+            "每轮连击上限",
+            lambda row: _build_spinbox(row, from_=1, to=50, increment=1, textvariable=var_fast_max),
+            tooltip=(
                 "一次均价识别之后，最多允许连续购买的次数。\n"
-                "建议 5–15，数值越大速度越快，但一旦价格上涨可能连续多次买入。",
-            )
-        except Exception:
-            pass
+                "建议 5–15，数值越大速度越快，但一旦价格上涨可能连续多次买入。"
+            ),
+        )
 
         # 快速连击：遮罩关闭与再次点击的间隔(ms)
         try:
             fast_interval_cur = float((adv or {}).get("fast_chain_interval_ms", 35.0) or 35.0)
         except Exception:
             fast_interval_cur = 35.0
-        ttk.Label(inner, text="快速连击间隔(ms)", width=14).grid(row=4, column=0, sticky="w", pady=(6, 0))
         var_fast_interval = tk.DoubleVar(value=fast_interval_cur)
-        sp_fast_interval = ttk.Spinbox(inner, from_=30, to=500, increment=5, width=10, textvariable=var_fast_interval)
-        sp_fast_interval.grid(row=4, column=1, sticky="w", pady=(6, 0))
-        try:
-            lbl_q_fast_interval = ttk.Label(inner, text="？", foreground="#666666", width=2)
-            lbl_q_fast_interval.grid(row=4, column=2, sticky="w", padx=(4, 0))
-            self._attach_tooltip(
-                lbl_q_fast_interval,
+        sp_fast_interval = _make_row(
+            box_chain,
+            3,
+            "连击间隔(ms)",
+            lambda row: _build_spinbox(row, from_=30, to=500, increment=5, textvariable=var_fast_interval),
+            tooltip=(
                 "关闭购买成功遮罩到再次点击购买按钮之间的间隔。\n"
-                "必须 ≥30ms，建议 35–80ms。越小速度越快，但过小可能导致点击无效或被判定为脚本。",
-            )
-        except Exception:
-            pass
+                "必须 ≥30ms，建议 35–80ms。越小速度越快，但过小可能导致点击无效或被判定为脚本。"
+            ),
+            pady=(0, 8),
+        )
 
         # 购买结果与 OCR 时序参数（读取自 cfg.multi_snipe_tuning，按需覆盖）
         tuning = self.cfg.get("multi_snipe_tuning") if isinstance(self.cfg.get("multi_snipe_tuning"), dict) else {}
@@ -574,83 +603,84 @@ class SingleFastBuyTab(BaseTab):
         except Exception:
             cur_post_success_ms = 80
 
-        row_base = 5
-        ttk.Separator(inner, orient=tk.HORIZONTAL).grid(row=row_base, column=0, columnspan=3, sticky="we", pady=(6, 6))
-
-        ttk.Label(inner, text="结果窗口(ms)", width=14).grid(row=row_base + 1, column=0, sticky="w")
         var_buy_timeout = tk.IntVar(value=cur_buy_timeout_ms)
-        sp_buy_timeout = ttk.Spinbox(inner, from_=100, to=2000, increment=10, width=10, textvariable=var_buy_timeout)
-        sp_buy_timeout.grid(row=row_base + 1, column=1, sticky="w")
-        try:
-            lbl_q_buy_timeout = ttk.Label(inner, text="？", foreground="#666666", width=2)
-            lbl_q_buy_timeout.grid(row=row_base + 1, column=2, sticky="w", padx=(4, 0))
-            self._attach_tooltip(
-                lbl_q_buy_timeout,
+        sp_buy_timeout = _make_row(
+            box_timing,
+            0,
+            "结果窗口(ms)",
+            lambda row: _build_spinbox(row, from_=100, to=2000, increment=10, textvariable=var_buy_timeout),
+            tooltip=(
                 "从点击购买到检测到“购买成功/失败”提示的最大等待时间。\n"
-                "建议 300–400ms，过大浪费时间，过小可能在网络波动时漏判。",
-            )
-        except Exception:
-            pass
+                "建议 300–400ms，过大浪费时间，过小可能在网络波动时漏判。"
+            ),
+        )
 
-        ttk.Label(inner, text="结果轮询步进(ms)", width=14).grid(row=row_base + 2, column=0, sticky="w", pady=(6, 0))
         var_buy_step = tk.IntVar(value=cur_buy_step_ms)
-        sp_buy_step = ttk.Spinbox(inner, from_=5, to=100, increment=1, width=10, textvariable=var_buy_step)
-        sp_buy_step.grid(row=row_base + 2, column=1, sticky="w", pady=(6, 0))
-        try:
-            lbl_q_buy_step = ttk.Label(inner, text="？", foreground="#666666", width=2)
-            lbl_q_buy_step.grid(row=row_base + 2, column=2, sticky="w", padx=(4, 0))
-            self._attach_tooltip(
-                lbl_q_buy_step,
+        sp_buy_step = _make_row(
+            box_timing,
+            1,
+            "结果轮询步进(ms)",
+            lambda row: _build_spinbox(row, from_=5, to=100, increment=1, textvariable=var_buy_step),
+            tooltip=(
                 "在结果窗口内每次检查成功/失败提示的间隔。\n"
-                "建议约 10ms，小幅调整即可，不建议过大。",
-            )
-        except Exception:
-            pass
+                "建议约 10ms，小幅调整即可，不建议过大。"
+            ),
+        )
 
-        ttk.Label(inner, text="均价识别窗口(ms)", width=14).grid(row=row_base + 3, column=0, sticky="w", pady=(6, 0))
         var_ocr_win = tk.IntVar(value=cur_ocr_win_ms)
-        sp_ocr_win = ttk.Spinbox(inner, from_=100, to=1500, increment=10, width=10, textvariable=var_ocr_win)
-        sp_ocr_win.grid(row=row_base + 3, column=1, sticky="w", pady=(6, 0))
-        try:
-            lbl_q_ocr_win = ttk.Label(inner, text="？", foreground="#666666", width=2)
-            lbl_q_ocr_win.grid(row=row_base + 3, column=2, sticky="w", padx=(4, 0))
-            self._attach_tooltip(
-                lbl_q_ocr_win,
+        sp_ocr_win = _make_row(
+            box_timing,
+            2,
+            "均价识别窗口(ms)",
+            lambda row: _build_spinbox(row, from_=100, to=1500, increment=10, textvariable=var_ocr_win),
+            tooltip=(
                 "单次均价 OCR 尝试的时间窗口。\n"
-                "建议 300–500ms，过大浪费时间，过小可能在 OCR 服务抖动时频繁失败。",
-            )
-        except Exception:
-            pass
+                "建议 300–500ms，过大浪费时间，过小可能在 OCR 服务抖动时频繁失败。"
+            ),
+        )
 
-        ttk.Label(inner, text="均价轮询步进(ms)", width=14).grid(row=row_base + 4, column=0, sticky="w", pady=(6, 0))
         var_ocr_step = tk.IntVar(value=cur_ocr_step_ms)
-        sp_ocr_step = ttk.Spinbox(inner, from_=5, to=100, increment=1, width=10, textvariable=var_ocr_step)
-        sp_ocr_step.grid(row=row_base + 4, column=1, sticky="w", pady=(6, 0))
-        try:
-            lbl_q_ocr_step = ttk.Label(inner, text="？", foreground="#666666", width=2)
-            lbl_q_ocr_step.grid(row=row_base + 4, column=2, sticky="w", padx=(4, 0))
-            self._attach_tooltip(
-                lbl_q_ocr_step,
+        sp_ocr_step = _make_row(
+            box_timing,
+            3,
+            "均价轮询步进(ms)",
+            lambda row: _build_spinbox(row, from_=5, to=100, increment=1, textvariable=var_ocr_step),
+            tooltip=(
                 "均价 OCR 窗口内部的调用间隔。\n"
-                "建议 10–20ms，根据 OCR 服务速度微调。",
-            )
+                "建议 10–20ms，根据 OCR 服务速度微调。"
+            ),
+        )
+
+        var_post_success = tk.IntVar(value=cur_post_success_ms)
+        sp_post_success = _make_row(
+            box_timing,
+            4,
+            "成功遮罩等待(ms)",
+            lambda row: _build_spinbox(row, from_=30, to=500, increment=5, textvariable=var_post_success),
+            tooltip=(
+                "普通模式下关闭购买成功遮罩后的固定等待时间。\n"
+                "快速连击模式主要使用上面的“快速连击间隔(ms)”。建议 60–120ms。"
+            ),
+        )
+
+        try:
+            ttk.Label(
+                box_timing,
+                text="这些时序参数会同步到全局 multi_snipe_tuning。",
+                foreground="#666666",
+                justify=tk.LEFT,
+            ).grid(row=5, column=0, sticky="w", padx=8, pady=(0, 8))
         except Exception:
             pass
 
-        ttk.Label(inner, text="成功遮罩等待(ms)", width=14).grid(row=row_base + 5, column=0, sticky="w", pady=(6, 0))
-        var_post_success = tk.IntVar(value=cur_post_success_ms)
-        sp_post_success = ttk.Spinbox(inner, from_=30, to=500, increment=5, width=10, textvariable=var_post_success)
-        sp_post_success.grid(row=row_base + 5, column=1, sticky="w", pady=(6, 0))
         try:
-            lbl_q_post_success = ttk.Label(inner, text="？", foreground="#666666", width=2)
-            lbl_q_post_success.grid(row=row_base + 5, column=2, sticky="w", padx=(4, 0))
-            self._attach_tooltip(
-                lbl_q_post_success,
-                "普通模式下关闭购买成功遮罩后的固定等待时间。\n"
-                "快速连击模式主要使用上面的“快速连击间隔(ms)”。建议 60–120ms。",
-            )
+            sections.bind("<Configure>", _relayout_advanced_sections)
+            self.after_idle(_relayout_advanced_sections)
         except Exception:
-            pass
+            try:
+                _relayout_advanced_sections()
+            except Exception:
+                pass
 
         def _apply_delay_ms_from_widget() -> None:
             try:
@@ -669,16 +699,6 @@ class SingleFastBuyTab(BaseTab):
                 self.tasks_data.setdefault("step_delays", {})["default"] = float(val_ms) / 1000.0
             except Exception:
                 pass
-            self._save_tasks_data()
-
-        def _apply_restart_from_widget() -> None:
-            try:
-                val = int(var_restart.get())
-            except Exception:
-                return
-            if val <= 0:
-                val = 60
-            self.tasks_data["restart_every_min"] = int(val)
             self._save_tasks_data()
 
         def _apply_fast_chain_from_widget() -> None:
@@ -712,9 +732,9 @@ class SingleFastBuyTab(BaseTab):
         def _apply_timing_from_widget() -> None:
             """将购买结果与 OCR 时序参数写回 cfg.multi_snipe_tuning 并保存到配置文件。"""
             try:
-                cfg = dict(self.cfg)
+                cfg = dict(self.app.cfg)
             except Exception:
-                cfg = self.cfg
+                cfg = self.app.cfg
             tuning = cfg.get("multi_snipe_tuning") if isinstance(cfg.get("multi_snipe_tuning"), dict) else {}
             if not isinstance(tuning, dict):
                 tuning = {}
@@ -748,7 +768,11 @@ class SingleFastBuyTab(BaseTab):
                 from super_buyer.config import save_config  # type: ignore
                 save_config(cfg, paths=self.paths)
                 # 同步到内存态 cfg，避免重启前不一致
-                self.cfg = cfg
+                self.app.cfg = cfg
+                try:
+                    self.__dict__.pop("cfg", None)
+                except Exception:
+                    pass
             except Exception:
                 pass
 
@@ -762,11 +786,6 @@ class SingleFastBuyTab(BaseTab):
             sp.bind("<Return>", lambda _e=None: _apply_delay_ms_from_widget())
         except Exception:
             pass
-        try:
-            var_restart.trace_add("write", lambda *_: _apply_restart_from_widget())
-        except Exception:
-            pass
-
         # 快速连击参数的实时保存
         try:
             var_fast_mode.trace_add("write", lambda *_: _apply_fast_chain_from_widget())
@@ -780,98 +799,22 @@ class SingleFastBuyTab(BaseTab):
             var_fast_interval.trace_add("write", lambda *_: _apply_fast_chain_from_widget())
         except Exception:
             pass
+        try:
+            chk_fast.bind("<Return>", lambda _e=None: _apply_fast_chain_from_widget())
+        except Exception:
+            pass
 
         # 时序参数：在组件失焦或回车时保存（避免频繁写文件）
         try:
             for w in (sp_buy_timeout, sp_buy_step, sp_ocr_win, sp_ocr_step, sp_post_success):
                 w.bind("<FocusOut>", lambda _e=None: _apply_timing_from_widget())
                 w.bind("<Return>", lambda _e=None: _apply_timing_from_widget())
-            sp2.bind("<FocusOut>", lambda _e=None: _apply_restart_from_widget())
-            sp2.bind("<Return>", lambda _e=None: _apply_restart_from_widget())
         except Exception:
             pass
-
-    def _open_advanced_modal(self) -> None:
-        """打开高级配置弹窗。"""
-
-        existing = getattr(self, "_advanced_modal_top", None)
-        if existing is not None and existing.winfo_exists():
-            try:
-                existing.lift()
-                existing.focus_force()
-            except Exception:
-                pass
-            return
-
-        top = tk.Toplevel(self)
-        top.title("高级配置")
-        top.transient(self)
-        try:
-            self._place_modal(top, 520, 520)
-        except Exception:
-            try:
-                top.geometry("520x520")
-            except Exception:
-                pass
-        try:
-            top.grab_set()
-        except Exception:
-            pass
-        self._advanced_modal_top = top
-
-        def _on_close() -> None:
-            cur = getattr(self, "_advanced_modal_top", None)
-            if cur is not top:
-                return
-            self._advanced_modal_top = None
-            try:
-                top.destroy()
-            except Exception:
-                pass
-
-        def _on_destroy(event) -> None:
-            if event.widget is top:
-                self._advanced_modal_top = None
-
-        top.protocol("WM_DELETE_WINDOW", _on_close)
-        top.bind("<Destroy>", _on_destroy)
-
-        frm = ttk.Frame(top)
-        frm.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
-
-        # 构建高级配置内容
-        self._build_step_delay_panel(frm)
-
-        bf = ttk.Frame(top)
-        bf.pack(fill=tk.X, padx=8, pady=(0, 8))
-        ttk.Button(bf, text="关闭", command=_on_close).pack(side=tk.RIGHT)
 
     # ---------- 执行控制与日志 ----------
     def _append_exec_log(self, s: str) -> None:
-        try:
-            import threading as _th
-            if _th.current_thread() is not _th.main_thread():
-                self.after(0, self._append_exec_log, s)
-                return
-        except Exception:
-            pass
-        try:
-            lvl = self._parse_log_level(s)
-            target_lvl = self.exec_log_level_var.get() if isinstance(self.exec_log_level_var, tk.StringVar) else "info"
-            if self._level_value(lvl) < self._level_value(target_lvl):
-                return
-        except Exception:
-            pass
-        log_widget = self.exec_txt
-        if log_widget is None:
-            return
-        with self._exec_log_lock:
-            try:
-                log_widget.configure(state=tk.NORMAL)
-                log_widget.insert(tk.END, s + "\n")
-                log_widget.see(tk.END)
-            finally:
-                log_widget.configure(state=tk.DISABLED)
+        self._append_runtime_log("exec", s, widget=self.exec_txt, lock=self._exec_log_lock)
 
     def _exec_is_running(self) -> bool:
         r = getattr(self, "_runner", None)
@@ -932,13 +875,6 @@ class SingleFastBuyTab(BaseTab):
             self._save_tasks_data()
         except Exception:
             pass
-        if self.exec_txt is not None:
-            try:
-                self.exec_txt.configure(state=tk.NORMAL)
-                self.exec_txt.delete("1.0", tk.END)
-                self.exec_txt.configure(state=tk.DISABLED)
-            except Exception:
-                pass
         self._runner = TaskRunner(
             tasks_data=dict(self.tasks_data),
             cfg_path=self.config_path,
@@ -947,11 +883,6 @@ class SingleFastBuyTab(BaseTab):
             on_log=self._append_exec_log,
             on_task_update=self._on_task_exec_update,
         )
-        try:
-            if isinstance(self.exec_log_level_var, tk.StringVar):
-                self._runner.set_log_level(self.exec_log_level_var.get())
-        except Exception:
-            pass
         self._append_exec_log("【%s】【全局】【-】：开始执行" % time.strftime("%H:%M:%S"))
         self._runner.start()
         self._update_exec_controls()
@@ -1028,20 +959,121 @@ class SingleFastBuyTab(BaseTab):
         var_s1 = tk.StringVar(value=(f"{s1:02d}" if ts_raw else ""))
         var_h2 = tk.StringVar(value=(f"{h2:02d}" if te_raw else ""))
         var_s2 = tk.StringVar(value=(f"{s2:02d}" if te_raw else ""))
+        mode = str(self.tasks_data.get("task_mode", "time"))
 
-        # Row 0: enable checkbox occupies its own line
-        row_enable = ttk.Frame(card)
-        row_enable.pack(fill=tk.X, padx=8, pady=(6, 0))
-        chk = ttk.Checkbutton(row_enable, text="启用", variable=var_enabled, onvalue=1, offvalue=0)
+        def _safe_int(value: Any, default: int = 0) -> int:
+            try:
+                return int(value or 0)
+            except Exception:
+                return default
+
+        def _safe_float(value: Any, default: float = 0.0) -> float:
+            try:
+                return float(value or 0.0)
+            except Exception:
+                return default
+
+        def _safe_var_value(var: tk.Variable, default: Any = "") -> Any:
+            try:
+                return var.get()
+            except tk.TclError:
+                try:
+                    name = getattr(var, "_name", None) or str(var)
+                    return var._tk.globalgetvar(name)  # type: ignore[attr-defined]
+                except Exception:
+                    return default
+            except Exception:
+                return default
+
+        def _fmt_num(value: int) -> str:
+            try:
+                return f"{int(value):,}"
+            except Exception:
+                return str(value)
+
+        def _fmt_pct(value: Any) -> str:
+            num = _safe_float(value)
+            if float(num).is_integer():
+                return str(int(num))
+            return f"{num:.2f}".rstrip("0").rstrip(".")
+
+        def _price_summary(base_var: tk.Variable, prem_var: tk.Variable) -> str:
+            base = _safe_int(_safe_var_value(base_var))
+            prem = max(0.0, _safe_float(_safe_var_value(prem_var)))
+            if base <= 0:
+                return "未设置"
+            limit = base + int(round(base * prem / 100.0))
+            return f"{_fmt_num(base)}，浮动 {_fmt_pct(prem)}%，上限 {_fmt_num(limit)}"
+
+        def _time_text(hh_var: tk.StringVar, mm_var: tk.StringVar) -> str:
+            hh = str(_safe_var_value(hh_var) or "").strip()
+            mm = str(_safe_var_value(mm_var) or "").strip()
+            if hh == "" or mm == "":
+                return "--:--"
+            return f"{hh.zfill(2)}:{mm.zfill(2)}"
+
+        def _schedule_summary() -> str:
+            if mode == "round":
+                dur = max(1, _safe_int(_safe_var_value(var_duration), 10))
+                return f"轮流执行，每次运行 {dur} 分钟"
+            start = _time_text(var_h1, var_s1)
+            end = _time_text(var_h2, var_s2)
+            if start == "--:--" or end == "--:--":
+                return "按时间区间执行，开始/结束时间待设置"
+            return f"按时间区间执行：{start} - {end}"
+
+        def _binding_summary() -> str:
+            if str(_safe_var_value(var_item_id) or "").strip():
+                return "已绑定物品库商品"
+            return "请选择物品库中的商品，保存时必须绑定 item_id"
+
+        var_title = tk.StringVar()
+        var_item_display = tk.StringVar()
+        var_target_display = tk.StringVar()
+        var_normal_summary = tk.StringVar()
+        var_restock_summary = tk.StringVar()
+        var_schedule_display = tk.StringVar()
+        var_binding_display = tk.StringVar()
+        var_price_hint = tk.StringVar()
+
+        def _refresh_card_texts(*_args) -> None:
+            name = str(_safe_var_value(var_item_name) or "").strip()
+            item_text = name or "未选择商品"
+            var_title.set(f"商品：{item_text}")
+            var_item_display.set(item_text)
+            var_target_display.set(f"{_safe_int(_safe_var_value(var_target))} 个")
+            var_normal_summary.set(_price_summary(var_thr, var_prem))
+            var_restock_summary.set(_price_summary(var_restock, var_rprem))
+            var_schedule_display.set(_schedule_summary())
+            var_binding_display.set(_binding_summary())
+            var_price_hint.set(
+                "普通购买：%s\n补货模式：%s"
+                % (_price_summary(var_thr, var_prem), _price_summary(var_restock, var_rprem))
+            )
+
+        _refresh_card_texts()
+        for _var in (var_item_name, var_item_id, var_thr, var_prem, var_restock, var_rprem, var_target, var_h1, var_s1, var_h2, var_s2, var_duration):
+            try:
+                _var.trace_add("write", lambda *_args: _refresh_card_texts())
+            except Exception:
+                pass
+
+        try:
+            order_num = (int(it.get("order", idx if idx is not None else 0)) if isinstance(it, dict) else (idx or 0)) + 1
+        except Exception:
+            order_num = (idx or 0) + 1
+
+        row_header = ttk.Frame(card)
+        row_header.pack(fill=tk.X, padx=8, pady=(8, 4))
+        chk = ttk.Checkbutton(row_header, text="启用", variable=var_enabled, onvalue=1, offvalue=0)
         try:
             chk.pack(side=tk.LEFT)
         except Exception:
             pass
-        # 当非编辑模式下，勾选/取消“启用”时立刻持久化，避免状态在刷新或重启后丢失
         if not editable:
             def _on_toggle_enable_immediate() -> None:
                 try:
-                    it["enabled"] = bool(int(var_enabled.get()) != 0)
+                    it["enabled"] = bool(_safe_int(_safe_var_value(var_enabled), 0) != 0)
                     self._save_tasks_data()
                 except Exception:
                     pass
@@ -1049,126 +1081,156 @@ class SingleFastBuyTab(BaseTab):
                 chk.configure(command=_on_toggle_enable_immediate)
             except Exception:
                 pass
-        # Show order if available
-        try:
-            order_num = (int(it.get("order", idx if idx is not None else 0)) if isinstance(it, dict) else (idx or 0)) + 1
-        except Exception:
-            order_num = (idx or 0) + 1
-        ttk.Label(row_enable, text=f"顺序：{order_num}").pack(side=tk.LEFT, padx=(12,0))
+        ttk.Label(row_header, text=f"顺序：{order_num}").pack(side=tk.LEFT, padx=(12, 0))
+        ttk.Label(row_header, textvariable=var_title).pack(side=tk.LEFT, padx=(12, 0))
+        ttk.Label(
+            row_header,
+            text=("模式：轮流执行" if mode == "round" else "模式：按时间区间"),
+            foreground="#666666",
+        ).pack(side=tk.RIGHT)
 
-        # Row 1: semantic sentence with inline inputs (responsive flow layout)
-        row = ttk.Frame(card)
-        row.pack(fill=tk.X, padx=8, pady=(2, 2))
-        widgets: list[tk.Widget] = []
-        widgets.append(ttk.Label(row, text="：购买物品："))
-        lbl_name = ttk.Label(row, textvariable=var_item_name, width=18)
-        widgets.append(lbl_name)
-        btn_pick = ttk.Button(row, text="选择…", width=8, command=lambda: self._open_goods_picker(lambda g: (var_item_name.set(str(g.get('name',''))), var_item_id.set(str(g.get('id',''))))))
-        widgets.append(btn_pick)
-        widgets.append(ttk.Label(row, text="，小于"))
-        ent_thr = ttk.Entry(row, textvariable=var_thr, width=8)
-        widgets.append(ent_thr)
-        lbl_fast = ttk.Label(row, text="的时候进行快速购买")
-        widgets.append(lbl_fast)
-        self._attach_tooltip(lbl_fast, "价格<=阈值时直接购买（默认数量，不调数量）")
-        widgets.append(ttk.Label(row, text="，允许价格浮动"))
-        ent_prem = ttk.Entry(row, textvariable=var_prem, width=5)
-        widgets.append(ent_prem)
-        widgets.append(ttk.Label(row, text="% ，小于"))
-        ent_rest = ttk.Entry(row, textvariable=var_restock, width=8)
-        widgets.append(ent_rest)
-        widgets.append(ttk.Label(row, text="的时候启用补货模式（自动点击Max买满），允许补货价浮动"))
-        ent_rprem = ttk.Entry(row, textvariable=var_rprem, width=5)
-        widgets.append(ent_rprem)
-        widgets.append(ttk.Label(row, text="% ，"))
-        widgets.append(ttk.Label(row, text="一共购买"))
-        ent_target = ttk.Entry(row, textvariable=var_target, width=8)
-        widgets.append(ent_target)
-        widgets.append(ttk.Label(row, text="个，"))
-
-        # Mode-specific fields
-        mode = str(self.tasks_data.get("task_mode", "time"))
-        ent_dur = None
+        ent_item_name = ent_thr = ent_prem = ent_rest = ent_rprem = ent_target = None
+        btn_pick = ent_dur = None
         sp_h1 = sp_s1 = sp_h2 = sp_s2 = None
-        if mode == "round":
-            widgets.append(ttk.Label(row, text="执行时长(分钟)"))
-            try:
-                ent_dur = ttk.Spinbox(row, from_=1, to=1440, increment=1, width=6, textvariable=var_duration)
-            except Exception:
-                ent_dur = tk.Spinbox(row, from_=1, to=1440, increment=1, width=6, textvariable=var_duration)
-            widgets.append(ent_dur)
-        else:
-            widgets.append(ttk.Label(row, text="在"))
-            # Time start/end HH:MM via read-only comboboxes
-            hours_vals = [f"{i:02d}" for i in range(24)]
-            mins_vals = [f"{i:02d}" for i in range(60)]
-            try:
-                sp_h1 = ttk.Combobox(row, width=3, values=hours_vals, textvariable=var_h1, state="readonly")
-            except Exception:
-                sp_h1 = ttk.Entry(row, width=3, textvariable=var_h1)
-            widgets.append(sp_h1)
-            colon1 = ttk.Label(row, text=":")
-            widgets.append(colon1)
-            try:
-                sp_s1 = ttk.Combobox(row, width=3, values=mins_vals, textvariable=var_s1, state="readonly")
-            except Exception:
-                sp_s1 = ttk.Entry(row, width=3, textvariable=var_s1)
-            widgets.append(sp_s1)
-            widgets.append(ttk.Label(row, text="到"))
-            try:
-                sp_h2 = ttk.Combobox(row, width=3, values=hours_vals, textvariable=var_h2, state="readonly")
-            except Exception:
-                sp_h2 = ttk.Entry(row, width=3, textvariable=var_h2)
-            widgets.append(sp_h2)
-            colon2 = ttk.Label(row, text=":")
-            widgets.append(colon2)
-            try:
-                sp_s2 = ttk.Combobox(row, width=3, values=mins_vals, textvariable=var_s2, state="readonly")
-            except Exception:
-                sp_s2 = ttk.Entry(row, width=3, textvariable=var_s2)
-            widgets.append(sp_s2)
-            widgets.append(ttk.Label(row, text="启动（时间）"))
-        # 价格浮动预览（悬浮提示）：展示阈值/补货价在溢价后对应的上限值
-        def _fmt(n: int) -> str:
-            try:
-                return f"{int(n):,}"
-            except Exception:
-                return str(n)
-        def _preview_text() -> str:
-            try:
-                thr = int(var_thr.get() or 0)
-            except Exception:
-                thr = 0
-            try:
-                prem = float(var_prem.get() or 0.0)
-            except Exception:
-                prem = 0.0
-            try:
-                rs = int(var_restock.get() or 0)
-            except Exception:
-                rs = 0
-            try:
-                rp = float(var_rprem.get() or 0.0)
-            except Exception:
-                rp = 0.0
-            lim_n = thr + int(round(thr * max(0.0, prem) / 100.0)) if thr > 0 else 0
-            lim_r = rs + int(round(rs * max(0.0, rp) / 100.0)) if rs > 0 else 0
-            parts: list[str] = []
-            if thr > 0:
-                parts.append(f"普通：阈值 {_fmt(thr)} → 上限 {_fmt(lim_n)} (+{int(prem)}%)")
-            if rs > 0:
-                parts.append(f"补货：补货价 {_fmt(rs)} → 上限 {_fmt(lim_r)} (+{int(rp)}%)")
-            return "\n".join(parts) if parts else "未设置阈值/补货价"
-        try:
-            self._attach_tooltip(ent_thr, _preview_text)
-            self._attach_tooltip(ent_prem, _preview_text)
-            self._attach_tooltip(ent_rest, _preview_text)
-            self._attach_tooltip(ent_rprem, _preview_text)
-        except Exception:
-            pass
 
-        # Apply responsive flow layout
-        self._flow_layout(row, widgets, padx=4, pady=2)
+        def _pick_goods() -> None:
+            self._open_goods_picker(
+                lambda g: (
+                    var_item_name.set(str(g.get("name", ""))),
+                    var_item_id.set(str(g.get("id", ""))),
+                )
+            )
+
+        if editable:
+            box_basic = ttk.LabelFrame(card, text="基本信息")
+            box_basic.pack(fill=tk.X, padx=8, pady=(0, 6))
+            try:
+                box_basic.columnconfigure(1, weight=1)
+            except Exception:
+                pass
+            ttk.Label(box_basic, text="商品").grid(row=0, column=0, sticky="e", padx=6, pady=6)
+            ent_item_name = ttk.Entry(box_basic, textvariable=var_item_name, state="readonly")
+            ent_item_name.grid(row=0, column=1, sticky="we", padx=6, pady=6)
+            btn_pick = ttk.Button(box_basic, text="选择…", width=10, command=_pick_goods)
+            btn_pick.grid(row=0, column=2, padx=(0, 6), pady=6)
+            ttk.Label(box_basic, text="绑定状态").grid(row=1, column=0, sticky="ne", padx=6, pady=(0, 6))
+            ttk.Label(
+                box_basic,
+                textvariable=var_binding_display,
+                foreground="#666666",
+                justify=tk.LEFT,
+            ).grid(row=1, column=1, columnspan=2, sticky="w", padx=6, pady=(0, 6))
+
+            box_price = ttk.LabelFrame(card, text="价格与目标")
+            box_price.pack(fill=tk.X, padx=8, pady=(0, 6))
+            ttk.Label(box_price, text="普通阈值").grid(row=0, column=0, sticky="e", padx=6, pady=6)
+            ent_thr = ttk.Entry(box_price, textvariable=var_thr, width=10)
+            ent_thr.grid(row=0, column=1, sticky="w", padx=6, pady=6)
+            ttk.Label(box_price, text="普通浮动(%)").grid(row=0, column=2, sticky="e", padx=6, pady=6)
+            ent_prem = ttk.Entry(box_price, textvariable=var_prem, width=8)
+            ent_prem.grid(row=0, column=3, sticky="w", padx=6, pady=6)
+            ttk.Label(box_price, text="目标总数").grid(row=0, column=4, sticky="e", padx=6, pady=6)
+            ent_target = ttk.Entry(box_price, textvariable=var_target, width=10)
+            ent_target.grid(row=0, column=5, sticky="w", padx=6, pady=6)
+            ttk.Label(box_price, text="补货阈值").grid(row=1, column=0, sticky="e", padx=6, pady=(0, 6))
+            ent_rest = ttk.Entry(box_price, textvariable=var_restock, width=10)
+            ent_rest.grid(row=1, column=1, sticky="w", padx=6, pady=(0, 6))
+            ttk.Label(box_price, text="补货浮动(%)").grid(row=1, column=2, sticky="e", padx=6, pady=(0, 6))
+            ent_rprem = ttk.Entry(box_price, textvariable=var_rprem, width=8)
+            ent_rprem.grid(row=1, column=3, sticky="w", padx=6, pady=(0, 6))
+            ttk.Label(
+                box_price,
+                textvariable=var_price_hint,
+                foreground="#666666",
+                justify=tk.LEFT,
+            ).grid(row=2, column=0, columnspan=6, sticky="w", padx=6, pady=(0, 6))
+
+            box_exec = ttk.LabelFrame(card, text="执行设置")
+            box_exec.pack(fill=tk.X, padx=8, pady=(0, 4))
+            if mode == "round":
+                ttk.Label(box_exec, text="执行时长(分钟)").grid(row=0, column=0, sticky="e", padx=6, pady=6)
+                try:
+                    ent_dur = ttk.Spinbox(box_exec, from_=1, to=1440, increment=1, width=8, textvariable=var_duration)
+                except Exception:
+                    ent_dur = tk.Spinbox(box_exec, from_=1, to=1440, increment=1, width=8, textvariable=var_duration)
+                ent_dur.grid(row=0, column=1, sticky="w", padx=6, pady=6)
+                ttk.Label(box_exec, textvariable=var_schedule_display, foreground="#666666").grid(
+                    row=1, column=0, columnspan=2, sticky="w", padx=6, pady=(0, 6)
+                )
+            else:
+                hours_vals = [f"{i:02d}" for i in range(24)]
+                mins_vals = [f"{i:02d}" for i in range(60)]
+                ttk.Label(box_exec, text="开始时间").grid(row=0, column=0, sticky="e", padx=6, pady=6)
+                frm_start = ttk.Frame(box_exec)
+                frm_start.grid(row=0, column=1, sticky="w", padx=6, pady=6)
+                try:
+                    sp_h1 = ttk.Combobox(frm_start, width=3, values=hours_vals, textvariable=var_h1, state="readonly")
+                except Exception:
+                    sp_h1 = ttk.Entry(frm_start, width=3, textvariable=var_h1)
+                sp_h1.pack(side=tk.LEFT)
+                ttk.Label(frm_start, text=":").pack(side=tk.LEFT, padx=2)
+                try:
+                    sp_s1 = ttk.Combobox(frm_start, width=3, values=mins_vals, textvariable=var_s1, state="readonly")
+                except Exception:
+                    sp_s1 = ttk.Entry(frm_start, width=3, textvariable=var_s1)
+                sp_s1.pack(side=tk.LEFT)
+                ttk.Label(box_exec, text="结束时间").grid(row=0, column=2, sticky="e", padx=6, pady=6)
+                frm_end = ttk.Frame(box_exec)
+                frm_end.grid(row=0, column=3, sticky="w", padx=6, pady=6)
+                try:
+                    sp_h2 = ttk.Combobox(frm_end, width=3, values=hours_vals, textvariable=var_h2, state="readonly")
+                except Exception:
+                    sp_h2 = ttk.Entry(frm_end, width=3, textvariable=var_h2)
+                sp_h2.pack(side=tk.LEFT)
+                ttk.Label(frm_end, text=":").pack(side=tk.LEFT, padx=2)
+                try:
+                    sp_s2 = ttk.Combobox(frm_end, width=3, values=mins_vals, textvariable=var_s2, state="readonly")
+                except Exception:
+                    sp_s2 = ttk.Entry(frm_end, width=3, textvariable=var_s2)
+                sp_s2.pack(side=tk.LEFT)
+                ttk.Label(box_exec, textvariable=var_schedule_display, foreground="#666666").grid(
+                    row=1, column=0, columnspan=4, sticky="w", padx=6, pady=(0, 6)
+                )
+
+            try:
+                if ent_thr is not None:
+                    self._attach_tooltip(ent_thr, "价格 <= 普通阈值时直接购买（默认数量，不调数量）。")
+                if ent_prem is not None:
+                    self._attach_tooltip(ent_prem, lambda: "普通购买允许上浮百分比。\n%s" % var_price_hint.get())
+                if ent_rest is not None:
+                    self._attach_tooltip(ent_rest, lambda: "价格 <= 补货阈值时启用补货模式（自动点击 Max）。\n%s" % var_price_hint.get())
+                if ent_rprem is not None:
+                    self._attach_tooltip(ent_rprem, lambda: "补货模式允许上浮百分比。\n%s" % var_price_hint.get())
+            except Exception:
+                pass
+        else:
+            summary = ttk.Frame(card)
+            summary.pack(fill=tk.X, padx=8, pady=(0, 4))
+            try:
+                summary.columnconfigure(1, weight=1)
+                summary.columnconfigure(3, weight=1)
+            except Exception:
+                pass
+            ttk.Label(summary, text="商品").grid(row=0, column=0, sticky="e", padx=6, pady=4)
+            ttk.Label(summary, textvariable=var_item_display).grid(row=0, column=1, sticky="w", padx=6, pady=4)
+            ttk.Label(summary, text="目标").grid(row=0, column=2, sticky="e", padx=6, pady=4)
+            ttk.Label(summary, textvariable=var_target_display).grid(row=0, column=3, sticky="w", padx=6, pady=4)
+            ttk.Label(summary, text="普通购买").grid(row=1, column=0, sticky="ne", padx=6, pady=4)
+            ttk.Label(summary, textvariable=var_normal_summary, justify=tk.LEFT).grid(
+                row=1, column=1, sticky="w", padx=6, pady=4
+            )
+            ttk.Label(summary, text="补货模式").grid(row=1, column=2, sticky="ne", padx=6, pady=4)
+            ttk.Label(summary, textvariable=var_restock_summary, justify=tk.LEFT).grid(
+                row=1, column=3, sticky="w", padx=6, pady=4
+            )
+            ttk.Label(summary, text="执行设置").grid(row=2, column=0, sticky="ne", padx=6, pady=4)
+            ttk.Label(summary, textvariable=var_schedule_display, justify=tk.LEFT).grid(
+                row=2, column=1, sticky="w", padx=6, pady=4
+            )
+            ttk.Label(summary, text="绑定状态").grid(row=2, column=2, sticky="ne", padx=6, pady=4)
+            ttk.Label(summary, textvariable=var_binding_display, foreground="#666666", justify=tk.LEFT).grid(
+                row=2, column=3, sticky="w", padx=6, pady=4
+            )
 
         # 进度行：展示 purchased/target，并提供清空按钮
         # 对草稿（idx 为 None）不显示
@@ -1183,7 +1245,7 @@ class SingleFastBuyTab(BaseTab):
                     cur_pur = 0
                 def _fmt_prog() -> str:
                     try:
-                        return f"进度：{cur_pur}/{int(var_target.get() or 0)}"
+                        return f"进度：{cur_pur}/{_safe_int(_safe_var_value(var_target), 0)}"
                     except Exception:
                         return f"进度：{cur_pur}/0"
                 var_prog = tk.StringVar(value=_fmt_prog())
@@ -1208,11 +1270,11 @@ class SingleFastBuyTab(BaseTab):
                             # 同时清空该物品的购买记录（需求变更：清空进度=清空历史）
                             try:
                                 from history_store import clear_purchase_history  # type: ignore
-                                _ = clear_purchase_history(str(var_item_id.get() or ""))
+                                _ = clear_purchase_history(str(_safe_var_value(var_item_id) or ""))
                             except Exception:
                                 pass
                             # 更新本地显示并重渲染以同步
-                            var_prog.set(f"进度：0/{int(var_target.get() or 0)}")
+                            var_prog.set(f"进度：0/{_safe_int(_safe_var_value(var_target), 0)}")
                             self._render_task_cards()
                     except Exception:
                         pass
@@ -1227,22 +1289,22 @@ class SingleFastBuyTab(BaseTab):
 
         def _save():
             # Validate minimal fields
-            name = (var_item_name.get() or "").strip()
+            name = str(_safe_var_value(var_item_name) or "").strip()
             if not name:
                 messagebox.showwarning("保存", "请先选择‘购买物品’。")
                 return
             # Compose record (time fields handled per mode below)
             rec: Dict[str, Any] = {
-                "enabled": bool(int(var_enabled.get()) != 0),
+                "enabled": bool(_safe_int(_safe_var_value(var_enabled), 0) != 0),
                 "item_name": name,
-                "item_id": (var_item_id.get() or ""),
-                "price_threshold": int(var_thr.get() or 0),
-                "price_premium_pct": float(var_prem.get() or 0),
-                "restock_price": int(var_restock.get() or 0),
+                "item_id": str(_safe_var_value(var_item_id) or ""),
+                "price_threshold": _safe_int(_safe_var_value(var_thr), 0),
+                "price_premium_pct": _safe_float(_safe_var_value(var_prem), 0.0),
+                "restock_price": _safe_int(_safe_var_value(var_restock), 0),
                 # 新增：补货模式的价格浮动百分比
-                "restock_premium_pct": float(var_rprem.get() or 0),
-                "target_total": int(var_target.get() or 0),
-                "duration_min": int(var_duration.get() or 10),
+                "restock_premium_pct": _safe_float(_safe_var_value(var_rprem), 0.0),
+                "target_total": _safe_int(_safe_var_value(var_target), 0),
+                "duration_min": _safe_int(_safe_var_value(var_duration), 10),
             }
             if not rec["item_id"]:
                 messagebox.showwarning("保存", "必须通过‘选择…’绑定 goods.json 的物品（缺少 item_id）。")
@@ -1251,10 +1313,10 @@ class SingleFastBuyTab(BaseTab):
             mode_now = str(self.tasks_data.get("task_mode", "time"))
             if mode_now == "time":
                 # Build and validate HH:MM inputs; both required
-                h1s = (var_h1.get() or "").strip()
-                m1s = (var_s1.get() or "").strip()
-                h2s = (var_h2.get() or "").strip()
-                m2s = (var_s2.get() or "").strip()
+                h1s = str(_safe_var_value(var_h1) or "").strip()
+                m1s = str(_safe_var_value(var_s1) or "").strip()
+                h2s = str(_safe_var_value(var_h2) or "").strip()
+                m2s = str(_safe_var_value(var_s2) or "").strip()
                 def _mk_hhmm(hs: str, ms: str) -> str | None:
                     try:
                         if hs == "" or ms == "":
@@ -1485,24 +1547,28 @@ class SingleFastBuyTab(BaseTab):
             ttk.Button(btns, text="上移", command=_move_up).pack(side=tk.LEFT)
             ttk.Button(btns, text="下移", command=_move_down).pack(side=tk.LEFT, padx=(6,0))
 
-        # Disable editing if not editable
-        if not editable:
-            # Disable appropriate fields depending on mode
-            mode_now = str(self.tasks_data.get("task_mode", "time"))
-            to_disable = [ent_thr, ent_prem, ent_rest, ent_target, btn_pick, ent_rprem]
-            if mode_now == "round":
-                if ent_dur is not None:
-                    to_disable.append(ent_dur)
-            else:
-                for w_ in (sp_h1, sp_s1, sp_h2, sp_s2):
-                    if w_ is not None:
-                        to_disable.append(w_)
-            for w in to_disable:
-                try:
-                    w.configure(state=tk.DISABLED)
-                except Exception:
-                    pass
-
         # Keep a strong reference to Tk variables to avoid GC issues (checkbox display)
-        # 保持 Tk 变量引用，新增 var_rprem
-        card._vars = (var_enabled, var_item_name, var_item_id, var_thr, var_prem, var_restock, var_rprem, var_target, var_h1, var_s1, var_h2, var_s2, var_duration)  # type: ignore
+        # 保持 Tk 变量引用，避免预览文本与复选框状态被回收
+        card._vars = (
+            var_enabled,
+            var_item_name,
+            var_item_id,
+            var_thr,
+            var_prem,
+            var_restock,
+            var_rprem,
+            var_target,
+            var_h1,
+            var_s1,
+            var_h2,
+            var_s2,
+            var_duration,
+            var_title,
+            var_item_display,
+            var_target_display,
+            var_normal_summary,
+            var_restock_summary,
+            var_schedule_display,
+            var_binding_display,
+            var_price_hint,
+        )  # type: ignore
