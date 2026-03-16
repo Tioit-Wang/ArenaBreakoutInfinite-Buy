@@ -2159,12 +2159,25 @@ class SinglePurchaseBuyerV2:
         goods: Goods,
         task: Dict[str, Any],
         purchased_so_far: int,
+        *,
+        initial_unit_price: Optional[int] = None,
     ) -> Tuple[int, bool]:
         item_disp = goods.name or goods.search_name or str(task.get("item_name", ""))
         target_total = int(task.get("target_total", 0) or 0)
         bought = 0
         # 上限计算
         thr, limit, prem, restock, restock_limit, restock_prem = self._resolve_price_limits(task)
+        fast_mode = bool(getattr(self, "_fast_chain_mode", False))
+        try:
+            fast_max = int(getattr(self, "_fast_chain_max", 10) or 10)
+        except Exception:
+            fast_max = 10
+        try:
+            fast_interval_sec = float(getattr(self, "_fast_chain_interval_ms", 35.0) or 35.0) / 1000.0
+        except Exception:
+            fast_interval_sec = 0.035
+        fast_interval_sec = max(0.03, fast_interval_sec)
+        burst_seed_price = int(initial_unit_price) if isinstance(initial_unit_price, int) and initial_unit_price > 0 else None
         # 会话准备：弹药 Max / 非弹药数量
         is_ammo = (goods.big_category or "").strip() == "弹药"
         used_max = False
@@ -2266,146 +2279,148 @@ class SinglePurchaseBuyerV2:
         # 循环直到退出
         while True:
             purchased_str = f"{purchased_so_far + bought}/{target_total}"
-            try:
-                thr_base = int(task.get("price_threshold", 0) or 0)
-            except Exception:
-                thr_base = 0
-            # 补货优先：补货循环以 restock 为基准，避免普通阈值过高导致识别过滤过严。
-            base = restock if restock > 0 else thr_base
-            step6_t0 = time.perf_counter()
-            unit_price = self._read_avg_price_with_rounds(
-                goods,
-                item_disp,
-                purchased_str,
-                expected_floor=base if base > 0 else None,
-                allow_bottom_fallback=False,
-            )
-            step6_ms = int((time.perf_counter() - step6_t0) * 1000.0)
-            if unit_price is None or unit_price <= 0:
-                # 识别轮连续失败（达到阈值），执行障碍清理逻辑并退出本次详情
-                self._log_step6(
-                    item_disp,
-                    purchased_str,
-                    step6_ms,
-                    "ocr_failed",
-                    unit_price=None,
-                    normal_limit=limit,
-                    restock_limit=restock_limit,
-                    reason="ocr_round_timeout",
-                )
-                self.step3_clear_obstacles(item_disp, purchased_str)
-                self._log_step_info_text(
+            use_seed_price = bool(fast_mode and fast_max > 1 and burst_seed_price is not None)
+            if use_seed_price:
+                unit_price = int(burst_seed_price or 0)
+                burst_seed_price = None
+                self._log_step_debug_text(
                     item_disp,
                     purchased_str,
                     STEP_6_NAME,
-                    phase="均价读取",
-                    message="平均价识别失败（补货，识别轮超时），已执行障碍清理",
+                    phase="阈值判定",
+                    message=f"沿用入口均价={unit_price} 直接启动补货连击",
                 )
-                self._set_cycle_meta(
-                    reason="ocr_round_timeout",
-                    step6_result="ocr_failed",
-                    step7_result="not_run",
-                    purchase_mode="restock",
-                    continue_loop=True,
-                    bought=bought,
-                )
-                return bought, True
-            # 价格合理性（半阈下限）校验 → 决定是否写入历史
-            legal, base_thr, floor_half = self._is_price_legal_for_history(int(unit_price), task)
-            if not legal:
-                self._log_step6(
+            else:
+                try:
+                    thr_base = int(task.get("price_threshold", 0) or 0)
+                except Exception:
+                    thr_base = 0
+                # 补货优先：补货循环以 restock 为基准，避免普通阈值过高导致识别过滤过严。
+                base = restock if restock > 0 else thr_base
+                step6_t0 = time.perf_counter()
+                unit_price = self._read_avg_price_with_rounds(
+                    goods,
                     item_disp,
                     purchased_str,
-                    step6_ms,
-                    "skip",
-                    unit_price=int(unit_price),
-                    normal_limit=limit,
-                    restock_limit=restock_limit,
-                    reason="below_sanity_floor",
+                    expected_floor=base if base > 0 else None,
+                    allow_bottom_fallback=False,
                 )
-                _ = self._close_detail_with_wait(goods)
-                self._log_info(
-                    item_disp,
-                    purchased_str,
-                    build_context_message(
+                step6_ms = int((time.perf_counter() - step6_t0) * 1000.0)
+                if unit_price is None or unit_price <= 0:
+                    # 识别轮连续失败（达到阈值），执行障碍清理逻辑并退出本次详情
+                    self._log_step6(
+                        item_disp,
+                        purchased_str,
+                        step6_ms,
+                        "ocr_failed",
+                        unit_price=None,
+                        normal_limit=limit,
+                        restock_limit=restock_limit,
+                        reason="ocr_round_timeout",
+                    )
+                    self.step3_clear_obstacles(item_disp, purchased_str)
+                    self._log_step_info_text(
+                        item_disp,
+                        purchased_str,
                         STEP_6_NAME,
-                        phase="阈值判定",
-                        message=(
-                            f"均价={int(unit_price)} 不满足下限>基准/2"
-                            f"（B={base_thr} 下限={floor_half}），以不符合价格阈值处理"
+                        phase="均价读取",
+                        message="平均价识别失败（补货，识别轮超时），已执行障碍清理",
+                    )
+                    self._set_cycle_meta(
+                        reason="ocr_round_timeout",
+                        step6_result="ocr_failed",
+                        step7_result="not_run",
+                        purchase_mode="restock",
+                        continue_loop=True,
+                        bought=bought,
+                    )
+                    return bought, True
+                # 价格合理性（半阈下限）校验 → 决定是否写入历史
+                legal, base_thr, floor_half = self._is_price_legal_for_history(int(unit_price), task)
+                if not legal:
+                    self._log_step6(
+                        item_disp,
+                        purchased_str,
+                        step6_ms,
+                        "skip",
+                        unit_price=int(unit_price),
+                        normal_limit=limit,
+                        restock_limit=restock_limit,
+                        reason="below_sanity_floor",
+                    )
+                    _ = self._close_detail_with_wait(goods)
+                    self._log_info(
+                        item_disp,
+                        purchased_str,
+                        build_context_message(
+                            STEP_6_NAME,
+                            phase="阈值判定",
+                            message=(
+                                f"均价={int(unit_price)} 不满足下限>基准/2"
+                                f"（B={base_thr} 下限={floor_half}），以不符合价格阈值处理"
+                            ),
                         ),
-                    ),
-                )
-                self._set_cycle_meta(
-                    reason="below_sanity_floor",
-                    step6_result="skip",
-                    step7_result="not_run",
-                    purchase_mode="restock",
-                    continue_loop=True,
-                    bought=bought,
-                )
-                return bought, True
-            # 合理：写入价格历史
-            try:
-                append_price(
-                    item_id=goods.id,
-                    item_name=goods.name or goods.search_name or item_disp,
-                    price=int(unit_price),
-                    category=(goods.big_category or "") or None,
-                    paths=self.history_paths,
-                )
-            except Exception:
-                pass
-            ok_restock = (restock > 0) and (unit_price <= restock_limit)
-            if not ok_restock:
+                    )
+                    self._set_cycle_meta(
+                        reason="below_sanity_floor",
+                        step6_result="skip",
+                        step7_result="not_run",
+                        purchase_mode="restock",
+                        continue_loop=True,
+                        bought=bought,
+                    )
+                    return bought, True
+                # 合理：写入价格历史
+                try:
+                    append_price(
+                        item_id=goods.id,
+                        item_name=goods.name or goods.search_name or item_disp,
+                        price=int(unit_price),
+                        category=(goods.big_category or "") or None,
+                        paths=self.history_paths,
+                    )
+                except Exception:
+                    pass
+                ok_restock = (restock > 0) and (unit_price <= restock_limit)
+                if not ok_restock:
+                    self._log_step6(
+                        item_disp,
+                        purchased_str,
+                        step6_ms,
+                        "skip",
+                        unit_price=int(unit_price),
+                        normal_limit=limit,
+                        restock_limit=restock_limit,
+                        reason="price_over_limit",
+                    )
+                    _ = self._close_detail_with_wait(goods)
+                    self._log_info(
+                        item_disp,
+                        purchased_str,
+                        build_context_message(
+                            STEP_6_NAME,
+                            phase="阈值判定",
+                            message=f"均价={unit_price} 超过补货上限≤{restock_limit}(+{int(restock_prem)}%)，结束补货",
+                        ),
+                    )
+                    self._set_cycle_meta(
+                        reason="price_over_limit",
+                        step6_result="skip",
+                        step7_result="not_run",
+                        purchase_mode="restock",
+                        continue_loop=True,
+                        bought=bought,
+                    )
+                    return bought, True
                 self._log_step6(
                     item_disp,
                     purchased_str,
                     step6_ms,
-                    "skip",
+                    "restock_buy",
                     unit_price=int(unit_price),
                     normal_limit=limit,
                     restock_limit=restock_limit,
-                    reason="price_over_limit",
                 )
-                _ = self._close_detail_with_wait(goods)
-                self._log_info(
-                    item_disp,
-                    purchased_str,
-                    build_context_message(
-                        STEP_6_NAME,
-                        phase="阈值判定",
-                        message=f"均价={unit_price} 超过补货上限≤{restock_limit}(+{int(restock_prem)}%)，结束补货",
-                    ),
-                )
-                self._set_cycle_meta(
-                    reason="price_over_limit",
-                    step6_result="skip",
-                    step7_result="not_run",
-                    purchase_mode="restock",
-                    continue_loop=True,
-                    bought=bought,
-                )
-                return bought, True
-            self._log_step6(
-                item_disp,
-                purchased_str,
-                step6_ms,
-                "restock_buy",
-                unit_price=int(unit_price),
-                normal_limit=limit,
-                restock_limit=restock_limit,
-            )
-            fast_mode = bool(getattr(self, "_fast_chain_mode", False))
-            try:
-                fast_max = int(getattr(self, "_fast_chain_max", 10) or 10)
-            except Exception:
-                fast_max = 10
-            try:
-                fast_interval_sec = float(getattr(self, "_fast_chain_interval_ms", 35.0) or 35.0) / 1000.0
-            except Exception:
-                fast_interval_sec = 0.035
-            fast_interval_sec = max(0.03, fast_interval_sec)
             step7_t0 = time.perf_counter()
             b = (self._first_detail_buttons.get(goods.id, {}) or {}).get("btn_buy") or self.screen.locate("btn_buy", timeout=0.4)
             if b is None:
@@ -3007,7 +3022,12 @@ class SinglePurchaseBuyerV2:
                     phase="阈值判定",
                     message=f"决策=补货 | unit={unit_price} limit={limit} restock_limit={restock_limit}",
                 )
-                got_more, cont = self._restock_fast_loop(goods, task, purchased_so_far + bought)
+                got_more, cont = self._restock_fast_loop(
+                    goods,
+                    task,
+                    purchased_so_far + bought,
+                    initial_unit_price=int(unit_price),
+                )
                 bought += int(got_more)
                 return bought, cont
             if ok_normal:
