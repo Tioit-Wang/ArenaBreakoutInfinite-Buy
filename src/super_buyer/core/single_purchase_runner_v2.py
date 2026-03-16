@@ -198,6 +198,8 @@ class SinglePurchaseBuyerV2:
         self._first_detail_cached: Dict[str, bool] = {}
         self._first_detail_buttons: Dict[str, Dict[str, Tuple[int, int, int, int]]] = {}
         self._detail_ui_cache: Dict[str, Tuple[int, int, int, int]] = {}
+        self._global_ui_cache: Dict[str, Tuple[int, int, int, int]] = {}
+        self._goods_list_region_cache: Optional[Tuple[int, int, int, int]] = None
 
         # OCR 连败标记（供外层统计参考）
         self._last_avg_ocr_ok: bool = True
@@ -328,7 +330,7 @@ class SinglePurchaseBuyerV2:
 
     def _detect_scene(self, timeout: float = 0.1) -> str:
         try:
-            if self.screen.locate("buy_ok", timeout=max(0.0, float(timeout))) is not None:
+            if self._get_global_ui_box("buy_ok", timeout=max(0.0, float(timeout))) is not None:
                 return "success_overlay"
         except Exception:
             pass
@@ -340,12 +342,12 @@ class SinglePurchaseBuyerV2:
         except Exception:
             pass
         try:
-            if self.screen.locate("home_indicator", timeout=max(0.0, float(timeout))) is not None:
+            if self._get_global_ui_box("home_indicator", timeout=max(0.0, float(timeout))) is not None:
                 return "home"
         except Exception:
             pass
         try:
-            if self.screen.locate("market_indicator", timeout=max(0.0, float(timeout))) is not None:
+            if self._get_global_ui_box("market_indicator", timeout=max(0.0, float(timeout))) is not None:
                 return "market"
         except Exception:
             pass
@@ -703,6 +705,15 @@ class SinglePurchaseBuyerV2:
             pass
         return norm
 
+    def _remember_global_ui_box(
+        self,
+        key: str,
+        box: Tuple[int, int, int, int],
+    ) -> Tuple[int, int, int, int]:
+        norm = tuple(int(v) for v in box)
+        self._global_ui_cache[key] = norm
+        return norm
+
     def _expand_region(
         self,
         box: Tuple[int, int, int, int],
@@ -718,6 +729,58 @@ class SinglePurchaseBuyerV2:
         x1 = min(int(sw), left + width + int(margin))
         y1 = min(int(sh), top + height + int(margin))
         return (int(x0), int(y0), max(1, int(x1 - x0)), max(1, int(y1 - y0)))
+
+    def _merge_regions(
+        self,
+        region_a: Optional[Tuple[int, int, int, int]],
+        region_b: Optional[Tuple[int, int, int, int]],
+    ) -> Optional[Tuple[int, int, int, int]]:
+        if region_a is None:
+            return tuple(int(v) for v in region_b) if region_b is not None else None
+        if region_b is None:
+            return tuple(int(v) for v in region_a)
+        ax, ay, aw, ah = [int(v) for v in region_a]
+        bx, by, bw, bh = [int(v) for v in region_b]
+        x0 = min(ax, bx)
+        y0 = min(ay, by)
+        x1 = max(ax + aw, bx + bw)
+        y1 = max(ay + ah, by + bh)
+        return (x0, y0, max(1, x1 - x0), max(1, y1 - y0))
+
+    def _locate_global_ui_near_cache(
+        self,
+        key: str,
+        *,
+        timeout: float = 0.0,
+    ) -> Optional[Tuple[int, int, int, int]]:
+        box = self._global_ui_cache.get(key)
+        if box is None:
+            return None
+        region = self._expand_region(
+            box,
+            margin=max(20, min(160, max(int(box[2]), int(box[3]), 40))),
+        )
+        hit = self.screen.locate(key, region=region, timeout=timeout)
+        if hit is not None:
+            return self._remember_global_ui_box(key, hit)
+        return None
+
+    def _get_global_ui_box(
+        self,
+        key: str,
+        *,
+        timeout: float = 0.2,
+        allow_global: bool = True,
+    ) -> Optional[Tuple[int, int, int, int]]:
+        hit = self._locate_global_ui_near_cache(key, timeout=0.0)
+        if hit is not None:
+            return hit
+        if not allow_global:
+            return None
+        hit = self.screen.locate(key, timeout=timeout)
+        if hit is not None:
+            return self._remember_global_ui_box(key, hit)
+        return None
 
     def _locate_detail_btn_near_cache(
         self,
@@ -851,7 +914,7 @@ class SinglePurchaseBuyerV2:
         return False
 
     def _navigate_and_wait(self, key: str) -> bool:
-        box = self.screen.locate(key, timeout=2.0)
+        box = self._get_global_ui_box(key, timeout=2.0)
         if box is None:
             return False
         self.screen.click_center(box)
@@ -861,27 +924,28 @@ class SinglePurchaseBuyerV2:
     # -------------------- 步骤 3：障碍清理 --------------------
     def step3_clear_obstacles(self, item: str = "全局", purchased: str = "-") -> None:
         t0 = time.perf_counter()
-        # 同时命中 购买/关闭 → 关闭详情
-        b = self.screen.locate("btn_buy", timeout=0.1)
-        c = self.screen.locate("btn_close", timeout=0.1)
+        scene_before = self._detect_scene(timeout=0.03)
+        b = None
+        c = None
         ok = None
         action = "noop"
-        scene_before = "detail" if (b is not None and c is not None) else self._detect_scene(timeout=0.05)
-        if (b is not None) and (c is not None):
+        if scene_before == "detail":
+            b = self.screen.locate("btn_buy", timeout=0.0)
+            c = self.screen.locate("btn_close", timeout=0.0)
+        if scene_before == "detail" and (c is not None):
             self.screen.click_center(c)
             safe_sleep(self.timings.post_close_detail)
             action = "close_detail"
-        else:
+        elif scene_before == "success_overlay":
             # 命中购买成功遮罩 → 关闭遮罩 → 再尝试关闭详情
-            ok = self.screen.locate("buy_ok", timeout=0.1)
-            if ok is not None:
-                self._dismiss_success_overlay_with_wait(item, purchased, goods=None)
-                action = "dismiss_overlay"
-                c2 = self.screen.locate("btn_close", timeout=0.5)
-                if c2 is not None:
-                    self.screen.click_center(c2)
-                    safe_sleep(self.timings.post_close_detail)
-                    action = "dismiss_overlay_close_detail"
+            ok = self._get_global_ui_box("buy_ok", timeout=0.0)
+            self._dismiss_success_overlay_with_wait(item, purchased, goods=None)
+            action = "dismiss_overlay"
+            c2 = self.screen.locate("btn_close", timeout=0.08)
+            if c2 is not None:
+                self.screen.click_center(c2)
+                safe_sleep(self.timings.post_close_detail)
+                action = "dismiss_overlay_close_detail"
         scene_after = self._detect_scene(timeout=0.05)
         self._log_step(
             item,
@@ -892,7 +956,7 @@ class SinglePurchaseBuyerV2:
             {
                 "scene_before": scene_before,
                 "scene_after": scene_after,
-                "detail_open": (b is not None and c is not None),
+                "detail_open": scene_before == "detail",
                 "buy_ok": ok is not None,
                 "action": action,
             },
@@ -900,27 +964,34 @@ class SinglePurchaseBuyerV2:
 
     # -------------------- 步骤 4：搜索与列表定位 --------------------
     def _type_and_search(self, query: str) -> bool:
-        sbox = self.screen.locate("input_search", timeout=2.0)
+        sbox = self._get_global_ui_box("input_search", timeout=2.0)
         if sbox is None:
             return False
         self.screen.click_center(sbox)
         safe_sleep(0.03)
         self.screen.type_text(query or "", clear_first=True)
         safe_sleep(0.03)
-        btn = self.screen.locate("btn_search", timeout=1.0)
+        btn = self._get_global_ui_box("btn_search", timeout=1.0)
         if btn is None:
             return False
         self.screen.click_center(btn)
         safe_sleep(0.02)
         return True
 
-    def _pg_locate_image(self, path: str, confidence: float, timeout: float = 2.5) -> Optional[Tuple[int, int, int, int]]:
+    def _pg_locate_image(
+        self,
+        path: str,
+        confidence: float,
+        timeout: float = 2.5,
+        *,
+        region: Optional[Tuple[int, int, int, int]] = None,
+    ) -> Optional[Tuple[int, int, int, int]]:
         end = time.time() + max(0.0, timeout)
         while time.time() < end:
             if self._stop_requested():
                 return None
             try:
-                box = self._pg.locateOnScreen(path, confidence=float(confidence))
+                box = self._pg.locateOnScreen(path, confidence=float(confidence), region=region)
                 if box is not None:
                     return (int(box.left), int(box.top), int(box.width), int(box.height))
             except Exception:
@@ -928,19 +999,39 @@ class SinglePurchaseBuyerV2:
             safe_sleep(self.timings.step_delay)
         return None
 
+    def _remember_goods_hit(
+        self,
+        goods: Goods,
+        box: Tuple[int, int, int, int],
+    ) -> None:
+        norm = tuple(int(v) for v in box)
+        self._pos_cache[goods.id] = norm
+        list_region = self._expand_region(norm, margin=420)
+        self._goods_list_region_cache = self._merge_regions(self._goods_list_region_cache, list_region)
+
     def _match_and_cache_goods(self, goods: Goods) -> bool:
         if goods.image_path and os.path.exists(goods.image_path):
+            if self._goods_list_region_cache is not None:
+                box = self._pg_locate_image(
+                    goods.image_path,
+                    confidence=0.80,
+                    timeout=0.6,
+                    region=self._goods_list_region_cache,
+                )
+                if box is not None:
+                    self._remember_goods_hit(goods, box)
+                    return True
             box = self._pg_locate_image(goods.image_path, confidence=0.80, timeout=2.5)
             if box is not None:
-                self._pos_cache[goods.id] = box
+                self._remember_goods_hit(goods, box)
                 return True
         return False
 
     def step4_build_search_context(self, goods: Goods, *, item_disp: str, purchased_str: str) -> bool:
         self.step3_clear_obstacles(item_disp, purchased_str)
         t0 = time.perf_counter()
-        in_home = self.screen.locate("home_indicator", timeout=0.4) is not None
-        in_market = self.screen.locate("market_indicator", timeout=0.4) is not None
+        in_home = self._get_global_ui_box("home_indicator", timeout=0.2) is not None
+        in_market = self._get_global_ui_box("market_indicator", timeout=0.2) is not None
         scene_before = "home" if in_home else ("market" if in_market else "unknown")
         cache_before = "hit" if goods.id in self._pos_cache else "miss"
         query = (goods.search_name or "").strip()
@@ -1097,9 +1188,18 @@ class SinglePurchaseBuyerV2:
             self._pos_cache.pop(goods.id, None)
         # 2) 模板匹配
         if goods.image_path and os.path.exists(goods.image_path):
-            box = self._pg_locate_image(goods.image_path, confidence=0.80, timeout=2.5)
+            box = None
+            if self._goods_list_region_cache is not None:
+                box = self._pg_locate_image(
+                    goods.image_path,
+                    confidence=0.80,
+                    timeout=0.6,
+                    region=self._goods_list_region_cache,
+                )
+            if box is None:
+                box = self._pg_locate_image(goods.image_path, confidence=0.80, timeout=2.5)
             if box is not None:
-                self._pos_cache[goods.id] = box
+                self._remember_goods_hit(goods, box)
                 self.screen.click_center(box)
                 safe_sleep(max(0.0, float(getattr(self.timings, "detail_open_settle", 0.05) or 0.05)))
                 if self._verify_detail_ready(goods, timeout=verify_timeout):
@@ -1278,11 +1378,11 @@ class SinglePurchaseBuyerV2:
         while time.time() < t_end:
             if self._stop_requested():
                 break
-            ok_hit = self.screen.locate("buy_ok", timeout=0.0) is not None
+            ok_hit = self._get_global_ui_box("buy_ok", timeout=0.0) is not None
             if ok_hit:
                 got_ok = True
                 break
-            fail_hit = self.screen.locate("buy_fail", timeout=0.0) is not None
+            fail_hit = self._get_global_ui_box("buy_fail", timeout=0.0) is not None
             if fail_hit:
                 found_fail = True
             safe_sleep(step)
@@ -1313,11 +1413,21 @@ class SinglePurchaseBuyerV2:
         )
         return "unknown"
 
+    def _wait_qty_anchor_ready(self, timeout: float = 0.18) -> Optional[Tuple[int, int]]:
+        deadline = time.time() + max(0.0, float(timeout or 0.0))
+        mid = self._find_qty_midpoint()
+        while mid is None and time.time() < deadline:
+            if self._stop_requested():
+                return None
+            safe_sleep(min(0.02, max(0.005, self.timings.step_delay)))
+            mid = self._find_qty_midpoint()
+        return mid
+
     def precache_detail_once(self, goods: Goods, item_disp: str, purchased_str: str) -> bool:
         """预热：独立执行一次“进入详情→缓存关键信息→轻量OCR→退出”。
 
         约定：
-        - 每个关键步骤后固定等待 2s（只限预热流程）；
+        - 使用事件式推进，不再为每个步骤追加固定 2s 等待；
         - 关键信息：btn_buy/btn_close/(btn_max)、数量输入锚点（qty_minus/qty_plus 中点）；
         - 轻量 OCR：使用识别轮（fast_anchor_only），成功条件=读到任意正整数；
         - 失败：触发障碍清理并返回 False。
@@ -1366,17 +1476,15 @@ class SinglePurchaseBuyerV2:
             self.step3_clear_obstacles(item_disp, purchased_str)
             return _finish(False, "fail", reason="open_detail_failed")
         open_detail_source = str(getattr(self, "_last_open_detail_source", "-") or "-")
-        safe_sleep(2.0)
 
         # 2) 缓存关键按钮
         self._ensure_first_detail_buttons(goods)
-        safe_sleep(2.0)
-        b = self._get_btn_box(goods, "btn_buy", timeout=0.5)
-        c = self._get_btn_box(goods, "btn_close", timeout=0.5)
+        b = self._get_btn_box(goods, "btn_buy", timeout=0.12)
+        c = self._get_btn_box(goods, "btn_close", timeout=0.12)
         btn_buy_state = "hit" if b is not None else "miss"
         btn_close_state = "hit" if c is not None else "miss"
         if (goods.big_category or "").strip() == "弹药":
-            btn_max_state = "hit" if self._get_btn_box(goods, "btn_max", timeout=0.2) is not None else "miss"
+            btn_max_state = "hit" if self._get_btn_box(goods, "btn_max", timeout=0.12) is not None else "miss"
         if (b is None) or (c is None):
             self._log_step_info_text(
                 item_disp,
@@ -1389,14 +1497,13 @@ class SinglePurchaseBuyerV2:
             return _finish(False, "fail", reason="missing_detail_buttons")
 
         # 3) 缓存数量输入锚点（可选）
-        mid = self._find_qty_midpoint()
+        mid = self._wait_qty_anchor_ready(timeout=0.18)
         if isinstance(mid, tuple):
             qty_anchor = "hit"
             try:
                 self._detail_ui_cache["qty_mid"] = (int(mid[0]) - 2, int(mid[1]) - 2, 4, 4)
             except Exception:
                 pass
-        safe_sleep(2.0)
 
         # 4) 轻量 OCR 验证（不写历史，仅验证链路）
         _ = self._read_avg_price_with_rounds(
@@ -1408,11 +1515,9 @@ class SinglePurchaseBuyerV2:
         )
         ocr_verify = "success" if bool(getattr(self, "_last_avg_ocr_ok", False)) else "failed"
         # 识别轮内部会更新 buyer 的 OCR 连败统计标记；不强制依赖结果成功
-        safe_sleep(2.0)
 
         # 5) 关闭详情
         close_detail_ok = bool(self._close_detail_with_wait(goods))
-        safe_sleep(2.0)
         return _finish(True, "success")
 
     def _read_avg_unit_price(
@@ -3143,6 +3248,7 @@ class SinglePurchaseBuyerV2:
         """清理与缓存相关的所有数据结构。
 
         - 若提供 goods_id：仅清理该商品的卡片坐标与首次按钮缓存；
+        - 若不提供 goods_id：同时清理全局 UI 缓存与列表区域缓存；
         - 始终清空会话级 `_detail_ui_cache`，确保下次进入详情重新识别。
         """
         try:
@@ -3150,6 +3256,8 @@ class SinglePurchaseBuyerV2:
                 self._pos_cache.clear()
                 self._first_detail_cached.clear()
                 self._first_detail_buttons.clear()
+                self._global_ui_cache.clear()
+                self._goods_list_region_cache = None
             else:
                 self._pos_cache.pop(goods_id, None)
                 self._first_detail_cached.pop(goods_id, None)

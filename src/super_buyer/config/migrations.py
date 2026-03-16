@@ -255,6 +255,10 @@ def migrate_multi_snipe_tuning_defaults(cfg: Dict[str, Any]) -> bool:
         "buy_result_timeout_sec": 0.35,
         "buy_result_poll_step_sec": 0.01,
         "poll_step_sec": 0.02,
+        "probe_step_sec": 0.06,
+        "post_click_wait_sec": 0.2,
+        "roi_pre_capture_wait_sec": 0.05,
+        "ocr_max_workers": 4,
         "ocr_round_window_sec": 0.35,
         "ocr_round_step_sec": 0.015,
         "ocr_round_fail_limit": 10,
@@ -267,6 +271,7 @@ def migrate_multi_snipe_tuning_defaults(cfg: Dict[str, Any]) -> bool:
         "fast_chain_mode": True,
         "fast_chain_max": 10,
         "fast_chain_interval_ms": 35.0,
+        "relocate_after_fail": 3,
     }
 
     for key, new_value in DEFAULT_MULTI_SNIPE_TUNING.items():

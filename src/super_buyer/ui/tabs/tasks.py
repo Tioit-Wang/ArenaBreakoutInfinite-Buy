@@ -506,11 +506,14 @@ class SingleFastBuyTab(BaseTab):
             ),
         )
 
+        # 购买结果 / OCR / 连击时序参数统一读取自 cfg.multi_snipe_tuning
+        tuning = self.cfg.get("multi_snipe_tuning") if isinstance(self.cfg.get("multi_snipe_tuning"), dict) else {}
+
         # 快速连击模式：是否启用
         try:
-            fast_mode_cur = bool((adv or {}).get("fast_chain_mode", False))
+            fast_mode_cur = bool((tuning or {}).get("fast_chain_mode", True))
         except Exception:
-            fast_mode_cur = False
+            fast_mode_cur = True
         var_fast_mode = tk.BooleanVar(value=fast_mode_cur)
         chk_fast = _make_row(
             box_chain,
@@ -525,7 +528,7 @@ class SingleFastBuyTab(BaseTab):
 
         # 快速连击：每次 OCR 后最多连续购买次数
         try:
-            fast_max_cur = int((adv or {}).get("fast_chain_max", 10) or 10)
+            fast_max_cur = int((tuning or {}).get("fast_chain_max", 10) or 10)
         except Exception:
             fast_max_cur = 10
         var_fast_max = tk.IntVar(value=fast_max_cur)
@@ -542,7 +545,7 @@ class SingleFastBuyTab(BaseTab):
 
         # 快速连击：遮罩关闭与再次点击的间隔(ms)
         try:
-            fast_interval_cur = float((adv or {}).get("fast_chain_interval_ms", 35.0) or 35.0)
+            fast_interval_cur = float((tuning or {}).get("fast_chain_interval_ms", 35.0) or 35.0)
         except Exception:
             fast_interval_cur = 35.0
         var_fast_interval = tk.DoubleVar(value=fast_interval_cur)
@@ -558,8 +561,6 @@ class SingleFastBuyTab(BaseTab):
             pady=(0, 8),
         )
 
-        # 购买结果与 OCR 时序参数（读取自 cfg.multi_snipe_tuning，按需覆盖）
-        tuning = self.cfg.get("multi_snipe_tuning") if isinstance(self.cfg.get("multi_snipe_tuning"), dict) else {}
         try:
             cur_buy_timeout = float((tuning or {}).get("buy_result_timeout_sec", 0.35) or 0.35)
         except Exception:
@@ -569,17 +570,17 @@ class SingleFastBuyTab(BaseTab):
         except Exception:
             cur_buy_step = 0.01
         try:
-            cur_ocr_win = float((tuning or {}).get("ocr_round_window_sec", 0.35) or 0.35)
+            cur_ocr_win = float((tuning or {}).get("ocr_round_window_sec", 0.25) or 0.25)
         except Exception:
-            cur_ocr_win = 0.35
+            cur_ocr_win = 0.25
         try:
             cur_ocr_step = float((tuning or {}).get("ocr_round_step_sec", 0.015) or 0.015)
         except Exception:
             cur_ocr_step = 0.015
         try:
-            cur_post_success = float((tuning or {}).get("post_success_click_sec", 0.08) or 0.08)
+            cur_post_success = float((tuning or {}).get("post_success_click_sec", 0.05) or 0.05)
         except Exception:
-            cur_post_success = 0.08
+            cur_post_success = 0.05
 
         # 将秒转换为毫秒以便在界面中统一使用 ms
         try:
@@ -593,7 +594,7 @@ class SingleFastBuyTab(BaseTab):
         try:
             cur_ocr_win_ms = int(round(cur_ocr_win * 1000.0))
         except Exception:
-            cur_ocr_win_ms = 350
+            cur_ocr_win_ms = 250
         try:
             cur_ocr_step_ms = int(round(cur_ocr_step * 1000.0))
         except Exception:
@@ -601,7 +602,7 @@ class SingleFastBuyTab(BaseTab):
         try:
             cur_post_success_ms = int(round(cur_post_success * 1000.0))
         except Exception:
-            cur_post_success_ms = 80
+            cur_post_success_ms = 50
 
         var_buy_timeout = tk.IntVar(value=cur_buy_timeout_ms)
         sp_buy_timeout = _make_row(
@@ -702,11 +703,11 @@ class SingleFastBuyTab(BaseTab):
             self._save_tasks_data()
 
         def _apply_fast_chain_from_widget() -> None:
-            """将快速连击配置写入 tasks_data.advanced，并触发自动保存。"""
+            """将快速连击配置写入 cfg.multi_snipe_tuning，并触发自动保存。"""
             try:
                 mode_val = bool(var_fast_mode.get())
             except Exception:
-                mode_val = False
+                mode_val = True
             try:
                 max_val = int(var_fast_max.get())
             except Exception:
@@ -723,10 +724,35 @@ class SingleFastBuyTab(BaseTab):
                 interval_ms = 30.0
             if interval_ms > 500.0:
                 interval_ms = 500.0
-            adv = self.tasks_data.setdefault("advanced", {})
-            adv["fast_chain_mode"] = bool(mode_val)
-            adv["fast_chain_max"] = int(max_val)
-            adv["fast_chain_interval_ms"] = float(interval_ms)
+            try:
+                cfg = dict(self.app.cfg)
+            except Exception:
+                cfg = self.app.cfg
+            tuning = cfg.get("multi_snipe_tuning") if isinstance(cfg.get("multi_snipe_tuning"), dict) else {}
+            if not isinstance(tuning, dict):
+                tuning = {}
+            tuning["fast_chain_mode"] = bool(mode_val)
+            tuning["fast_chain_max"] = int(max_val)
+            tuning["fast_chain_interval_ms"] = float(interval_ms)
+            cfg["multi_snipe_tuning"] = tuning
+            try:
+                adv = self.tasks_data.get("advanced")
+                if isinstance(adv, dict):
+                    adv.pop("fast_chain_mode", None)
+                    adv.pop("fast_chain_max", None)
+                    adv.pop("fast_chain_interval_ms", None)
+            except Exception:
+                pass
+            try:
+                from super_buyer.config import save_config  # type: ignore
+                save_config(cfg, path=self.config_path)
+                self.app.cfg = cfg
+                try:
+                    self.__dict__.pop("cfg", None)
+                except Exception:
+                    pass
+            except Exception:
+                pass
             self._save_tasks_data()
 
         def _apply_timing_from_widget() -> None:
@@ -766,7 +792,7 @@ class SingleFastBuyTab(BaseTab):
             cfg["multi_snipe_tuning"] = tuning
             try:
                 from super_buyer.config import save_config  # type: ignore
-                save_config(cfg, paths=self.paths)
+                save_config(cfg, path=self.config_path)
                 # 同步到内存态 cfg，避免重启前不一致
                 self.app.cfg = cfg
                 try:

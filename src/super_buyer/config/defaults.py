@@ -24,6 +24,10 @@ DEFAULT_MULTI_SNIPE_TUNING: Dict[str, Any] = {
     "buy_result_timeout_sec": 0.35,
     "buy_result_poll_step_sec": 0.01,
     "poll_step_sec": 0.02,
+    "probe_step_sec": 0.06,
+    "post_click_wait_sec": 0.2,
+    "roi_pre_capture_wait_sec": 0.05,
+    "ocr_max_workers": 4,
     "ocr_round_window_sec": 0.25,
     "ocr_round_step_sec": 0.015,
     "ocr_round_fail_limit": 6,
@@ -39,6 +43,7 @@ DEFAULT_MULTI_SNIPE_TUNING: Dict[str, Any] = {
     "fast_chain_mode": True,
     "fast_chain_max": 10,
     "fast_chain_interval_ms": 35.0,
+    "relocate_after_fail": 3,
 }
 
 
