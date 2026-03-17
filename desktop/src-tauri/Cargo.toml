@@ -1,0 +1,42 @@
+[package]
+name = "arena_buyer_desktop"
+version = "0.1.0"
+edition = "2024"
+description = "Windows-first Rust + Tauri rewrite for ArenaBuyer"
+
+[lib]
+name = "arena_buyer_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+anyhow = "1.0"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp"] }
+imageproc = { version = "0.25", default-features = false }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tauri = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-log = "2"
+tauri-plugin-shell = "2"
+thiserror = "2.0"
+tokio = { version = "1.44", features = ["macros", "rt-multi-thread", "sync", "time"] }
+url = "2.5"
+uuid = { version = "1.12", features = ["serde", "v4"] }
+walkdir = "2.5"
+xcap = "0.4"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.60", features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Gdi",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_WindowsAndMessaging",
+] }

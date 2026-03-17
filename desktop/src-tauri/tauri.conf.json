@@ -1,0 +1,36 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "ArenaBuyer Desktop",
+  "version": "0.1.0",
+  "identifier": "com.arenabuyer.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev -- --host 127.0.0.1 --port 1420",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["**"]
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "../../tools/bin/app_icon.ico",
+      "../../tools/bin/app_icon.png"
+    ],
+    "resources": {
+      "../resources/app/images": "app_resources/images",
+      "../resources/app/defaults": "app_resources/defaults",
+      "../resources/app/assets": "app_resources/assets",
+      "../../Umi-OCR_Paddle_v2.1.5": "sidecars/Umi-OCR_Paddle_v2.1.5"
+    }
+  }
+}

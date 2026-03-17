@@ -1,0 +1,19 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default desktop capability set for ArenaBuyer Desktop",
+  "remote": {
+    "urls": ["http://127.0.0.1:1420/*", "http://localhost:1420/*"]
+  },
+  "windows": ["main", "capture-overlay-*"],
+  "permissions": [
+    "core:default",
+    "core:webview:allow-create-webview-window",
+    "dialog:default",
+    "log:default",
+    "shell:default",
+    "global-shortcut:default",
+    "global-shortcut:allow-register",
+    "global-shortcut:allow-unregister"
+  ]
+}

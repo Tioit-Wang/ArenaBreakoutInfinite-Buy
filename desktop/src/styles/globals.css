@@ -1,0 +1,77 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 40 30% 96%;
+    --foreground: 171 28% 14%;
+    --card: 0 0% 100%;
+    --card-foreground: 171 28% 14%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 171 28% 14%;
+    --primary: 171 64% 22%;
+    --primary-foreground: 43 100% 97%;
+    --secondary: 42 34% 92%;
+    --secondary-foreground: 171 20% 24%;
+    --muted: 42 23% 91%;
+    --muted-foreground: 174 12% 38%;
+    --accent: 46 84% 66%;
+    --accent-foreground: 171 28% 14%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 174 14% 84%;
+    --input: 174 14% 84%;
+    --ring: 171 64% 22%;
+    --radius: 1rem;
+    --font-body: "Segoe UI", "PingFang SC", "Microsoft YaHei UI", sans-serif;
+    --font-display: "Iowan Old Style", "Palatino Linotype", "Noto Serif SC", "Songti SC",
+      "STSong", serif;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html {
+    @apply bg-background;
+  }
+
+  body {
+    @apply min-h-screen bg-background text-foreground antialiased;
+    font-family: var(--font-body);
+    background-image:
+      radial-gradient(circle at top left, rgba(245, 158, 11, 0.12), transparent 20%),
+      radial-gradient(circle at top right, rgba(16, 185, 129, 0.12), transparent 22%),
+      radial-gradient(circle at 50% 0%, rgba(255, 255, 255, 0.84), transparent 28%),
+      linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(245, 241, 232, 0.98));
+    background-attachment: fixed;
+  }
+
+  button,
+  input,
+  select,
+  textarea {
+    @apply outline-none;
+  }
+
+  ::selection {
+    background: rgba(15, 118, 110, 0.16);
+    color: inherit;
+  }
+
+  html.capture-overlay-active,
+  html.capture-overlay-active body,
+  html.capture-overlay-active body #root,
+  body.capture-overlay-active,
+  body.capture-overlay-active #root {
+    background: transparent !important;
+    background-image: none !important;
+  }
+}
+
+@layer components {
+  .font-display {
+    font-family: var(--font-display);
+  }
+}
