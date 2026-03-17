@@ -95,10 +95,6 @@ export function CaptureOverlayPage() {
     }
   }, [pointerClient.x, pointerClient.y])
 
-  const fixedCardRectScreen = useMemo<Rect>(() => {
-    return buildFixedCardRect(pointerScreen, screenScale)
-  }, [pointerScreen.x, pointerScreen.y, screenScale])
-
   const activeRect = mode === "goods-card" ? fixedCardRectClient : dragRectClient
 
   const resetTemplateSelection = () => {
@@ -132,11 +128,6 @@ export function CaptureOverlayPage() {
       await current.close()
     }
   }
-
-  const toScreenPoint = (event: MouseEvent<HTMLDivElement>): Point => ({
-    x: Math.round(event.screenX * screenScale),
-    y: Math.round(event.screenY * screenScale),
-  })
 
   const toPointerScreenPoint = (event: ReactPointerEvent<HTMLDivElement>): Point => ({
     x: Math.round(event.screenX * screenScale),
