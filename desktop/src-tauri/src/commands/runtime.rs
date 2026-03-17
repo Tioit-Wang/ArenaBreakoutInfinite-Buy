@@ -73,9 +73,13 @@ pub fn automation_start_multi(
     if enabled_tasks.is_empty() {
         return Err("no enabled multi tasks configured".to_string());
     }
+    let templates = state
+        .repo
+        .list_templates()
+        .map_err(|error| error.to_string())?;
     state
         .automation
-        .start_multi(app, enabled_tasks)
+        .start_multi(app, enabled_tasks, config, templates, state.paths.clone())
         .map_err(|error| error.to_string())
 }
 

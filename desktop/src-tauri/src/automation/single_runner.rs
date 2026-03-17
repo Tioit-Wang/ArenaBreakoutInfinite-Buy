@@ -8,19 +8,24 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
-use image::{GrayImage, RgbaImage, imageops::FilterType};
 use tokio::time::sleep;
 use uuid::Uuid;
-use xcap::Window;
 
 use crate::app::types::{
     AppConfig, AutomationEvent, GoodsRecord, PriceHistoryRecord, PurchaseHistoryRecord,
-    SingleTaskRecord, TemplateConfig, now_iso,
+    SingleTaskRecord, TemplateConfig, iso_to_epoch, now_iso,
 };
-use crate::automation::common::{parse_price_text, price_with_premium};
+use crate::automation::common::{
+    avg_price_roi, crop_gray, infer_qty_from_max, parse_digits, parse_price_text,
+    price_with_premium, resize, threshold, top_half,
+};
 use crate::automation::input::{click_point, type_text};
 use crate::automation::ocr::recognize_text;
 use crate::automation::vision::{MatchBox, locate_template_in_image};
+use crate::automation::window::{
+    CapturedWindow, WindowHint, capture_matching_window, capture_window, click_box, enum_windows,
+    find_in_window, to_global,
+};
 use crate::config::paths::AppPaths;
 use crate::storage::repository::Repository;
 
@@ -48,22 +53,6 @@ pub struct SingleRunRequest {
 struct TemplateEntry {
     path: PathBuf,
     confidence: f64,
-}
-
-#[derive(Debug, Clone)]
-struct WindowHint {
-    title: String,
-    app_name: String,
-}
-
-#[derive(Debug, Clone)]
-struct CapturedWindow {
-    hint: WindowHint,
-    x: i32,
-    y: i32,
-    width: i32,
-    height: i32,
-    image: RgbaImage,
 }
 
 struct SingleSession {
@@ -494,7 +483,7 @@ impl SingleSession {
             .copied()
             .ok_or_else(|| anyhow!("btn_buy missing"))?;
         let captured = self.capture_active()?;
-        let roi = avg_roi(
+        let roi = avg_price_roi(
             buy_box,
             self.request.goods.exchangeable,
             &self.request.config,
@@ -697,7 +686,12 @@ impl SingleSession {
             if key == "btn_max" && self.request.goods.big_category.trim() != "弹药" {
                 continue;
             }
-            if let Some(box_rect) = find_in_window(&window, self.template(key)?, None)? {
+            if let Some(box_rect) = find_in_window(
+                &window,
+                &self.template(key)?.path,
+                self.template(key)?.confidence,
+                None,
+            )? {
                 self.detail.insert(key.to_string(), box_rect);
             }
         }
@@ -792,7 +786,12 @@ impl SingleSession {
         loop {
             for window in enum_windows()? {
                 let captured = capture_window(window)?;
-                if let Some(box_rect) = find_in_window(&captured, self.template(slug)?, None)? {
+                if let Some(box_rect) = find_in_window(
+                    &captured,
+                    &self.template(slug)?.path,
+                    self.template(slug)?.confidence,
+                    None,
+                )? {
                     self.active_window = Some(captured.hint.clone());
                     return Ok(Some((captured, box_rect)));
                 }
@@ -813,7 +812,12 @@ impl SingleSession {
         let deadline = Instant::now() + timeout;
         loop {
             if let Some(window) = self.capture_active_opt()? {
-                if let Some(box_rect) = find_in_window(&window, self.template(slug)?, region)? {
+                if let Some(box_rect) = find_in_window(
+                    &window,
+                    &self.template(slug)?.path,
+                    self.template(slug)?.confidence,
+                    region,
+                )? {
                     return Ok(Some((window, box_rect)));
                 }
             }
@@ -855,14 +859,7 @@ impl SingleSession {
         let Some(hint) = self.active_window.clone() else {
             return Ok(None);
         };
-        for window in enum_windows()? {
-            let title = window.title().unwrap_or_default();
-            let app_name = window.app_name().unwrap_or_default();
-            if title == hint.title && app_name == hint.app_name {
-                return Ok(Some(capture_window(window)?));
-            }
-        }
-        Ok(None)
+        capture_matching_window(&hint)
     }
 
     fn template(&self, slug: &str) -> Result<&TemplateEntry> {
@@ -872,13 +869,15 @@ impl SingleSession {
     }
 
     fn record_price(&self, price: i64) -> Result<()> {
+        let observed_at = now_iso();
         self.request.repo.insert_price_history(&PriceHistoryRecord {
             id: format!("price-{}", Uuid::new_v4()),
             item_id: self.request.goods.id.clone(),
             item_name: self.label(),
             category: optional_str(&self.request.goods.big_category),
             price,
-            observed_at: now_iso(),
+            observed_at_epoch: iso_to_epoch(&observed_at),
+            observed_at,
         })
     }
 
@@ -946,50 +945,6 @@ impl SingleSession {
     }
 }
 
-fn enum_windows() -> Result<Vec<Window>> {
-    Ok(Window::all()
-        .context("failed to enumerate windows")?
-        .into_iter()
-        .filter(|window| !window.is_minimized().unwrap_or(false))
-        .filter(|window| window.width().unwrap_or_default() >= 200)
-        .filter(|window| window.height().unwrap_or_default() >= 120)
-        .collect())
-}
-
-fn capture_window(window: Window) -> Result<CapturedWindow> {
-    Ok(CapturedWindow {
-        hint: WindowHint {
-            title: window.title().unwrap_or_default(),
-            app_name: window.app_name().unwrap_or_default(),
-        },
-        x: window.x().unwrap_or_default(),
-        y: window.y().unwrap_or_default(),
-        width: window.width().unwrap_or_default() as i32,
-        height: window.height().unwrap_or_default() as i32,
-        image: window.capture_image().context("failed to capture window")?,
-    })
-}
-
-fn find_in_window(
-    window: &CapturedWindow,
-    template: &TemplateEntry,
-    region: Option<MatchBox>,
-) -> Result<Option<MatchBox>> {
-    locate_template_in_image(&window.image, &template.path, template.confidence, region)
-}
-
-fn click_box(window: &CapturedWindow, local: MatchBox) -> Result<()> {
-    let (x, y) = to_global(window, local);
-    click_point(x, y)
-}
-
-fn to_global(window: &CapturedWindow, local: MatchBox) -> (i32, i32) {
-    (
-        window.x + local.0 + local.2 / 2,
-        window.y + local.1 + local.3 / 2,
-    )
-}
-
 fn resolve_path(paths: &AppPaths, raw: &str) -> PathBuf {
     let path = PathBuf::from(raw);
     if path.is_absolute() {
@@ -1001,81 +956,6 @@ fn resolve_path(paths: &AppPaths, raw: &str) -> PathBuf {
 
 fn split_args(raw: &str) -> Vec<String> {
     raw.split_whitespace().map(str::to_string).collect()
-}
-
-fn crop_gray(image: &RgbaImage, rect: MatchBox) -> Result<GrayImage> {
-    let cropped = image::imageops::crop_imm(
-        image,
-        rect.0.max(0) as u32,
-        rect.1.max(0) as u32,
-        rect.2.max(1) as u32,
-        rect.3.max(1) as u32,
-    )
-    .to_image();
-    Ok(image::DynamicImage::ImageRgba8(cropped).to_luma8())
-}
-
-fn resize(image: GrayImage, scale: f64) -> GrayImage {
-    let scale = scale.clamp(0.6, 2.5);
-    if (scale - 1.0).abs() < f64::EPSILON {
-        return image;
-    }
-    image::imageops::resize(
-        &image,
-        ((image.width() as f64) * scale).round().max(1.0) as u32,
-        ((image.height() as f64) * scale).round().max(1.0) as u32,
-        FilterType::Triangle,
-    )
-}
-
-fn threshold(mut image: GrayImage) -> GrayImage {
-    for pixel in image.pixels_mut() {
-        pixel.0[0] = if pixel.0[0] > 128 { 255 } else { 0 };
-    }
-    image
-}
-
-fn top_half(image: GrayImage) -> GrayImage {
-    image::imageops::crop_imm(&image, 0, 0, image.width(), (image.height() / 2).max(1)).to_image()
-}
-
-fn avg_roi(
-    buy_box: MatchBox,
-    exchangeable: bool,
-    config: &AppConfig,
-    max_width: i32,
-    max_height: i32,
-) -> MatchBox {
-    let mut dist = config.avg_price_area.distance_from_buy_top.max(1) as i32;
-    if exchangeable {
-        dist += 30;
-    }
-    let height = config.avg_price_area.height.max(10) as i32;
-    let y_bottom = (buy_box.1 - dist).clamp(1, max_height);
-    let y_top = (y_bottom - height).clamp(0, max_height.saturating_sub(1));
-    (
-        buy_box.0.clamp(0, max_width.saturating_sub(1)),
-        y_top,
-        buy_box.2.max(1).min(max_width.saturating_sub(buy_box.0)),
-        (y_bottom - y_top).max(1),
-    )
-}
-
-fn infer_qty_from_max(max_box: MatchBox) -> MatchBox {
-    let width = (max_box.2 * 24 / 10).clamp(80, 140);
-    let gap = (max_box.2 * 35 / 100).clamp(8, 20);
-    let height = (max_box.3 + 12).clamp(28, 44);
-    (
-        max_box.0 - gap - width,
-        max_box.1 - ((height - max_box.3) / 2).max(4),
-        width,
-        height,
-    )
-}
-
-fn parse_digits(text: &str) -> Option<i64> {
-    let digits: String = text.chars().filter(|ch| ch.is_ascii_digit()).collect();
-    digits.parse::<i64>().ok()
 }
 
 fn price_sane(unit_price: i64, task: &SingleTaskRecord) -> bool {

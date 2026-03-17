@@ -65,6 +65,7 @@ pub const MIGRATIONS: &[&str] = &[
       category TEXT,
       price INTEGER NOT NULL,
       observed_at TEXT NOT NULL,
+      observed_at_epoch INTEGER NOT NULL DEFAULT 0,
       payload_json TEXT NOT NULL
     );
     "#,

@@ -44,8 +44,6 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import {
-  MetricCard,
-  MetricGrid,
   PageHero,
   PageSurface,
   PageSurfaceContent,
@@ -217,8 +215,6 @@ export function MultiTasksPage() {
           </>
         }
         title="收藏商品抢购"
-        description="把收藏队列压缩成清晰的任务清单。只保留优先级、阈值、模式和当前进度。"
-        detail={runtime.detail ?? "这里管理“最近购买 → 我的收藏”场景下的多商品抢购任务。"}
         actions={
           <>
             <Button
@@ -247,20 +243,6 @@ export function MultiTasksPage() {
           </>
         }
       />
-
-      <MetricGrid className="border-t border-black/5 pt-8 sm:grid-cols-3">
-        <MetricCard label="当前任务数" value={bootstrap.multiTasks.length} />
-        <MetricCard
-          label="已启用任务"
-          tone="emerald"
-          value={enabledCount}
-        />
-        <MetricCard
-          label="运行信息"
-          tone={runtime.state === "failed" ? "rose" : "slate"}
-          value={runtime.detail ?? "等待开始"}
-        />
-      </MetricGrid>
 
       <PageSurface>
         <PageSurfaceContent className="gap-8">

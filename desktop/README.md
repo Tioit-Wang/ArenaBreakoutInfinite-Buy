@@ -4,13 +4,16 @@ Rust + Tauri v2 rewrite workspace for the Windows desktop version of the ArenaBu
 
 ## Current status
 
-- React + TypeScript + Vite frontend scaffolded
-- Tauri v2 shell scaffolded
+- React + TypeScript + Vite frontend wired
+- Tauri v2 shell wired
 - Portable `data/` directory resolved from exe sibling
 - SQLite-backed storage layer initialized
 - Commands wired for bootstrap, config, goods, tasks, history, legacy import, and runtime control
-- Umi-OCR sidecar manager scaffolded
-- Single / multi automation state-machine skeletons connected to runtime events
+- Umi-OCR sidecar manager implemented
+- Native Windows interactive capture selectors implemented for template capture and goods-card capture
+- Template tooling split into file validation and live match probing
+- Single-item automation flow implemented with runtime events, OCR, template matching, and native input
+- Multi-item automation flow implemented for favorites refresh, card scanning, OCR price reads, and detail purchases
 
 ## Run
 
@@ -29,12 +32,11 @@ npx tauri build --debug --no-bundle
 
 ## Important note
 
-The frontend, command layer, data layer, and runtime/event plumbing are functional.
-Native desktop automation modules are still scaffolded in this first pass:
+The desktop rewrite no longer treats the automation layer as placeholder-only.
 
-- `src-tauri/src/automation/window.rs`
-- `src-tauri/src/automation/capture.rs`
-- `src-tauri/src/automation/input.rs`
-- `src-tauri/src/automation/vision.rs`
+- Template / goods screenshots use a native Windows selection window instead of a transparent Tauri overlay route.
+- `src-tauri/src/automation/vision.rs` performs real template matching with `imageproc::template_matching`.
+- `src-tauri/src/automation/single_runner.rs` drives the single-item market workflow end to end.
+- `src-tauri/src/automation/multi_runner.rs` drives the favorites-based multi-item workflow end to end.
 
-Those modules currently return placeholders while the rewritten Rust automation flow is being migrated from the Python implementation.
+There are still Windows-specific verification risks around real game UI timing, DPI scaling, and OCR stability, so desktop automation changes should still be validated on a live Windows machine before release.

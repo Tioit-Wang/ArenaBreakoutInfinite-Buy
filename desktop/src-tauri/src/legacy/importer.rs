@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::app::types::{
     GoodsRecord, ImportReport, LegacyCandidate, MultiTaskRecord, PriceHistoryRecord,
-    PurchaseHistoryRecord, SingleTaskRecord, now_iso,
+    PurchaseHistoryRecord, SingleTaskRecord, iso_to_epoch, now_iso,
 };
 use crate::config::paths::AppPaths;
 use crate::storage::repository::Repository;
@@ -388,7 +388,10 @@ impl LegacyImporter {
                     .and_then(|node| node.as_str())
                     .map(str::to_string)
                     .unwrap_or_else(now_iso),
+                observed_at_epoch: 0,
             };
+            let mut record = record;
+            record.observed_at_epoch = iso_to_epoch(&record.observed_at);
             self.repo.insert_price_history(&record)?;
             imported += 1;
         }

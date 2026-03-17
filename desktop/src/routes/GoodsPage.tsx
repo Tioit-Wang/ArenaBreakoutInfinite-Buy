@@ -5,7 +5,6 @@ import {
   ChevronRight,
   FolderOpen,
   FolderTree,
-  ImagePlus,
   PencilLine,
   Plus,
   Save,
@@ -13,10 +12,8 @@ import {
   Star,
   Trash2,
 } from "lucide-react"
-import { open } from "@tauri-apps/plugin-dialog"
 
 import { useRuntimeStore } from "@/app/store"
-import { openCaptureOverlay } from "@/lib/capture-overlay"
 import { resolveImageSrc } from "@/lib/assets"
 import { api } from "@/lib/api"
 import {
@@ -149,17 +146,6 @@ export function GoodsPage() {
       ? "全部分类"
       : `${selectedBigCategory}${selectedSubCategory !== "全部" ? ` / ${selectedSubCategory}` : ""}`
 
-  const chooseImageFile = async () => {
-    const selected = await open({
-      title: "选择物品图片",
-      defaultPath: bootstrap.paths.imagesDir,
-      multiple: false,
-      directory: false,
-      filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "webp"] }],
-    })
-    return typeof selected === "string" ? selected : null
-  }
-
   const openCreate = () =>
     setModal({
       open: true,
@@ -189,31 +175,20 @@ export function GoodsPage() {
     await queryClient.invalidateQueries({ queryKey: ["bootstrap"] })
   }
 
-  const importGoodsImage = async () => {
-    if (!modal.open) return
-    const sourcePath = await chooseImageFile()
-    if (!sourcePath) return
-    const path = await api.goodsImportImage(
-      sourcePath,
-      modal.draft.bigCategory || "杂物",
-    )
-    setModal({
-      ...modal,
-      draft: { ...modal.draft, imagePath: path },
-    })
-  }
-
   const captureGoodsImage = async () => {
     if (!modal.open) return
-    const path = await openCaptureOverlay({
-      mode: "goods-card",
-      bigCategory: modal.draft.bigCategory || "杂物",
-    })
-    if (!path) return
-    setModal({
-      ...modal,
-      draft: { ...modal.draft, imagePath: path },
-    })
+    try {
+      const path = await api.goodsCaptureCardInteractive(modal.draft.bigCategory || "杂物")
+      setModal({
+        ...modal,
+        draft: { ...modal.draft, imagePath: path },
+      })
+    } catch (error) {
+      if (String(error).includes("capture cancelled")) {
+        return
+      }
+      throw error
+    }
   }
 
   return (
@@ -481,6 +456,27 @@ export function GoodsPage() {
               </DialogHeader>
 
               <div className="grid gap-8 py-2 md:grid-cols-2">
+                <div className="space-y-3 md:col-span-2">
+                  <Label>图片与截图</Label>
+                  <div className="flex flex-col gap-4 rounded-[28px] border border-black/5 bg-white/62 p-4 md:flex-row md:items-start md:justify-between">
+                    <GoodsCapturePreviewCard
+                      imageSrc={resolveImageSrc(bootstrap.paths, modal.draft.imagePath)}
+                      title={modal.draft.name}
+                      price={modal.draft.price}
+                    />
+                    <div className="flex flex-col gap-3 md:min-w-[180px]">
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        onClick={() => void captureGoodsImage()}
+                      >
+                        <FolderOpen className="mr-2 size-4" />
+                        截图
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+
                 <FormField
                   label="物品名"
                   value={modal.draft.name}
@@ -586,32 +582,6 @@ export function GoodsPage() {
                   }
                 />
 
-                <div className="space-y-3 md:col-span-2">
-                  <Label>图片预览与截图</Label>
-                  <div className="flex flex-col gap-4 rounded-[28px] border border-black/5 bg-white/62 p-4 md:flex-row">
-                    <div className="size-40 overflow-hidden rounded-[24px] border border-white/70 bg-white">
-                      <img
-                        src={resolveImageSrc(bootstrap.paths, modal.draft.imagePath)}
-                        alt={modal.draft.name || "预览"}
-                        className="h-full w-full object-cover"
-                      />
-                    </div>
-                    <div className="flex flex-1 flex-wrap content-start gap-2">
-                      <Button type="button" variant="secondary" onClick={() => void importGoodsImage()}>
-                        <ImagePlus className="mr-2 size-4" />
-                        选图
-                      </Button>
-                      <Button type="button" variant="secondary" onClick={() => void captureGoodsImage()}>
-                        <FolderOpen className="mr-2 size-4" />
-                        固定卡片截图
-                      </Button>
-                      <InlineNote className="w-full">
-                        卡片截图会按 Python 版固定卡片规则裁出中间商品图区域并保存。
-                      </InlineNote>
-                    </div>
-                  </div>
-                </div>
-
                 <div className="space-y-3">
                   <Label>参考价格</Label>
                   <Input
@@ -683,6 +653,42 @@ export function GoodsPage() {
           ) : null}
         </DialogContent>
       </Dialog>
+    </div>
+  )
+}
+
+function GoodsCapturePreviewCard({
+  imageSrc,
+  title,
+  price,
+}: {
+  imageSrc: string
+  title: string
+  price?: number | null
+}) {
+  const hasPrice = typeof price === "number" && Number.isFinite(price) && price > 0
+  return (
+    <div className="grid w-full justify-center md:justify-start">
+      <div className="grid h-[212px] w-[165px] overflow-hidden rounded-[3px] border-[0.5px] border-[#cccccc] bg-[#ffd84d] shadow-[0_14px_32px_rgba(15,23,42,0.08)]">
+        <div className="flex h-[20px] items-center bg-[#2d7cff] px-2 text-[11px] font-semibold text-white">
+          <span className="truncate">{title || "标题区"}</span>
+        </div>
+        <div className="bg-[#ffd84d] px-[30px] py-[20px]">
+          <div className="h-full overflow-hidden border border-dashed border-[#333333] bg-white/90">
+            <img
+              src={imageSrc}
+              alt={title || "物品截图预览"}
+              className="h-full w-full object-cover"
+            />
+          </div>
+        </div>
+        <div className="flex h-[30px] items-center justify-between gap-2 bg-[#2ea043] px-2 text-[11px] text-white">
+          <span className="opacity-80">价格区</span>
+          <span className="truncate font-semibold">
+            {hasPrice ? new Intl.NumberFormat("zh-CN").format(price) : "--"}
+          </span>
+        </div>
+      </div>
     </div>
   )
 }

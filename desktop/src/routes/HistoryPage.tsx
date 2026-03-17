@@ -1,11 +1,22 @@
 import { useMemo, useState } from "react"
 import { useQuery } from "@tanstack/react-query"
-import { Calculator, TrendingUp } from "lucide-react"
+import {
+  CartesianGrid,
+  Legend,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts"
+import { TrendingUp } from "lucide-react"
 
 import { useRuntimeStore } from "@/app/store"
 import { api } from "@/lib/api"
+import type { ItemPriceTrendPoint } from "@/lib/types"
 import { Badge } from "@/components/ui/badge"
-import { Input } from "@/components/ui/input"
+import { Card, CardContent } from "@/components/ui/card"
 import { Label } from "@/components/ui/label"
 import {
   Select,
@@ -23,63 +34,72 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import {
+  InlineNote,
   MetricCard,
   MetricGrid,
   PageHero,
   PageSurface,
   PageSurfaceContent,
   SectionHeading,
-  minimalFieldClassName,
   minimalSelectTriggerClassName,
 } from "@/components/minimal-page"
 
+type RangePreset = "7d" | "30d" | "90d"
+
+const RANGE_OPTIONS: Array<{ value: RangePreset; label: string; days: number }> = [
+  { value: "7d", label: "7天", days: 7 },
+  { value: "30d", label: "30天", days: 30 },
+  { value: "90d", label: "90天", days: 90 },
+]
+
 function fmt(value: number) {
-  return new Intl.NumberFormat("zh-CN").format(value || 0)
+  return new Intl.NumberFormat("zh-CN").format(value)
+}
+
+function fmtNullable(value?: number | null) {
+  return typeof value === "number" ? fmt(value) : "—"
+}
+
+function buildRange(preset: RangePreset) {
+  const option = RANGE_OPTIONS.find((item) => item.value === preset) ?? RANGE_OPTIONS[1]
+  const to = new Date()
+  const from = new Date(to)
+  from.setHours(0, 0, 0, 0)
+  from.setDate(from.getDate() - (option.days - 1))
+  return {
+    from: from.toISOString(),
+    to: to.toISOString(),
+  }
 }
 
 export function HistoryPage() {
   const bootstrap = useRuntimeStore((state) => state.bootstrap)
-  const [selectedItemId, setSelectedItemId] = useState<string>("")
-  const [buyPrice, setBuyPrice] = useState(0)
-  const [sellPrice, setSellPrice] = useState(0)
-  const [qty, setQty] = useState(1)
+  const [selectedItemId, setSelectedItemId] = useState("")
+  const [rangePreset, setRangePreset] = useState<RangePreset>("30d")
 
-  const summaryQuery = useQuery({
-    queryKey: ["history-summary", selectedItemId],
-    queryFn: () => api.historyQuerySummary(selectedItemId || undefined),
-    enabled: !!bootstrap,
+  const range = useMemo(() => buildRange(rangePreset), [rangePreset])
+  const timezoneOffsetMin = useMemo(() => new Date().getTimezoneOffset(), [])
+
+  const trendQuery = useQuery({
+    queryKey: [
+      "history-item-price-trend",
+      selectedItemId,
+      rangePreset,
+      range.from,
+      range.to,
+      timezoneOffsetMin,
+    ],
+    queryFn: () =>
+      api.historyQueryItemPriceTrend(selectedItemId, range.from, range.to, timezoneOffsetMin),
+    enabled: !!bootstrap && !!selectedItemId,
   })
-
-  const priceQuery = useQuery({
-    queryKey: ["history-prices", selectedItemId],
-    queryFn: () => api.historyQueryPrices(selectedItemId || undefined),
-    enabled: !!bootstrap,
-  })
-
-  const purchaseQuery = useQuery({
-    queryKey: ["history-purchases", selectedItemId],
-    queryFn: () => api.historyQueryPurchases(selectedItemId || undefined),
-    enabled: !!bootstrap,
-  })
-
-  const profit = useMemo(() => {
-    const cost = buyPrice * qty
-    const gross = sellPrice * qty
-    const tax = gross * 0.06
-    const net = gross - tax
-    return {
-      cost,
-      gross,
-      tax,
-      net,
-      profit: net - cost,
-    }
-  }, [buyPrice, qty, sellPrice])
 
   if (!bootstrap) return null
 
-  const selectedItemName =
-    bootstrap.goods.find((item) => item.id === selectedItemId)?.name ?? "全部物品"
+  const selectedItem = bootstrap.goods.find((item) => item.id === selectedItemId)
+  const selectedItemName = trendQuery.data?.itemName || selectedItem?.name || "未选择物品"
+  const points = trendQuery.data?.points ?? []
+  const hasData = points.length > 0
 
   return (
     <div className="grid gap-10">
@@ -94,31 +114,27 @@ export function HistoryPage() {
             <Badge variant="outline">{selectedItemName}</Badge>
           </>
         }
-        title="历史统计"
-        description="用更安静的布局查看价格轨迹、购买记录和即时利润估算。"
-        detail="按物品筛选后，页面会同步更新聚合指标、价格历史和购买流水。"
+        title="物品价格趋势"
+        description="以物品为主视角查看价格趋势，聚焦每天最高价、最低价和均价变化。"
+        detail="先选物品，再切换 7 / 30 / 90 天时间窗；图表和每日统计表会同步更新。"
       />
 
       <PageSurface>
         <PageSurfaceContent className="gap-8">
           <SectionHeading
-            eyebrow="Summary"
-            title="聚合指标"
-            description="先确定观察对象，再读指标，不让筛选控件打断数据视线。"
+            eyebrow="Filter"
+            title="观察范围"
+            description="不默认聚合全部物品，避免把不同物品的价格波动混在一起。"
           />
 
-          <div className="grid gap-8 lg:grid-cols-[280px_minmax(0,1fr)]">
+          <div className="grid gap-8 lg:grid-cols-[minmax(0,320px)_minmax(0,1fr)]">
             <div className="space-y-3">
               <Label>选择物品</Label>
-              <Select
-                value={selectedItemId || "__all__"}
-                onValueChange={(value) => setSelectedItemId(value === "__all__" ? "" : value)}
-              >
+              <Select value={selectedItemId || undefined} onValueChange={setSelectedItemId}>
                 <SelectTrigger className={minimalSelectTriggerClassName}>
-                  <SelectValue placeholder="全部物品" />
+                  <SelectValue placeholder="请选择一个物品" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="__all__">全部物品</SelectItem>
                   {bootstrap.goods.map((item) => (
                     <SelectItem key={item.id} value={item.id}>
                       {item.name}
@@ -128,164 +144,220 @@ export function HistoryPage() {
               </Select>
             </div>
 
-            <MetricGrid className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
-              <MetricCard label="价格记录" value={fmt(summaryQuery.data?.priceCount ?? 0)} />
-              <MetricCard label="最新价格" value={fmt(summaryQuery.data?.latestPrice ?? 0)} />
-              <MetricCard label="均价" value={fmt(summaryQuery.data?.priceAvg ?? 0)} />
-              <MetricCard label="购买数量" value={fmt(summaryQuery.data?.purchaseQty ?? 0)} />
-              <MetricCard label="购买金额" value={fmt(summaryQuery.data?.purchaseAmount ?? 0)} />
-            </MetricGrid>
+            <div className="space-y-3">
+              <Label>时间范围</Label>
+              <div className="flex flex-wrap gap-2">
+                {RANGE_OPTIONS.map((option) => {
+                  const active = option.value === rangePreset
+                  return (
+                    <button
+                      key={option.value}
+                      type="button"
+                      onClick={() => setRangePreset(option.value)}
+                      className={`rounded-full border px-4 py-2 text-sm transition ${
+                        active
+                          ? "border-emerald-300 bg-emerald-50 text-emerald-900"
+                          : "border-black/10 bg-white/70 text-slate-600 hover:border-slate-300 hover:text-slate-900"
+                      }`}
+                    >
+                      {option.label}
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
           </div>
+
+          <MetricGrid className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            <MetricCard label="最新价格" value={fmtNullable(trendQuery.data?.latestPrice)} />
+            <MetricCard label="区间最低" value={fmtNullable(trendQuery.data?.rangeMinPrice)} />
+            <MetricCard label="区间最高" value={fmtNullable(trendQuery.data?.rangeMaxPrice)} />
+            <MetricCard label="区间均价" value={fmtNullable(trendQuery.data?.rangeAvgPrice)} />
+          </MetricGrid>
         </PageSurfaceContent>
       </PageSurface>
 
       <PageSurface>
         <PageSurfaceContent className="gap-8">
           <SectionHeading
-            eyebrow="Calculator"
-            title="利润计算"
-            description="沿用 6% 交易税规则，快速估算当前交易是否仍有空间。"
-            actions={
-              <Badge variant="outline">
-                <Calculator className="mr-2 size-4" />
-                即时估算
-              </Badge>
-            }
+            eyebrow="Trend"
+            title="价格趋势图"
+            description="固定展示每日最高价、最低价和均价，不再把原始明细直接堆进图表。"
           />
 
-          <div className="grid gap-8 md:grid-cols-3">
-            <NumberField label="买入价" value={buyPrice} onChange={setBuyPrice} />
-            <NumberField label="卖出价" value={sellPrice} onChange={setSellPrice} />
-            <NumberField label="数量" value={qty} onChange={setQty} />
-          </div>
-
-          <MetricGrid className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
-            <MetricCard label="总成本" value={fmt(profit.cost)} />
-            <MetricCard label="卖出总额" value={fmt(profit.gross)} />
-            <MetricCard label="交易税" value={fmt(profit.tax)} />
-            <MetricCard label="净收入" value={fmt(profit.net)} />
-            <MetricCard
-              label="利润"
-              tone={profit.profit >= 0 ? "emerald" : "rose"}
-              value={fmt(profit.profit)}
-            />
-          </MetricGrid>
+          {!selectedItemId ? (
+            <InlineNote>请选择一个物品查看价格趋势。</InlineNote>
+          ) : trendQuery.isLoading ? (
+            <InlineNote>正在加载该物品的价格趋势...</InlineNote>
+          ) : trendQuery.error ? (
+            <InlineNote tone="rose">{String(trendQuery.error)}</InlineNote>
+          ) : hasData ? (
+            <Card className="rounded-[32px] border border-black/5 bg-white/55 shadow-none">
+              <CardContent className="p-4 md:p-6">
+                <div className="h-[360px] w-full">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart
+                      data={points}
+                      margin={{ top: 12, right: 12, left: -16, bottom: 0 }}
+                    >
+                      <CartesianGrid stroke="rgba(148, 163, 184, 0.20)" strokeDasharray="4 4" />
+                      <XAxis dataKey="day" axisLine={false} tickLine={false} dy={8} />
+                      <YAxis
+                        axisLine={false}
+                        tickLine={false}
+                        width={84}
+                        tickFormatter={(value) => fmt(Number(value))}
+                      />
+                      <Tooltip content={<PriceTrendTooltip />} />
+                      <Legend />
+                      <Line
+                        type="monotone"
+                        dataKey="maxPrice"
+                        name="每日最高价"
+                        stroke="#166534"
+                        strokeWidth={2.5}
+                        dot={false}
+                        activeDot={{ r: 4 }}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="minPrice"
+                        name="每日最低价"
+                        stroke="#be123c"
+                        strokeWidth={2.5}
+                        dot={false}
+                        activeDot={{ r: 4 }}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="avgPrice"
+                        name="每日均价"
+                        stroke="#475569"
+                        strokeWidth={2}
+                        strokeDasharray="6 4"
+                        dot={false}
+                        activeDot={{ r: 3 }}
+                      />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              </CardContent>
+            </Card>
+          ) : (
+            <InlineNote>该物品暂无价格历史。</InlineNote>
+          )}
         </PageSurfaceContent>
       </PageSurface>
 
-      <div className="grid gap-6 xl:grid-cols-2">
-        <PageSurface>
-          <PageSurfaceContent className="gap-8">
-            <SectionHeading
-              eyebrow="Prices"
-              title="价格历史"
-              description="最近识别到的价格记录。"
-            />
+      <PageSurface>
+        <PageSurfaceContent className="gap-8">
+          <SectionHeading
+            eyebrow="Daily"
+            title="每日高低价"
+            description="按本机时区把价格历史聚合到天，方便快速回看日内价格区间。"
+          />
 
+          {!selectedItemId ? (
+            <InlineNote>请选择一个物品查看每日最高价与最低价。</InlineNote>
+          ) : trendQuery.isLoading ? (
+            <InlineNote>正在准备每日高低价表...</InlineNote>
+          ) : trendQuery.error ? (
+            <InlineNote tone="rose">{String(trendQuery.error)}</InlineNote>
+          ) : hasData ? (
             <div className="overflow-hidden rounded-[32px] border border-black/5 bg-white/55">
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>时间</TableHead>
-                    <TableHead>物品</TableHead>
-                    <TableHead className="text-right">价格</TableHead>
+                    <TableHead>日期</TableHead>
+                    <TableHead className="text-right">最低价</TableHead>
+                    <TableHead className="text-right">最高价</TableHead>
+                    <TableHead className="text-right">均价</TableHead>
+                    <TableHead className="text-right">最新价</TableHead>
+                    <TableHead className="text-right">样本数</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {priceQuery.data && priceQuery.data.length > 0 ? (
-                    priceQuery.data.map((item) => (
-                      <TableRow key={item.id}>
-                        <TableCell className="py-5 text-slate-600">{item.observedAt}</TableCell>
-                        <TableCell className="py-5 text-slate-900">{item.itemName}</TableCell>
-                        <TableCell className="py-5 text-right font-medium text-slate-900">
-                          {fmt(item.price)}
-                        </TableCell>
-                      </TableRow>
-                    ))
-                  ) : (
-                    <TableRow>
-                      <TableCell colSpan={3} className="py-16 text-center text-sm text-slate-500">
-                        当前条件下没有价格记录。
+                  {points.map((point) => (
+                    <TableRow key={point.day}>
+                      <TableCell className="py-5 text-slate-700">{point.day}</TableCell>
+                      <TableCell className="py-5 text-right text-rose-700">
+                        {fmt(point.minPrice)}
+                      </TableCell>
+                      <TableCell className="py-5 text-right text-emerald-800">
+                        {fmt(point.maxPrice)}
+                      </TableCell>
+                      <TableCell className="py-5 text-right text-slate-700">
+                        {fmt(point.avgPrice)}
+                      </TableCell>
+                      <TableCell className="py-5 text-right font-medium text-slate-900">
+                        {fmt(point.latestPrice)}
+                      </TableCell>
+                      <TableCell className="py-5 text-right text-slate-600">
+                        {fmt(point.sampleCount)}
                       </TableCell>
                     </TableRow>
-                  )}
+                  ))}
                 </TableBody>
               </Table>
             </div>
-          </PageSurfaceContent>
-        </PageSurface>
+          ) : (
+            <InlineNote>该物品暂无价格历史。</InlineNote>
+          )}
+        </PageSurfaceContent>
+      </PageSurface>
+    </div>
+  )
+}
 
-        <PageSurface>
-          <PageSurfaceContent className="gap-8">
-            <SectionHeading
-              eyebrow="Purchases"
-              title="购买历史"
-              description="最近写入的购买流水。"
-            />
+function PriceTrendTooltip({
+  active,
+  payload,
+  label,
+}: {
+  active?: boolean
+  payload?: Array<{ payload?: ItemPriceTrendPoint }>
+  label?: string
+}) {
+  const point = payload?.[0]?.payload
+  if (!active || !point) {
+    return null
+  }
 
-            <div className="overflow-hidden rounded-[32px] border border-black/5 bg-white/55">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>时间</TableHead>
-                    <TableHead>物品</TableHead>
-                    <TableHead className="text-right">单价</TableHead>
-                    <TableHead className="text-right">数量</TableHead>
-                    <TableHead className="text-right">金额</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {purchaseQuery.data && purchaseQuery.data.length > 0 ? (
-                    purchaseQuery.data.map((item) => (
-                      <TableRow key={item.id}>
-                        <TableCell className="py-5 text-slate-600">{item.purchasedAt}</TableCell>
-                        <TableCell className="py-5 text-slate-900">{item.itemName}</TableCell>
-                        <TableCell className="py-5 text-right text-slate-700">
-                          {fmt(item.price)}
-                        </TableCell>
-                        <TableCell className="py-5 text-right text-slate-700">
-                          {fmt(item.qty)}
-                        </TableCell>
-                        <TableCell className="py-5 text-right font-medium text-slate-900">
-                          {fmt(item.amount)}
-                        </TableCell>
-                      </TableRow>
-                    ))
-                  ) : (
-                    <TableRow>
-                      <TableCell colSpan={5} className="py-16 text-center text-sm text-slate-500">
-                        当前条件下没有购买记录。
-                      </TableCell>
-                    </TableRow>
-                  )}
-                </TableBody>
-              </Table>
-            </div>
-          </PageSurfaceContent>
-        </PageSurface>
+  return (
+    <div className="rounded-3xl border border-black/5 bg-white/95 p-4 text-sm text-slate-700 shadow-lg shadow-slate-900/5">
+      <p className="text-xs uppercase tracking-[0.24em] text-slate-400">Date</p>
+      <p className="mt-1 font-medium text-slate-950">{label}</p>
+      <div className="mt-3 grid gap-2">
+        <TooltipRow label="最高价" value={point.maxPrice} tone="emerald" />
+        <TooltipRow label="最低价" value={point.minPrice} tone="rose" />
+        <TooltipRow label="均价" value={point.avgPrice} tone="slate" />
+        <TooltipRow label="最新价" value={point.latestPrice} tone="slate" />
+        <TooltipRow label="样本数" value={point.sampleCount} tone="slate" />
       </div>
     </div>
   )
 }
 
-function NumberField({
+function TooltipRow({
   label,
   value,
-  onChange,
+  tone,
 }: {
   label: string
   value: number
-  onChange: (value: number) => void
+  tone: "slate" | "emerald" | "rose"
 }) {
+  const colorClass =
+    tone === "emerald"
+      ? "text-emerald-800"
+      : tone === "rose"
+        ? "text-rose-700"
+        : "text-slate-700"
+
   return (
-    <div className="space-y-3">
-      <Label>{label}</Label>
-      <Input
-        className={minimalFieldClassName}
-        type="number"
-        value={value}
-        onChange={(event) => onChange(Number(event.target.value))}
-      />
+    <div className="flex items-center justify-between gap-4">
+      <span className="text-slate-500">{label}</span>
+      <span className={`font-medium ${colorClass}`}>{fmt(value)}</span>
     </div>
   )
 }

@@ -126,12 +126,16 @@ impl AutomationManager {
         &self,
         app: AppHandle,
         tasks: Vec<MultiTaskRecord>,
+        config: AppConfig,
+        templates: Vec<TemplateConfig>,
+        paths: Arc<AppPaths>,
     ) -> Result<AutomationRunState> {
         if tasks.is_empty() {
             return Err(anyhow!("no multi tasks configured"));
         }
         self.stop_internal();
         let session_id = format!("multi-{}", Uuid::new_v4());
+        let pause_flag = Arc::new(AtomicBool::new(false));
         let state = AutomationRunState {
             session_id: Some(session_id.clone()),
             mode: Some("multi".to_string()),
@@ -146,13 +150,22 @@ impl AutomationManager {
         let _ = app.emit(AUTOMATION_STATE_EVENT, state.clone());
         let manager = self.clone();
         let state_clone = state.clone();
+        let pause_clone = pause_flag.clone();
         let handle = tokio::spawn(async move {
             let event_manager = manager.clone();
             let event_app = app.clone();
             let emit = move |event: AutomationEvent| {
                 let _ = event_manager.handle_event(&event_app, event);
             };
-            let result = multi_runner::run_multi_flow(&tasks, emit, session_id.clone()).await;
+            let request = multi_runner::MultiRunRequest {
+                tasks,
+                config,
+                templates,
+                paths,
+                repo: manager.repo.clone(),
+                pause_flag: pause_clone,
+            };
+            let result = multi_runner::run_multi_flow(request, emit, session_id.clone()).await;
             let final_state = AutomationRunState {
                 session_id: Some(session_id.clone()),
                 mode: Some("multi".to_string()),
@@ -179,6 +192,7 @@ impl AutomationManager {
             .expect("automation control mutex poisoned");
         control.state = state.clone();
         control.task = Some(handle);
+        control.pause_flag = Some(pause_flag);
         Ok(state)
     }
 

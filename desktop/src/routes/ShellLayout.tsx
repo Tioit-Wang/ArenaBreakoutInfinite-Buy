@@ -15,6 +15,7 @@ import type {
 } from "@/lib/types"
 import { Card, CardContent } from "@/components/ui/card"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { WindowBar } from "@/components/window-bar"
 
 const navItems = [
   { value: "single", to: "/single", label: "单商品抢购", icon: Sparkles },
@@ -116,7 +117,9 @@ export function ShellLayout() {
   const activeTab = useMemo(() => routeToTab(location.pathname), [location.pathname])
   return (
     <div className="min-h-screen">
-      <div className="mx-auto flex min-h-screen w-full max-w-[1440px] flex-col px-4 pb-24 pt-4 md:px-6 xl:px-8">
+      <WindowBar title="ArenaBuyer Desktop" />
+
+      <div className="mx-auto flex min-h-screen w-full max-w-[1440px] flex-col px-4 pb-24 pt-[4.25rem] md:px-6 xl:px-8">
         <div className="flex-1">
           {bootstrapQuery.isLoading ? (
             <Card className="border-white/70 bg-white/80 shadow-xl shadow-emerald-950/5 backdrop-blur">

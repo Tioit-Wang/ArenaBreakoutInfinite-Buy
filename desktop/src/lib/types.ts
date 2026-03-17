@@ -92,6 +92,27 @@ export type TemplateConfig = {
   updatedAt: string
 }
 
+export type TemplateFileValidationResult = {
+  valid: boolean
+  width?: number | null
+  height?: number | null
+  message: string
+}
+
+export type MatchBoxSnapshot = {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+export type TemplateProbeResult = {
+  matched: boolean
+  confidence: number
+  box?: MatchBoxSnapshot | null
+  message: string
+}
+
 export type GoodsRecord = {
   id: string
   name: string
@@ -150,6 +171,7 @@ export type PriceHistoryRecord = {
   category?: string | null
   price: number
   observedAt: string
+  observedAtEpoch?: number
 }
 
 export type PurchaseHistoryRecord = {
@@ -176,6 +198,27 @@ export type HistorySummary = {
   purchaseQty: number
   purchaseAmount: number
   purchaseAvg: number
+}
+
+export type ItemPriceTrendPoint = {
+  day: string
+  minPrice: number
+  maxPrice: number
+  avgPrice: number
+  latestPrice: number
+  sampleCount: number
+}
+
+export type ItemPriceTrendResponse = {
+  itemId: string
+  itemName: string
+  from: string
+  to: string
+  points: ItemPriceTrendPoint[]
+  latestPrice?: number | null
+  rangeMinPrice?: number | null
+  rangeMaxPrice?: number | null
+  rangeAvgPrice?: number | null
 }
 
 export type LegacyCandidate = {

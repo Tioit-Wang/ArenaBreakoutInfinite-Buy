@@ -52,13 +52,18 @@ pub fn run() {
             commands::templates::templates_list,
             commands::templates::templates_save,
             commands::templates::templates_test,
+            commands::templates::templates_validate_file,
+            commands::templates::templates_probe_match,
             commands::templates::templates_import_image,
             commands::templates::templates_capture_region,
+            commands::templates::templates_capture_interactive,
             commands::templates::goods_import_image,
             commands::templates::goods_capture_card_image,
+            commands::templates::goods_capture_card_interactive,
             commands::history::history_query_prices,
             commands::history::history_query_purchases,
             commands::history::history_query_summary,
+            commands::history::history_query_item_price_trend,
             commands::legacy::legacy_scan,
             commands::legacy::legacy_import,
             commands::runtime::automation_start_single,
@@ -82,6 +87,7 @@ fn create_main_window(app: &mut tauri::App) -> anyhow::Result<()> {
     let url = resolve_main_window_url().context("failed to resolve main window url")?;
     WebviewWindowBuilder::new(app, "main", url)
         .title("ArenaBuyer Desktop")
+        .decorations(false)
         .inner_size(1440.0, 920.0)
         .min_inner_size(1180.0, 760.0)
         .resizable(true)

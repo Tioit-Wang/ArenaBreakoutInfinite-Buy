@@ -264,6 +264,8 @@ pub struct PriceHistoryRecord {
     pub category: Option<String>,
     pub price: i64,
     pub observed_at: String,
+    #[serde(default)]
+    pub observed_at_epoch: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -294,6 +296,31 @@ pub struct HistorySummary {
     pub purchase_qty: i64,
     pub purchase_amount: i64,
     pub purchase_avg: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ItemPriceTrendPoint {
+    pub day: String,
+    pub min_price: i64,
+    pub max_price: i64,
+    pub avg_price: i64,
+    pub latest_price: i64,
+    pub sample_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ItemPriceTrendResponse {
+    pub item_id: String,
+    pub item_name: String,
+    pub from: String,
+    pub to: String,
+    pub points: Vec<ItemPriceTrendPoint>,
+    pub latest_price: Option<i64>,
+    pub range_min_price: Option<i64>,
+    pub range_max_price: Option<i64>,
+    pub range_avg_price: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -440,4 +467,10 @@ pub struct AppBootstrap {
 pub fn now_iso() -> String {
     let now: DateTime<Utc> = Utc::now();
     now.to_rfc3339()
+}
+
+pub fn iso_to_epoch(raw: &str) -> i64 {
+    DateTime::parse_from_rfc3339(raw)
+        .map(|value| value.timestamp())
+        .unwrap_or_default()
 }

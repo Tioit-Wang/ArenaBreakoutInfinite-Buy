@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
+use image::RgbaImage;
 use serde::{Deserialize, Serialize};
 
 #[cfg(not(target_os = "windows"))]
@@ -8,8 +9,6 @@ use xcap::Monitor;
 #[cfg(not(target_os = "windows"))]
 use xcap::image::imageops;
 
-#[cfg(target_os = "windows")]
-use image::RgbaImage;
 #[cfg(target_os = "windows")]
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CAPTUREBLT, CreateCompatibleBitmap,
@@ -37,6 +36,11 @@ struct NormalizedRegion {
     y: i32,
     width: i32,
     height: i32,
+}
+
+#[derive(Debug, Clone)]
+pub struct CapturedImage {
+    pub image: RgbaImage,
 }
 
 pub fn save_region_png(region: &CaptureRegion, output_path: &Path) -> Result<()> {
@@ -78,6 +82,20 @@ pub fn save_region_png(region: &CaptureRegion, output_path: &Path) -> Result<()>
     }
 
     Ok(())
+}
+
+pub fn capture_full_screen() -> Result<CapturedImage> {
+    #[cfg(target_os = "windows")]
+    {
+        let region = virtual_screen_region()?;
+        let image = capture_region_windows_gdi(region)?;
+        return Ok(CapturedImage { image });
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        bail!("full screen capture is only implemented on Windows")
+    }
 }
 
 fn normalize_region(region: &CaptureRegion) -> Result<NormalizedRegion> {
@@ -131,6 +149,25 @@ fn normalize_region(region: &CaptureRegion) -> Result<NormalizedRegion> {
             height: region.height.clamp(1, max_height),
         });
     }
+}
+
+#[cfg(target_os = "windows")]
+fn virtual_screen_region() -> Result<NormalizedRegion> {
+    let virtual_x = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
+    let virtual_y = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
+    let virtual_width = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) };
+    let virtual_height = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) };
+
+    if virtual_width <= 0 || virtual_height <= 0 {
+        bail!("failed to resolve virtual screen bounds")
+    }
+
+    Ok(NormalizedRegion {
+        x: virtual_x,
+        y: virtual_y,
+        width: virtual_width,
+        height: virtual_height,
+    })
 }
 
 #[cfg(target_os = "windows")]

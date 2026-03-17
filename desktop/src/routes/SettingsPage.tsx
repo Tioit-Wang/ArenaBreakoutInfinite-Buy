@@ -1,23 +1,13 @@
-import { useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useQueryClient } from "@tanstack/react-query"
 import { open } from "@tauri-apps/plugin-dialog"
-import {
-  Eye,
-  FolderOpen,
-  ImageIcon,
-  ImagePlus,
-  RefreshCw,
-  RotateCw,
-  Save,
-  ScanSearch,
-} from "lucide-react"
+import { FolderOpen, ImageIcon, RefreshCw, RotateCw, ScanSearch } from "lucide-react"
 
 import { useRuntimeStore } from "@/app/store"
-import { openCaptureOverlay } from "@/lib/capture-overlay"
 import { resolveImageSrc } from "@/lib/assets"
 import { api } from "@/lib/api"
 import { isTauriRuntime } from "@/lib/tauri"
-import type { AppConfig, OcrStatus, TemplateConfig } from "@/lib/types"
+import type { AppBootstrap, AppConfig, OcrStatus, TemplateConfig } from "@/lib/types"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -47,23 +37,54 @@ import {
   minimalFieldClassName,
 } from "@/components/minimal-page"
 
+const AUTOSAVE_DELAY_MS = 400
+
+type NoticeTone = "slate" | "emerald" | "rose"
+type TemplateStatusMap = Record<string, boolean>
+type ToastState = {
+  message: string
+  tone: NoticeTone
+} | null
+
 const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value))
 
 export function SettingsPage() {
   const bootstrap = useRuntimeStore((state) => state.bootstrap)
   const setOcrStatus = useRuntimeStore((state) => state.setOcrStatus)
   const [config, setConfig] = useState<AppConfig | null>(null)
+  const [hotkeyDraft, setHotkeyDraft] = useState("")
   const [templates, setTemplates] = useState<TemplateConfig[]>([])
-  const [previewTemplate, setPreviewTemplate] = useState<TemplateConfig | null>(null)
-  const [templateMessage, setTemplateMessage] = useState<string>("")
-  const [ocrMessage, setOcrMessage] = useState<string>("")
+  const [templateStatus, setTemplateStatus] = useState<TemplateStatusMap>({})
+  const [previewTemplateId, setPreviewTemplateId] = useState<string | null>(null)
+  const [testingTemplateId, setTestingTemplateId] = useState<string | null>(null)
+  const [templateMessage, setTemplateMessage] = useState("")
+  const [templateMessageTone, setTemplateMessageTone] = useState<NoticeTone>("slate")
+  const [toast, setToast] = useState<ToastState>(null)
+  const [settingsMessage, setSettingsMessage] = useState("")
+  const [settingsMessageTone, setSettingsMessageTone] = useState<NoticeTone>("slate")
+  const [ocrMessage, setOcrMessage] = useState("")
   const queryClient = useQueryClient()
+  const initializedRef = useRef(false)
+  const configAutosaveReadyRef = useRef(false)
+  const configRef = useRef<AppConfig | null>(null)
+  const templateAutosaveReadyRef = useRef(false)
+  const templateStatusRequestIdRef = useRef(0)
+  const lastSavedTemplatesRef = useRef<Record<string, TemplateConfig>>({})
 
   useEffect(() => {
-    if (bootstrap) {
-      setConfig(clone(bootstrap.config))
-      setTemplates(clone(bootstrap.templates))
+    if (!bootstrap || initializedRef.current) {
+      return
     }
+    initializedRef.current = true
+    const initialConfig = clone(bootstrap.config)
+    const initialTemplates = clone(bootstrap.templates)
+    setConfig(initialConfig)
+    setHotkeyDraft(initialConfig.hotkeys.toggle)
+    setTemplates(initialTemplates)
+    setTemplateStatus({})
+    lastSavedTemplatesRef.current = Object.fromEntries(
+      initialTemplates.map((template) => [template.id, template]),
+    )
   }, [bootstrap])
 
   const ocrTone = useMemo(() => {
@@ -71,6 +92,182 @@ export function SettingsPage() {
     if (bootstrap?.ocrStatus.started) return "secondary" as const
     return "outline" as const
   }, [bootstrap?.ocrStatus.ready, bootstrap?.ocrStatus.started])
+
+  const previewTemplate = useMemo(
+    () => templates.find((template) => template.id === previewTemplateId) ?? null,
+    [previewTemplateId, templates],
+  )
+
+  const previewTemplateSrc =
+    previewTemplate && templateStatus[previewTemplate.id]
+      ? resolveImageSrc(bootstrap?.paths, previewTemplate.path)
+      : ""
+
+  const templatePathSignature = useMemo(
+    () => templates.map((template) => `${template.id}:${template.path}`).join("|"),
+    [templates],
+  )
+  const templateConfidenceSignature = useMemo(
+    () => templates.map((template) => `${template.id}:${template.confidence}`).join("|"),
+    [templates],
+  )
+
+  const describeError = (error: unknown) =>
+    error instanceof Error ? error.message : String(error)
+
+  useEffect(() => {
+    if (!toast) {
+      return
+    }
+    const timeoutId = window.setTimeout(() => {
+      setToast(null)
+    }, 2200)
+    return () => window.clearTimeout(timeoutId)
+  }, [toast])
+
+  const showToast = useCallback((message: string, tone: NoticeTone) => {
+    setToast({ message, tone })
+  }, [])
+
+  const updateBootstrapCache = useCallback((updater: (current: AppBootstrap) => AppBootstrap) => {
+    queryClient.setQueryData<AppBootstrap>(["bootstrap"], (current) =>
+      current ? updater(current) : current,
+    )
+  }, [queryClient])
+
+  const syncTemplatesIntoCache = useCallback((savedTemplates: TemplateConfig[]) => {
+    if (savedTemplates.length === 0) {
+      return
+    }
+    const savedById = new Map(savedTemplates.map((template) => [template.id, template]))
+    updateBootstrapCache((current) => ({
+      ...current,
+      templates: current.templates.map((template) => savedById.get(template.id) ?? template),
+    }))
+  }, [updateBootstrapCache])
+
+  const persistConfig = useCallback(async (
+    nextConfig: AppConfig,
+    successMessage = "设置已自动保存",
+  ) => {
+    try {
+      const saved = await api.configSave(nextConfig)
+      updateBootstrapCache((current) => ({
+        ...current,
+        config: clone(saved),
+      }))
+      setSettingsMessageTone("emerald")
+      setSettingsMessage(successMessage)
+      return saved
+    } catch (error) {
+      setSettingsMessageTone("rose")
+      setSettingsMessage(`设置自动保存失败：${describeError(error)}`)
+      throw error
+    }
+  }, [updateBootstrapCache])
+
+  useEffect(() => {
+    configRef.current = config
+  }, [config])
+
+  useEffect(() => {
+    if (!configRef.current) {
+      return
+    }
+    if (!configAutosaveReadyRef.current) {
+      configAutosaveReadyRef.current = true
+      return
+    }
+    const timeoutId = window.setTimeout(() => {
+      const nextConfig = configRef.current
+      if (!nextConfig) {
+        return
+      }
+      void persistConfig(nextConfig)
+    }, AUTOSAVE_DELAY_MS)
+    return () => window.clearTimeout(timeoutId)
+  }, [config?.game.exePath, config?.game.launchArgs, config?.umiOcr.exePath, persistConfig])
+
+  useEffect(() => {
+    if (templates.length === 0) {
+      return
+    }
+    if (!templateAutosaveReadyRef.current) {
+      templateAutosaveReadyRef.current = true
+      return
+    }
+    const changedTemplates = templates.filter((template) => {
+      const lastSaved = lastSavedTemplatesRef.current[template.id]
+      return (
+        !lastSaved
+        || lastSaved.confidence !== template.confidence
+        || lastSaved.path !== template.path
+      )
+    })
+    if (changedTemplates.length === 0) {
+      return
+    }
+    const timeoutId = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const savedTemplates = await Promise.all(
+            changedTemplates.map((template) =>
+              api.templatesSave({
+                ...template,
+                updatedAt: new Date().toISOString(),
+              }),
+            ),
+          )
+          for (const savedTemplate of savedTemplates) {
+            lastSavedTemplatesRef.current[savedTemplate.id] = savedTemplate
+          }
+          syncTemplatesIntoCache(savedTemplates)
+          setTemplateMessageTone("emerald")
+          setTemplateMessage(
+            savedTemplates.length === 1
+              ? `模板 ${savedTemplates[0].name} 已自动保存`
+              : `已自动保存 ${savedTemplates.length} 个模板配置`,
+          )
+          showToast(
+            savedTemplates.length === 1
+              ? `模板 ${savedTemplates[0].name} 已自动保存`
+              : `已自动保存 ${savedTemplates.length} 个模板配置`,
+            "emerald",
+          )
+        } catch (error) {
+          setTemplateMessageTone("rose")
+          setTemplateMessage(`模板自动保存失败：${describeError(error)}`)
+          showToast(`模板自动保存失败：${describeError(error)}`, "rose")
+        }
+      })()
+    }, AUTOSAVE_DELAY_MS)
+    return () => window.clearTimeout(timeoutId)
+  }, [showToast, syncTemplatesIntoCache, templateConfidenceSignature, templates])
+
+  useEffect(() => {
+    if (templates.length === 0) {
+      setTemplateStatus({})
+      return
+    }
+    const requestId = templateStatusRequestIdRef.current + 1
+    templateStatusRequestIdRef.current = requestId
+    void (async () => {
+      const results = await Promise.all(
+        templates.map(async (template) => {
+          try {
+            const validation = await api.templatesValidateFile(template.path)
+            return [template.id, Boolean(validation.valid)] as const
+          } catch {
+            return [template.id, false] as const
+          }
+        }),
+      )
+      if (templateStatusRequestIdRef.current !== requestId) {
+        return
+      }
+      setTemplateStatus(Object.fromEntries(results))
+    })()
+  }, [templatePathSignature, templates])
 
   if (!bootstrap || !config) return null
 
@@ -91,27 +288,29 @@ export function SettingsPage() {
     }
   }
 
-  const chooseImageFile = async () => {
-    if (!isTauriRuntime()) return null
-    const selected = await open({
-      title: "选择图片文件",
-      defaultPath: bootstrap.paths.imagesDir,
-      multiple: false,
-      directory: false,
-      filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "webp"] }],
-    })
-    return typeof selected === "string" ? selected : null
-  }
-
   const updateTemplate = (id: string, patch: Partial<TemplateConfig>) => {
     setTemplates((current) =>
       current.map((item) => (item.id === id ? { ...item, ...patch } : item)),
     )
   }
 
-  const saveConfig = async () => {
-    await api.configSave(config)
-    await queryClient.invalidateQueries({ queryKey: ["bootstrap"] })
+  const commitHotkeyDraft = async () => {
+    if (!config) {
+      return
+    }
+    const nextToggle = hotkeyDraft.trim()
+    if (nextToggle === config.hotkeys.toggle) {
+      return
+    }
+    const nextConfig: AppConfig = {
+      ...config,
+      hotkeys: {
+        ...config.hotkeys,
+        toggle: nextToggle,
+      },
+    }
+    setConfig(nextConfig)
+    await persistConfig(nextConfig, "全局热键已自动保存")
   }
 
   const runOcrAction = async (action: () => Promise<OcrStatus>) => {
@@ -121,33 +320,71 @@ export function SettingsPage() {
     await queryClient.invalidateQueries({ queryKey: ["bootstrap"] })
   }
 
-  const saveTemplate = async (template: TemplateConfig) => {
-    await api.templatesSave({
-      ...template,
-      updatedAt: new Date().toISOString(),
-    })
-    setTemplateMessage(`模板 ${template.name} 已保存`)
-    await queryClient.invalidateQueries({ queryKey: ["bootstrap"] })
+  const handlePreviewTemplate = (template: TemplateConfig) => {
+    if (!templateStatus[template.id]) {
+      setTemplateMessageTone("rose")
+      setTemplateMessage(`${template.name}: 模板文件不存在，无法预览`)
+      showToast(`${template.name}: 模板文件不存在，无法预览`, "rose")
+      return
+    }
+    setPreviewTemplateId(template.id)
   }
 
   const testTemplate = async (template: TemplateConfig) => {
-    const result = await api.templatesTest(template.path)
-    setTemplateMessage(`${template.name}: ${result.message}`)
-  }
-
-  const importTemplateImage = async (template: TemplateConfig) => {
-    const sourcePath = await chooseImageFile()
-    if (!sourcePath) return
-    const path = await api.templatesImportImage(template.slug, sourcePath)
-    updateTemplate(template.id, { path })
-    setTemplateMessage(`${template.name}: 已导入图片 ${path}`)
+    if (testingTemplateId) {
+      return
+    }
+    setTestingTemplateId(template.id)
+    try {
+      await new Promise<void>((resolve) => {
+        window.requestAnimationFrame(() => resolve())
+      })
+      const result = await api.templatesProbeMatch(template.path)
+      const suffix = result.box
+        ? ` @ (${result.box.x}, ${result.box.y}, ${result.box.width}x${result.box.height})`
+        : ""
+      setTemplateMessageTone(result.matched ? "emerald" : "rose")
+      const message = `${template.name}: ${result.message}${suffix}`
+      setTemplateMessage(message)
+      showToast(message, result.matched ? "emerald" : "rose")
+    } catch (error) {
+      setTemplateMessageTone("rose")
+      const message = `${template.name}: ${describeError(error)}`
+      setTemplateMessage(message)
+      showToast(message, "rose")
+    } finally {
+      setTestingTemplateId(null)
+    }
   }
 
   const captureTemplate = async (template: TemplateConfig) => {
-    const path = await openCaptureOverlay({ mode: "template", slug: template.slug })
-    if (!path) return
-    updateTemplate(template.id, { path })
-    setTemplateMessage(`${template.name}: 截图已保存到 ${path}`)
+    try {
+      const path = await api.templatesCaptureInteractive(template.slug)
+      const savedTemplate = await api.templatesSave({
+        ...template,
+        path,
+        updatedAt: new Date().toISOString(),
+      })
+      updateTemplate(savedTemplate.id, {
+        path: savedTemplate.path,
+        updatedAt: savedTemplate.updatedAt,
+      })
+      lastSavedTemplatesRef.current[savedTemplate.id] = savedTemplate
+      syncTemplatesIntoCache([savedTemplate])
+      setTemplateStatus((current) => ({ ...current, [savedTemplate.id]: true }))
+      setTemplateMessageTone("emerald")
+      const message = `${template.name}: 截图已保存并自动应用`
+      setTemplateMessage(message)
+      showToast(message, "emerald")
+    } catch (error) {
+      if (String(error).includes("capture cancelled")) {
+        return
+      }
+      setTemplateMessageTone("rose")
+      const message = `${template.name}: ${describeError(error)}`
+      setTemplateMessage(message)
+      showToast(message, "rose")
+    }
   }
 
   return (
@@ -165,12 +402,6 @@ export function SettingsPage() {
         title="设置"
         description="把 OCR 状态、启动路径和模板资源拉到同一张整洁工作台上。"
         detail={bootstrap.ocrStatus.message}
-        actions={
-          <Button size="lg" onClick={() => void saveConfig()}>
-            <Save className="mr-2 size-4" />
-            保存设置
-          </Button>
-        }
       />
 
       <PageSurface>
@@ -229,10 +460,14 @@ export function SettingsPage() {
                 placeholder="点击右侧按钮选择 launcher.exe"
                 onPick={() =>
                   void chooseExecutable(config.game.exePath, (path) =>
-                    setConfig({
-                      ...config,
-                      game: { ...config.game, exePath: path },
-                    }),
+                    setConfig((current) =>
+                      current
+                        ? {
+                            ...current,
+                            game: { ...current.game, exePath: path },
+                          }
+                        : current,
+                    ),
                   )
                 }
               />
@@ -242,10 +477,14 @@ export function SettingsPage() {
                 placeholder="点击右侧按钮选择 Umi-OCR.exe"
                 onPick={() =>
                   void chooseExecutable(config.umiOcr.exePath, (path) =>
-                    setConfig({
-                      ...config,
-                      umiOcr: { ...config.umiOcr, exePath: path },
-                    }),
+                    setConfig((current) =>
+                      current
+                        ? {
+                            ...current,
+                            umiOcr: { ...current.umiOcr, exePath: path },
+                          }
+                        : current,
+                    ),
                   )
                 }
               />
@@ -257,10 +496,14 @@ export function SettingsPage() {
                   className={minimalFieldClassName}
                   value={config.game.launchArgs}
                   onChange={(event) =>
-                    setConfig({
-                      ...config,
-                      game: { ...config.game, launchArgs: event.target.value },
-                    })
+                    setConfig((current) =>
+                      current
+                        ? {
+                            ...current,
+                            game: { ...current.game, launchArgs: event.target.value },
+                          }
+                        : current,
+                    )
                   }
                 />
               </div>
@@ -270,17 +513,24 @@ export function SettingsPage() {
                 <Input
                   id="hotkey"
                   className={minimalFieldClassName}
-                  value={config.hotkeys.toggle}
-                  onChange={(event) =>
-                    setConfig({
-                      ...config,
-                      hotkeys: { ...config.hotkeys, toggle: event.target.value },
-                    })
-                  }
+                  value={hotkeyDraft}
+                  onChange={(event) => setHotkeyDraft(event.target.value)}
+                  onBlur={() => void commitHotkeyDraft()}
+                  onKeyDown={(event) => {
+                    if (event.key !== "Enter") {
+                      return
+                    }
+                    event.preventDefault()
+                    void commitHotkeyDraft()
+                  }}
                 />
               </div>
             </div>
           </div>
+
+          {settingsMessage ? (
+            <InlineNote tone={settingsMessageTone}>{settingsMessage}</InlineNote>
+          ) : null}
         </PageSurfaceContent>
       </PageSurface>
 
@@ -289,133 +539,173 @@ export function SettingsPage() {
           <SectionHeading
             eyebrow="Templates"
             title="模板资源"
-            description="直接浏览缩略图、调整阈值、测试识别或重录截图。"
+            description="直接浏览完整缩略图、调整阈值、测试识别或重录截图。"
           />
 
           <ScrollArea className="rounded-[32px] border border-black/5 bg-white/55">
-            <Table className="min-w-[1180px]">
+            <Table className="min-w-[1080px]">
               <TableHeader>
                 <TableRow>
                   <TableHead className="w-[160px]">预览</TableHead>
                   <TableHead>模板名称</TableHead>
                   <TableHead>分类</TableHead>
+                  <TableHead className="w-[140px]">状态</TableHead>
                   <TableHead className="w-[180px]">阈值</TableHead>
-                  <TableHead className="w-[320px] text-right">操作</TableHead>
+                  <TableHead className="w-[220px] text-right">操作</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {templates.map((template) => (
-                  <TableRow key={template.id}>
-                    <TableCell className="py-5">
-                      <button
-                        type="button"
-                        className="group relative flex size-24 items-center justify-center overflow-hidden rounded-[24px] border border-black/5 bg-white/75"
-                        onClick={() => setPreviewTemplate(template)}
-                      >
-                        {resolveImageSrc(bootstrap.paths, template.path) ? (
-                          <img
-                            src={resolveImageSrc(bootstrap.paths, template.path)}
-                            alt={template.name}
-                            className="h-full w-full object-cover transition duration-200 group-hover:scale-105"
-                          />
-                        ) : (
-                          <ImageIcon className="size-8 text-slate-400" />
-                        )}
-                      </button>
-                    </TableCell>
-                    <TableCell className="py-5">
-                      <div className="space-y-1">
-                        <p className="font-medium text-slate-900">{template.name}</p>
-                        <p className="text-xs text-slate-500">{template.slug}</p>
-                      </div>
-                    </TableCell>
-                    <TableCell className="py-5 text-slate-700">{template.kind}</TableCell>
-                    <TableCell className="py-5">
-                      <Input
-                        className="h-10 rounded-full border-white/70 bg-white"
-                        type="number"
-                        step="0.01"
-                        value={template.confidence}
-                        onChange={(event) =>
-                          updateTemplate(template.id, {
-                            confidence: Number(event.target.value),
-                          })
-                        }
-                      />
-                    </TableCell>
-                    <TableCell className="py-5">
-                      <div className="flex justify-end gap-2">
-                        <Button
-                          size="sm"
-                          variant="secondary"
-                          onClick={() => setPreviewTemplate(template)}
+                {templates.map((template) => {
+                  const configured = Boolean(templateStatus[template.id])
+                  const isTesting = testingTemplateId === template.id
+                  const previewSrc = configured
+                    ? resolveImageSrc(bootstrap.paths, template.path)
+                    : ""
+                  return (
+                    <TableRow key={template.id}>
+                      <TableCell className="py-5">
+                        <button
+                          type="button"
+                          className="group relative flex size-24 items-center justify-center overflow-hidden rounded-[24px] border border-black/5 bg-white/75 p-2"
+                          onClick={() => handlePreviewTemplate(template)}
                         >
-                          <Eye className="mr-2 size-4" />
-                          大图
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="secondary"
-                          onClick={() => void importTemplateImage(template)}
+                          {previewSrc ? (
+                            <img
+                              src={previewSrc}
+                              alt={template.name}
+                              className="max-h-full max-w-full object-contain transition duration-200 group-hover:scale-105"
+                            />
+                          ) : (
+                            <ImageIcon className="size-8 text-slate-400" />
+                          )}
+                        </button>
+                      </TableCell>
+                      <TableCell className="py-5">
+                        <div className="space-y-1">
+                          <p className="font-medium text-slate-900">{template.name}</p>
+                          <p className="text-xs text-slate-500">{template.slug}</p>
+                        </div>
+                      </TableCell>
+                      <TableCell className="py-5 text-slate-700">{template.kind}</TableCell>
+                      <TableCell className="py-5">
+                        <Badge
+                          variant="outline"
+                          className={
+                            configured
+                              ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                              : "border-slate-200 bg-slate-50 text-slate-500"
+                          }
                         >
-                          <ImagePlus className="mr-2 size-4" />
-                          选图
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="secondary"
-                          onClick={() => void testTemplate(template)}
-                        >
-                          <ScanSearch className="mr-2 size-4" />
-                          测试
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="secondary"
-                          onClick={() => void captureTemplate(template)}
-                        >
-                          <FolderOpen className="mr-2 size-4" />
-                          自由截图
-                        </Button>
-                        <Button size="sm" onClick={() => void saveTemplate(template)}>
-                          保存
-                        </Button>
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                ))}
+                          {configured ? "已配置" : "未配置"}
+                        </Badge>
+                      </TableCell>
+                      <TableCell className="py-5">
+                        <Input
+                          className="h-10 rounded-full border-white/70 bg-white"
+                          type="number"
+                          step="0.01"
+                          value={template.confidence}
+                          onChange={(event) =>
+                            updateTemplate(template.id, {
+                              confidence: Number(event.target.value),
+                            })
+                          }
+                        />
+                      </TableCell>
+                      <TableCell className="py-5">
+                        <div className="flex justify-end gap-2">
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            disabled={Boolean(testingTemplateId)}
+                            onClick={() => void testTemplate(template)}
+                          >
+                            {isTesting ? (
+                              <>
+                                <RefreshCw className="mr-2 size-4 animate-spin" />
+                                测试中...
+                              </>
+                            ) : (
+                              <>
+                                <ScanSearch className="mr-2 size-4" />
+                                测试
+                              </>
+                            )}
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            onClick={() => void captureTemplate(template)}
+                          >
+                            <ImageIcon className="mr-2 size-4" />
+                            截图
+                          </Button>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  )
+                })}
               </TableBody>
             </Table>
             <ScrollBar orientation="horizontal" />
           </ScrollArea>
 
-          {templateMessage ? <InlineNote tone="emerald">{templateMessage}</InlineNote> : null}
+          {templateMessage ? (
+            <InlineNote tone={templateMessageTone}>{templateMessage}</InlineNote>
+          ) : null}
         </PageSurfaceContent>
       </PageSurface>
 
-      <Dialog open={!!previewTemplate} onOpenChange={(open) => !open && setPreviewTemplate(null)}>
-        <DialogContent className="max-w-4xl overflow-hidden p-0">
+      <Dialog open={!!previewTemplate} onOpenChange={(open) => !open && setPreviewTemplateId(null)}>
+        <DialogContent className="max-h-[92vh] max-w-5xl overflow-hidden p-0">
           <DialogHeader className="px-6 pt-6">
             <DialogTitle className="font-display text-3xl tracking-tight">
               {previewTemplate?.name}
             </DialogTitle>
             <DialogDescription className="text-sm leading-6">
-              点击表格中的缩略图即可查看大图预览。
+              点击缩略图查看完整图片，预览会保持原始比例并按窗口大小等比缩放。
             </DialogDescription>
           </DialogHeader>
           <div className="px-6 pb-6">
-            <div className="overflow-hidden rounded-[28px] border border-black/5 bg-white/60">
-              {previewTemplate ? (
+            <div className="flex min-h-[240px] items-center justify-center overflow-auto rounded-[28px] border border-black/5 bg-white/60 p-4">
+              {previewTemplate && previewTemplateSrc ? (
                 <img
-                  src={resolveImageSrc(bootstrap.paths, previewTemplate.path)}
+                  src={previewTemplateSrc}
                   alt={previewTemplate.name}
-                  className="max-h-[70vh] w-full object-contain"
+                  className="block h-auto max-h-[70vh] w-auto max-w-full object-contain"
                 />
-              ) : null}
+              ) : (
+                <ImageIcon className="size-10 text-slate-300" />
+              )}
             </div>
           </div>
         </DialogContent>
       </Dialog>
+
+      {toast ? <FloatingToast message={toast.message} tone={toast.tone} /> : null}
+    </div>
+  )
+}
+
+function FloatingToast({
+  message,
+  tone,
+}: {
+  message: string
+  tone: NoticeTone
+}) {
+  const toneClass =
+    tone === "emerald"
+      ? "border-emerald-200/90 bg-emerald-50/95 text-emerald-800"
+      : tone === "rose"
+        ? "border-rose-200/90 bg-rose-50/95 text-rose-800"
+        : "border-slate-200/90 bg-white/95 text-slate-700"
+
+  return (
+    <div className="pointer-events-none fixed right-6 top-6 z-50 w-full max-w-sm">
+      <div className={`rounded-[24px] border px-4 py-3 text-sm leading-6 shadow-lg backdrop-blur ${toneClass}`}>
+        {message}
+      </div>
     </div>
   )
 }

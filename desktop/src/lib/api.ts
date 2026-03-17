@@ -5,6 +5,7 @@ import type {
   GoodsRecord,
   HistorySummary,
   ImportReport,
+  ItemPriceTrendResponse,
   LegacyCandidate,
   MultiTaskRecord,
   OcrStatus,
@@ -12,6 +13,8 @@ import type {
   PurchaseHistoryRecord,
   SingleTaskRecord,
   TemplateConfig,
+  TemplateFileValidationResult,
+  TemplateProbeResult,
 } from './types'
 import { invoke } from './tauri'
 
@@ -39,14 +42,22 @@ export const api = {
     invoke<TemplateConfig>('templates_save', { template }),
   templatesTest: (path: string) =>
     invoke<{ matched: boolean; confidence: number; message: string }>('templates_test', { path }),
+  templatesValidateFile: (path: string) =>
+    invoke<TemplateFileValidationResult>('templates_validate_file', { path }),
+  templatesProbeMatch: (path: string, target?: string) =>
+    invoke<TemplateProbeResult>('templates_probe_match', { path, target }),
   templatesImportImage: (slug: string, sourcePath: string) =>
     invoke<string>('templates_import_image', { slug, sourcePath }),
+  templatesCaptureInteractive: (slug: string) =>
+    invoke<string>('templates_capture_interactive', { slug }),
   templatesCaptureRegion: (
     slug: string,
     region: { x: number; y: number; width: number; height: number },
   ) => invoke<string>('templates_capture_region', { slug, region }),
   goodsImportImage: (sourcePath: string, bigCategory: string) =>
     invoke<string>('goods_import_image', { sourcePath, bigCategory }),
+  goodsCaptureCardInteractive: (bigCategory: string) =>
+    invoke<string>('goods_capture_card_interactive', { bigCategory }),
   goodsCaptureCardImage: (
     bigCategory: string,
     region: { x: number; y: number; width: number; height: number },
@@ -57,6 +68,18 @@ export const api = {
     invoke<PurchaseHistoryRecord[]>('history_query_purchases', { itemId, limit }),
   historyQuerySummary: (itemId?: string) =>
     invoke<HistorySummary>('history_query_summary', { itemId }),
+  historyQueryItemPriceTrend: (
+    itemId: string,
+    from: string,
+    to: string,
+    timezoneOffsetMin: number,
+  ) =>
+    invoke<ItemPriceTrendResponse>('history_query_item_price_trend', {
+      itemId,
+      from,
+      to,
+      timezoneOffsetMin,
+    }),
   legacyScan: () => invoke<LegacyCandidate[]>('legacy_scan'),
   legacyImport: (sourceRoot: string) => invoke<ImportReport>('legacy_import', { sourceRoot }),
   automationStartSingle: () => invoke<AutomationRunState>('automation_start_single'),

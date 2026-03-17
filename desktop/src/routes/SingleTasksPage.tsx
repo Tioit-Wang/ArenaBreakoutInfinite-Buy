@@ -17,8 +17,6 @@ import { Button } from "@/components/ui/button"
 import {
   Card,
   CardContent,
-  CardDescription,
-  CardTitle,
 } from "@/components/ui/card"
 import {
   Dialog,
@@ -145,11 +143,6 @@ export function SingleTasksPage() {
     draft.priceThreshold > 0
       ? Math.round(draft.priceThreshold * (1 + draft.pricePremiumPct / 100))
       : 0
-  const enabledModes =
-    [restockCeiling > 0 ? "补货购买" : null, normalCeiling > 0 ? "普通购买" : null]
-      .filter(Boolean)
-      .join(" / ") || "未开启价格策略"
-  const hasStrategy = restockCeiling > 0 || normalCeiling > 0
 
   const startOrStop = async () => {
     if (isRunning) {
@@ -166,76 +159,56 @@ export function SingleTasksPage() {
     <div className="grid gap-10">
       <div className="grid gap-10">
         <section className="px-1 pt-4 md:pt-8">
-          <div className="flex flex-col gap-8 lg:flex-row lg:items-end lg:justify-between">
-            <div className="max-w-3xl space-y-5">
-              <div className="flex flex-wrap items-center gap-2">
-                <Badge variant={runtimeTone} className="rounded-full px-3 py-1">
-                  {runtime.state}
+          <div className="space-y-5">
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge variant={runtimeTone} className="rounded-full px-3 py-1">
+                {runtime.state}
+              </Badge>
+              {draft.itemName ? (
+                <Badge variant="outline" className="rounded-full px-3 py-1 text-slate-600">
+                  {draft.itemName}
                 </Badge>
-                {draft.itemName ? (
-                  <Badge variant="outline" className="rounded-full px-3 py-1 text-slate-600">
-                    {draft.itemName}
-                  </Badge>
-                ) : null}
-              </div>
-              <div className="space-y-3">
-                <CardTitle className="font-display text-4xl leading-tight tracking-tight text-slate-950 md:text-5xl">
-                  单商品抢购
-                </CardTitle>
-                <CardDescription className="max-w-2xl text-base leading-7 text-slate-600">
-                  只留下当前任务真正需要的内容。选择物品，设定阈值，然后开始。
-                </CardDescription>
-              </div>
-              <p className="text-sm leading-6 text-slate-500">
-                {runtime.detail ?? "补货优先，价格为 0 时关闭对应策略。"}
-              </p>
+              ) : null}
             </div>
 
-            <div className="flex flex-wrap items-center gap-3">
-              <Button
-                size="lg"
-                variant={isRunning ? "destructive" : "default"}
-                onClick={() => void startOrStop()}
-                disabled={!draft.itemId}
-                className="h-12 min-w-32 rounded-full px-8"
-              >
-                {isRunning ? (
-                  <>
-                    <Square className="mr-2 size-4" />
-                    终止
-                  </>
-                ) : (
-                  <>
-                    <Play className="mr-2 size-4" />
-                    开始
-                  </>
-                )}
-              </Button>
-              <Button
-                size="lg"
-                variant="secondary"
-                onClick={() => setLogDrawerOpen(true)}
-                className="h-12 rounded-full px-6"
-              >
-                <Eye className="mr-2 size-4" />
-                查看日志
-              </Button>
+            <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+              <h1 className="font-display text-4xl leading-tight tracking-tight text-slate-950 md:text-5xl">
+                单商品抢购
+              </h1>
+
+              <div className="flex flex-wrap items-center gap-3">
+                <Button
+                  size="lg"
+                  variant={isRunning ? "destructive" : "default"}
+                  onClick={() => void startOrStop()}
+                  disabled={!draft.itemId}
+                  className="h-12 min-w-32 rounded-full px-8"
+                >
+                  {isRunning ? (
+                    <>
+                      <Square className="mr-2 size-4" />
+                      终止
+                    </>
+                  ) : (
+                    <>
+                      <Play className="mr-2 size-4" />
+                      开始
+                    </>
+                  )}
+                </Button>
+                <Button
+                  size="lg"
+                  variant="secondary"
+                  onClick={() => setLogDrawerOpen(true)}
+                  className="h-12 rounded-full px-6"
+                >
+                  <Eye className="mr-2 size-4" />
+                  查看日志
+                </Button>
+              </div>
             </div>
           </div>
 
-          <div className="mt-10 grid gap-4 border-t border-black/5 pt-8 sm:grid-cols-3">
-            <MetricCard label="当前物品" value={draft.itemName || "未选择"} tone="slate" />
-            <MetricCard label="策略" value={enabledModes} tone={hasStrategy ? "emerald" : "slate"} />
-            <MetricCard
-              label="进度"
-              value={
-                draft.targetTotal > 0
-                  ? `${draft.purchased} / ${draft.targetTotal}`
-                  : `${draft.purchased} / --`
-              }
-              tone={draft.targetTotal > 0 ? "amber" : "slate"}
-            />
-          </div>
         </section>
 
         <Card className="overflow-visible rounded-[36px] border-white/60 bg-white/72 shadow-none backdrop-blur-sm">
@@ -488,32 +461,6 @@ function HoverHint({ text }: { text: string }) {
       <div className="pointer-events-none absolute left-1/2 top-full z-10 mt-2 hidden w-72 -translate-x-1/2 rounded-3xl border border-slate-200 bg-white px-4 py-3 text-sm leading-6 text-slate-700 shadow-lg group-hover:block group-focus-within:block">
         {text}
       </div>
-    </div>
-  )
-}
-
-function MetricCard({
-  label,
-  value,
-  tone,
-}: {
-  label: string
-  value: string
-  tone: "emerald" | "amber" | "slate"
-}) {
-  const valueClass =
-    tone === "emerald"
-      ? "text-emerald-800"
-      : tone === "amber"
-        ? "text-amber-800"
-        : "text-slate-900"
-
-  return (
-    <div className="space-y-2">
-      <p className="text-xs uppercase tracking-[0.22em] text-slate-400">{label}</p>
-      <p className={cn("break-words text-2xl font-semibold leading-8 tracking-tight", valueClass)}>
-        {value}
-      </p>
     </div>
   )
 }
