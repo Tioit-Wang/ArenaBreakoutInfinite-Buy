@@ -37,6 +37,7 @@ export type DebugConfig = {
   overlaySec: number
   stepSleep: number
   saveOverlayImages: boolean
+  saveSingleCaptureImages: boolean
 }
 
 export type AvgPriceAreaConfig = {

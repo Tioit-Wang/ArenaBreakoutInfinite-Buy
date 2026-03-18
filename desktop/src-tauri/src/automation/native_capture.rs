@@ -241,13 +241,27 @@ unsafe extern "system" fn capture_window_proc(
 ) -> LRESULT {
     match message {
         WM_NCCREATE => {
-            let create = &*(lparam.0 as *const CREATESTRUCTW);
+            let create_ptr = lparam.0 as *const CREATESTRUCTW;
+            if create_ptr.is_null() {
+                return LRESULT(0);
+            }
+            // SAFETY: During `WM_NCCREATE`, Windows passes a valid `CREATESTRUCTW`
+            // pointer through `lparam` for the window currently being created.
+            let create = unsafe { &*create_ptr };
             let ptr = create.lpCreateParams as *const Mutex<SessionState>;
-            SetWindowLongPtrW(hwnd, GWLP_USERDATA, ptr as isize);
+            // SAFETY: The pointer was produced by `Arc::into_raw` before window
+            // creation and is stored as opaque window user data until `WM_NCDESTROY`.
+            unsafe {
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, ptr as isize);
+            }
             return LRESULT(1);
         }
         WM_SETCURSOR => {
-            let _ = SetCursor(Some(LoadCursorW(None, IDC_CROSS).unwrap_or_default()));
+            // SAFETY: Loading a predefined system cursor and assigning it to the
+            // active selector window is valid for the duration of this message.
+            let cursor = unsafe { LoadCursorW(None, IDC_CROSS) }.unwrap_or_default();
+            // SAFETY: `hwnd` is the live capture window currently dispatching the message.
+            let _ = unsafe { SetCursor(Some(cursor)) };
             return LRESULT(1);
         }
         WM_ERASEBKGND => return LRESULT(1),
@@ -255,7 +269,8 @@ unsafe extern "system" fn capture_window_proc(
             if let Some(state) = state_from_hwnd(hwnd) {
                 let mut guard = state.lock().expect("capture state mutex poisoned");
                 guard.cursor = point_from_lparam(lparam);
-                let _ = InvalidateRect(Some(hwnd), None, false);
+                // SAFETY: Invalidating the current window requests a repaint for the overlay.
+                let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
             }
             return LRESULT(0);
         }
@@ -267,16 +282,20 @@ unsafe extern "system" fn capture_window_proc(
                     NativeCaptureMode::Template => {
                         guard.start = Some(guard.cursor);
                         guard.dragging = true;
-                        let _ = SetCapture(hwnd);
+                        // SAFETY: Capturing mouse input to the active selector window is
+                        // required while the user drags the template region.
+                        let _ = unsafe { SetCapture(hwnd) };
                     }
                     NativeCaptureMode::GoodsCard => {
                         let rect = guard.fixed_rect();
                         guard.finish(Some(rect));
                         drop(guard);
-                        let _ = DestroyWindow(hwnd);
+                        // SAFETY: The capture session has finished and may close its own window.
+                        let _ = unsafe { DestroyWindow(hwnd) };
                     }
                 }
-                let _ = InvalidateRect(Some(hwnd), None, false);
+                // SAFETY: Invalidating the current window requests a repaint for the overlay.
+                let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
             }
             return LRESULT(0);
         }
@@ -286,18 +305,24 @@ unsafe extern "system" fn capture_window_proc(
                 guard.cursor = point_from_lparam(lparam);
                 if guard.dragging {
                     guard.dragging = false;
-                    let _ = ReleaseCapture();
+                    // SAFETY: Mouse capture was previously taken by this window during drag.
+                    let _ = unsafe { ReleaseCapture() };
                     let rect = guard.template_rect();
                     if rect
-                        .map(|rect| (rect.right - rect.left) >= MIN_SELECTION && (rect.bottom - rect.top) >= MIN_SELECTION)
+                        .map(|rect| {
+                            (rect.right - rect.left) >= MIN_SELECTION
+                                && (rect.bottom - rect.top) >= MIN_SELECTION
+                        })
                         .unwrap_or(false)
                     {
                         guard.finish(rect);
                         drop(guard);
-                        let _ = DestroyWindow(hwnd);
+                        // SAFETY: The capture session has finished and may close its own window.
+                        let _ = unsafe { DestroyWindow(hwnd) };
                     } else {
                         guard.start = None;
-                        let _ = InvalidateRect(Some(hwnd), None, false);
+                        // SAFETY: Invalidating the current window requests a repaint for the overlay.
+                        let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
                     }
                 }
             }
@@ -308,7 +333,8 @@ unsafe extern "system" fn capture_window_proc(
                 let mut guard = state.lock().expect("capture state mutex poisoned");
                 guard.finish(None);
             }
-            let _ = DestroyWindow(hwnd);
+            // SAFETY: Right click cancels the selector and closes its own window.
+            let _ = unsafe { DestroyWindow(hwnd) };
             return LRESULT(0);
         }
         WM_KEYDOWN => {
@@ -317,7 +343,8 @@ unsafe extern "system" fn capture_window_proc(
                     let mut guard = state.lock().expect("capture state mutex poisoned");
                     guard.finish(None);
                 }
-                let _ = DestroyWindow(hwnd);
+                // SAFETY: Esc cancels the selector and closes its own window.
+                let _ = unsafe { DestroyWindow(hwnd) };
                 return LRESULT(0);
             }
         }
@@ -326,29 +353,43 @@ unsafe extern "system" fn capture_window_proc(
             return LRESULT(0);
         }
         WM_DESTROY => {
-            PostQuitMessage(0);
+            // SAFETY: Posting quit ends the local modal message loop for this selector.
+            unsafe {
+                PostQuitMessage(0);
+            }
             return LRESULT(0);
         }
         WM_NCDESTROY => {
-            let ptr = SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+            // SAFETY: We clear and read the user-data slot once during window teardown.
+            let ptr = unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) };
             if ptr != 0 {
-                drop(Arc::from_raw(ptr as *const Mutex<SessionState>));
+                // SAFETY: This raw pointer came from `Arc::into_raw` in `select_region`
+                // and is reclaimed exactly once when the window is destroyed.
+                unsafe {
+                    drop(Arc::from_raw(ptr as *const Mutex<SessionState>));
+                }
             }
         }
         _ => {}
     }
-    DefWindowProcW(hwnd, message, wparam, lparam)
+    // SAFETY: We delegate unhandled messages back to the default Win32 window procedure.
+    unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
 }
 
-unsafe fn paint_capture_window(hwnd: HWND) {
+fn paint_capture_window(hwnd: HWND) {
     let mut paint = PAINTSTRUCT::default();
-    let dc = BeginPaint(hwnd, &mut paint);
+    // SAFETY: `BeginPaint`/`EndPaint` are paired while servicing `WM_PAINT`.
+    let dc = unsafe { BeginPaint(hwnd, &mut paint) };
     let mut client = RECT::default();
-    let _ = GetClientRect(hwnd, &mut client);
+    // SAFETY: `client` is a valid out-parameter for the active window.
+    let _ = unsafe { GetClientRect(hwnd, &mut client) };
 
-    let overlay_brush = CreateSolidBrush(COLORREF(0x101010));
-    let _ = FillRect(dc, &client, overlay_brush);
-    let _ = DeleteObject(HGDIOBJ(overlay_brush.0));
+    // SAFETY: The brush is deleted before this paint pass returns.
+    let overlay_brush = unsafe { CreateSolidBrush(COLORREF(0x101010)) };
+    // SAFETY: `dc`, `client` and `overlay_brush` were obtained for this paint cycle.
+    let _ = unsafe { FillRect(dc, &client, overlay_brush) };
+    // SAFETY: `overlay_brush` is the GDI object created immediately above.
+    let _ = unsafe { DeleteObject(HGDIOBJ(overlay_brush.0)) };
 
     if let Some(state) = state_from_hwnd(hwnd) {
         let guard = state.lock().expect("capture state mutex poisoned");
@@ -362,28 +403,43 @@ unsafe fn paint_capture_window(hwnd: HWND) {
             right: guard.width,
             bottom: INSTRUCTION_BUFFER,
         };
-        let _ = SetBkMode(dc, TRANSPARENT);
-        let _ = SetTextColor(dc, COLORREF(0x00FFFFFF));
+        // SAFETY: The paint DC is valid for text rendering during this paint pass.
+        let _ = unsafe { SetBkMode(dc, TRANSPARENT) };
+        // SAFETY: The paint DC is valid for text rendering during this paint pass.
+        let _ = unsafe { SetTextColor(dc, COLORREF(0x00FFFFFF)) };
         let mut text: Vec<u16> = instruction.encode_utf16().chain([0]).collect();
-        let _ = DrawTextW(
-            dc,
-            &mut text,
-            &mut instruction_rect,
-            DRAW_TEXT_FORMAT(0x00000001 | 0x00000004 | 0x00000020),
-        );
+        // SAFETY: The UTF-16 buffer is NUL-terminated and the rectangle points to stack data.
+        let _ = unsafe {
+            DrawTextW(
+                dc,
+                &mut text,
+                &mut instruction_rect,
+                DRAW_TEXT_FORMAT(0x00000001 | 0x00000004 | 0x00000020),
+            )
+        };
 
         if let Some(rect) = guard.active_rect() {
             match guard.options.mode {
                 NativeCaptureMode::Template => {
-                    let border_pen = CreatePen(PS_SOLID, 2, COLORREF(0x00FFFFFF));
-                    let border_brush = CreateSolidBrush(COLORREF(0x00242424));
-                    let old_pen = SelectObject(dc, HGDIOBJ(border_pen.0));
-                    let old_brush = SelectObject(dc, HGDIOBJ(border_brush.0));
-                    let _ = Rectangle(dc, rect.left, rect.top, rect.right, rect.bottom);
-                    let _ = SelectObject(dc, old_pen);
-                    let _ = SelectObject(dc, old_brush);
-                    let _ = DeleteObject(HGDIOBJ(border_pen.0));
-                    let _ = DeleteObject(HGDIOBJ(border_brush.0));
+                    // SAFETY: The temporary pen/brush objects are selected into the paint DC
+                    // only for this draw call and restored before deletion.
+                    let border_pen = unsafe { CreatePen(PS_SOLID, 2, COLORREF(0x00FFFFFF)) };
+                    // SAFETY: The temporary brush is deleted before this paint pass returns.
+                    let border_brush = unsafe { CreateSolidBrush(COLORREF(0x00242424)) };
+                    // SAFETY: The paint DC is valid and we restore the previous object afterwards.
+                    let old_pen = unsafe { SelectObject(dc, HGDIOBJ(border_pen.0)) };
+                    // SAFETY: The paint DC is valid and we restore the previous object afterwards.
+                    let old_brush = unsafe { SelectObject(dc, HGDIOBJ(border_brush.0)) };
+                    // SAFETY: Drawing the active selection rectangle uses the paint DC from `BeginPaint`.
+                    let _ = unsafe { Rectangle(dc, rect.left, rect.top, rect.right, rect.bottom) };
+                    // SAFETY: Restore the previous pen before deleting the temporary pen.
+                    let _ = unsafe { SelectObject(dc, old_pen) };
+                    // SAFETY: Restore the previous brush before deleting the temporary brush.
+                    let _ = unsafe { SelectObject(dc, old_brush) };
+                    // SAFETY: `border_pen` is no longer selected into the DC.
+                    let _ = unsafe { DeleteObject(HGDIOBJ(border_pen.0)) };
+                    // SAFETY: `border_brush` is no longer selected into the DC.
+                    let _ = unsafe { DeleteObject(HGDIOBJ(border_brush.0)) };
                 }
                 NativeCaptureMode::GoodsCard => {
                     let (top_rect, middle_rect, bottom_rect) = fixed_card_sections(rect);
@@ -391,34 +447,50 @@ unsafe fn paint_capture_window(hwnd: HWND) {
                     fill_rect(dc, middle_rect, COLORREF(0x004DD8FF));
                     fill_rect(dc, bottom_rect, COLORREF(0x0043A02E));
 
-                    let outline_brush = CreateSolidBrush(COLORREF(0x00CCCCCC));
-                    let _ = FrameRect(dc, &rect, outline_brush);
-                    let _ = DeleteObject(HGDIOBJ(outline_brush.0));
+                    // SAFETY: The brush is used only for this frame draw and then deleted.
+                    let outline_brush = unsafe { CreateSolidBrush(COLORREF(0x00CCCCCC)) };
+                    // SAFETY: The paint DC and rectangle are valid for the current paint pass.
+                    let _ = unsafe { FrameRect(dc, &rect, outline_brush) };
+                    // SAFETY: `outline_brush` is not selected into the DC and may be deleted now.
+                    let _ = unsafe { DeleteObject(HGDIOBJ(outline_brush.0)) };
 
                     let inner = fixed_inner_rect(rect);
-                    let inner_pen = CreatePen(PS_DASH, 1, COLORREF(0x00333333));
-                    let old_pen = SelectObject(dc, HGDIOBJ(inner_pen.0));
-                    let old_brush = SelectObject(dc, GetStockObject(NULL_BRUSH));
-                    let _ = Rectangle(dc, inner.left, inner.top, inner.right, inner.bottom);
-                    let _ = SelectObject(dc, old_pen);
-                    let _ = SelectObject(dc, old_brush);
-                    let _ = DeleteObject(HGDIOBJ(inner_pen.0));
+                    // SAFETY: The temporary pen is restored before deletion.
+                    let inner_pen = unsafe { CreatePen(PS_DASH, 1, COLORREF(0x00333333)) };
+                    // SAFETY: The paint DC is valid and we restore the previous object afterwards.
+                    let old_pen = unsafe { SelectObject(dc, HGDIOBJ(inner_pen.0)) };
+                    // SAFETY: `NULL_BRUSH` is a valid stock object handle for hollow rectangle drawing.
+                    let old_brush = unsafe { SelectObject(dc, GetStockObject(NULL_BRUSH)) };
+                    // SAFETY: Drawing the inner goods rect uses the paint DC from `BeginPaint`.
+                    let _ = unsafe { Rectangle(dc, inner.left, inner.top, inner.right, inner.bottom) };
+                    // SAFETY: Restore the previous pen before deleting the temporary pen.
+                    let _ = unsafe { SelectObject(dc, old_pen) };
+                    // SAFETY: Restore the previous brush before the paint pass ends.
+                    let _ = unsafe { SelectObject(dc, old_brush) };
+                    // SAFETY: `inner_pen` is no longer selected into the DC.
+                    let _ = unsafe { DeleteObject(HGDIOBJ(inner_pen.0)) };
                 }
             }
         }
     }
 
-    let _ = EndPaint(hwnd, &paint);
+    // SAFETY: Matches the `BeginPaint` call at the start of this function.
+    let _ = unsafe { EndPaint(hwnd, &paint) };
 }
 
-unsafe fn state_from_hwnd(hwnd: HWND) -> Option<Arc<Mutex<SessionState>>> {
+fn state_from_hwnd(hwnd: HWND) -> Option<Arc<Mutex<SessionState>>> {
+    // SAFETY: The selector stores an `Arc<Mutex<SessionState>>` raw pointer in the
+    // `GWLP_USERDATA` slot during `WM_NCCREATE` and clears it during `WM_NCDESTROY`.
     let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) };
     if ptr == 0 {
         return None;
     }
+    // SAFETY: The pointer comes from `Arc::into_raw`. We rebuild a temporary `Arc`,
+    // clone it for the caller, then convert the temporary back to raw so ownership
+    // stays with the window until `WM_NCDESTROY`.
     let state = unsafe { Arc::from_raw(ptr as *const Mutex<SessionState>) };
     let clone = state.clone();
-    let _ = unsafe { Arc::into_raw(state) };
+    let _ = Arc::into_raw(state);
     Some(clone)
 }
 
@@ -484,14 +556,17 @@ fn fixed_card_sections(rect: RECT) -> (RECT, RECT, RECT) {
     )
 }
 
-unsafe fn fill_rect(
+fn fill_rect(
     dc: windows::Win32::Graphics::Gdi::HDC,
     rect: RECT,
     color: COLORREF,
 ) {
-    let brush = CreateSolidBrush(color);
-    let _ = FillRect(dc, &rect, brush);
-    let _ = DeleteObject(HGDIOBJ(brush.0));
+    // SAFETY: The temporary brush is used only for this fill and deleted immediately.
+    let brush = unsafe { CreateSolidBrush(color) };
+    // SAFETY: The paint DC and rectangle come from the active paint cycle.
+    let _ = unsafe { FillRect(dc, &rect, brush) };
+    // SAFETY: `brush` is not selected into the DC and may be deleted now.
+    let _ = unsafe { DeleteObject(HGDIOBJ(brush.0)) };
 }
 
 #[cfg(test)]

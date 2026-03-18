@@ -75,7 +75,6 @@ pub fn run() {
             commands::runtime::ocr_start,
             commands::runtime::ocr_stop,
             commands::runtime::ocr_restart,
-            commands::runtime::automation_list_windows,
             commands::runtime::automation_probe_click,
             commands::runtime::automation_probe_type_text,
         ])

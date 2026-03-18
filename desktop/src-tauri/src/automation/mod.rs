@@ -6,4 +6,3 @@ pub mod native_capture;
 pub mod ocr;
 pub mod single_runner;
 pub mod vision;
-pub mod window;

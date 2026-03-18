@@ -83,6 +83,8 @@ pub struct DebugConfig {
     pub overlay_sec: f64,
     pub step_sleep: f64,
     pub save_overlay_images: bool,
+    #[serde(default)]
+    pub save_single_capture_images: bool,
 }
 
 impl Default for DebugConfig {
@@ -93,6 +95,7 @@ impl Default for DebugConfig {
             overlay_sec: 5.0,
             step_sleep: 0.0,
             save_overlay_images: false,
+            save_single_capture_images: false,
         }
     }
 }

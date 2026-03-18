@@ -12,7 +12,6 @@ use crate::automation::vision::{
     TemplateFileValidationResult, TemplateMatchResult, TemplateProbeResult, probe_template_in_image_fast,
     test_template, validate_template_file,
 };
-use crate::automation::window::capture_probe_window;
 
 #[tauri::command]
 pub fn templates_list(state: State<'_, AppState>) -> Result<Vec<TemplateConfig>, String> {
@@ -66,14 +65,6 @@ pub fn templates_probe_match(
             .map_err(|error| error.to_string())?
             .to_rgba8();
         return probe_template_in_image_fast(&image, &absolute, threshold, None)
-            .map(apply_python_probe_feedback)
-            .map_err(|error| error.to_string());
-    }
-    if target.eq_ignore_ascii_case("active-window") {
-        let captured = capture_probe_window()
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| "no probeable window found".to_string())?;
-        return probe_template_in_image_fast(&captured.image, &absolute, threshold, None)
             .map(apply_python_probe_feedback)
             .map_err(|error| error.to_string());
     }

@@ -4,11 +4,6 @@ use anyhow::{Context, Result, bail};
 use image::RgbaImage;
 use serde::{Deserialize, Serialize};
 
-#[cfg(not(target_os = "windows"))]
-use xcap::Monitor;
-#[cfg(not(target_os = "windows"))]
-use xcap::image::imageops;
-
 #[cfg(target_os = "windows")]
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CAPTUREBLT, CreateCompatibleBitmap,
@@ -40,6 +35,10 @@ struct NormalizedRegion {
 
 #[derive(Debug, Clone)]
 pub struct CapturedImage {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
     pub image: RgbaImage,
 }
 
@@ -61,24 +60,7 @@ pub fn save_region_png(region: &CaptureRegion, output_path: &Path) -> Result<()>
 
     #[cfg(not(target_os = "windows"))]
     {
-        let monitor =
-            Monitor::from_point(region.x, region.y).context("failed to find monitor for capture point")?;
-        let monitor_x = monitor.x().context("failed to get monitor x")?;
-        let monitor_y = monitor.y().context("failed to get monitor y")?;
-        let image = monitor
-            .capture_image()
-            .context("failed to capture monitor image")?;
-        let cropped = imageops::crop_imm(
-            &image,
-            (region.x - monitor_x) as u32,
-            (region.y - monitor_y) as u32,
-            region.width as u32,
-            region.height as u32,
-        )
-        .to_image();
-        cropped
-            .save(output_path)
-            .with_context(|| format!("failed to save capture to {}", output_path.display()))?;
+        bail!("screen capture is only implemented on Windows")
     }
 
     Ok(())
@@ -89,7 +71,13 @@ pub fn capture_full_screen() -> Result<CapturedImage> {
     {
         let region = virtual_screen_region()?;
         let image = capture_region_windows_gdi(region)?;
-        return Ok(CapturedImage { image });
+        return Ok(CapturedImage {
+            x: region.x,
+            y: region.y,
+            width: region.width,
+            height: region.height,
+            image,
+        });
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -131,23 +119,7 @@ fn normalize_region(region: &CaptureRegion) -> Result<NormalizedRegion> {
 
     #[cfg(not(target_os = "windows"))]
     {
-        let monitor =
-            Monitor::from_point(region.x, region.y).context("failed to find monitor for capture point")?;
-        let monitor_x = monitor.x().context("failed to get monitor x")?;
-        let monitor_y = monitor.y().context("failed to get monitor y")?;
-        let monitor_width = monitor.width().context("failed to get monitor width")? as i32;
-        let monitor_height = monitor.height().context("failed to get monitor height")? as i32;
-        let local_x = (region.x - monitor_x).clamp(0, monitor_width.saturating_sub(1));
-        let local_y = (region.y - monitor_y).clamp(0, monitor_height.saturating_sub(1));
-        let max_width = monitor_width.saturating_sub(local_x);
-        let max_height = monitor_height.saturating_sub(local_y);
-
-        return Ok(NormalizedRegion {
-            x: monitor_x + local_x,
-            y: monitor_y + local_y,
-            width: region.width.clamp(1, max_width),
-            height: region.height.clamp(1, max_height),
-        });
+        bail!("screen capture is only implemented on Windows")
     }
 }
 

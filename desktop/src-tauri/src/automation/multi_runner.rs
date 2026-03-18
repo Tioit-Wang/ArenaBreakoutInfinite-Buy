@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use image::GrayImage;
+use tauri::async_runtime;
 use tokio::time::sleep;
 use uuid::Uuid;
 
@@ -16,6 +17,7 @@ use crate::app::types::{
     AppConfig, AutomationEvent, MultiTaskRecord, PriceHistoryRecord, PurchaseHistoryRecord,
     TemplateConfig, iso_to_epoch, now_iso,
 };
+use crate::automation::capture::{CapturedImage, capture_full_screen};
 use crate::automation::common::{
     avg_price_roi, bottom_roi_from_card, crop_gray, infer_card_from_goods_match, infer_qty_from_max,
     parse_digits, parse_price_text, price_with_premium, resize, threshold, top_half,
@@ -23,10 +25,6 @@ use crate::automation::common::{
 use crate::automation::input::{click_point, type_text};
 use crate::automation::ocr::recognize_text;
 use crate::automation::vision::{MatchBox, locate_template_in_image};
-use crate::automation::window::{
-    CapturedWindow, WindowHint, capture_matching_window, capture_window, click_box, enum_windows,
-    find_in_window, to_global,
-};
 use crate::config::paths::AppPaths;
 use crate::storage::repository::Repository;
 
@@ -73,7 +71,6 @@ struct MultiSession {
     emitter: SharedEmitter,
     session_id: String,
     templates: HashMap<String, TemplateEntry>,
-    active_window: Option<WindowHint>,
     detail: HashMap<String, MatchBox>,
     qty_mid: Option<MatchBox>,
     grid_region: Option<MatchBox>,
@@ -114,7 +111,6 @@ impl MultiSession {
             emitter,
             session_id,
             templates,
-            active_window: None,
             detail: HashMap::new(),
             qty_mid: None,
             grid_region: None,
@@ -228,7 +224,7 @@ impl MultiSession {
     }
 
     async fn ensure_ready(&mut self) -> Result<()> {
-        if self.find_scene_window().await?.is_some() {
+        if self.find_scene_visible().await? {
             self.log("info", STEP_PREPARE, "已检测到首页/市场窗口", Some(0.08));
             return Ok(());
         }
@@ -254,12 +250,13 @@ impl MultiSession {
             .await?
             .ok_or_else(|| anyhow!("launch button not found"))?;
         self.nap(Duration::from_secs(game.launch_click_delay_sec)).await;
-        click_box(&launch_button.0, launch_button.1)?;
-        let scene = self
+        click_box_global(launch_button)?;
+        let scene_visible = self
             .wait_any_scene(Duration::from_secs(game.startup_timeout_sec.max(1)))
-            .await?
-            .ok_or_else(|| anyhow!("home/market indicator not found"))?;
-        self.active_window = Some(scene.hint);
+            .await?;
+        if !scene_visible {
+            return Err(anyhow!("home/market indicator not found"));
+        }
         Ok(())
     }
 
@@ -284,11 +281,11 @@ impl MultiSession {
             _ => bail!("unable to determine scene before favorites refresh"),
         }
 
-        if let Some((window, recent_box)) = self
+        if let Some(recent_box) = self
             .locate_active("recent_purchases_tab", Duration::from_secs(1), None)
             .await?
         {
-            click_box(&window, recent_box)?;
+            click_box_global(recent_box)?;
             self.nap(Duration::from_secs_f64(
                 self.request
                     .config
@@ -299,11 +296,11 @@ impl MultiSession {
             .await;
         }
 
-        let (window, favorites_box) = self
+        let favorites_box = self
             .locate_active("favorites_tab", Duration::from_secs(2), None)
             .await?
             .ok_or_else(|| anyhow!("favorites tab not found"))?;
-        click_box(&window, favorites_box)?;
+        click_box_global(favorites_box)?;
         self.nap(Duration::from_secs_f64(
             self.request
                 .config
@@ -312,11 +309,14 @@ impl MultiSession {
                 .max(0.05),
         ))
         .await;
+        let screen = self.capture_screen()?;
+        let screen_bottom = screen.y + screen.height;
+        let top = (favorites_box.1 + favorites_box.3 + 12).clamp(screen.y, screen_bottom.saturating_sub(1));
         self.grid_region = Some((
-            0,
-            (favorites_box.1 + favorites_box.3 + 12).clamp(0, window.height.saturating_sub(1)),
-            window.width.max(1),
-            (window.height - favorites_box.1 - favorites_box.3 - 12).max(1),
+            screen.x,
+            top,
+            screen.width.max(1),
+            (screen_bottom - top).max(1),
         ));
         self.wait_favorites_content_ready().await?;
         self.log("info", STEP_FAVORITES, "已刷新到收藏页", Some(0.28));
@@ -341,19 +341,14 @@ impl MultiSession {
                     + 1.0,
             );
         while Instant::now() < deadline {
-            if let Some(window) = self.capture_active_opt()? {
-                for task in &candidates {
-                    let goods_path = resolve_path(&self.request.paths, &task.image_path);
-                    if locate_template_in_image(
-                        &window.image,
-                        &goods_path,
-                        0.80,
-                        self.grid_region,
-                    )?
+            let screen = self.capture_screen()?;
+            for task in &candidates {
+                let goods_path = resolve_path(&self.request.paths, &task.image_path);
+                if self
+                    .locate_template_in_capture(&screen, &goods_path, 0.80, self.grid_region)?
                     .is_some()
-                    {
-                        return Ok(());
-                    }
+                {
+                    return Ok(());
                 }
             }
             self.nap(Duration::from_secs_f64(
@@ -369,7 +364,7 @@ impl MultiSession {
     }
 
     async fn scan_visible_prices(&mut self) -> Result<Vec<PriceScanResult>> {
-        let window = self.capture_active()?;
+        let screen = self.capture_screen()?;
         let mut jobs = Vec::new();
         let pending_tasks = self
             .tasks
@@ -378,11 +373,13 @@ impl MultiSession {
             .cloned()
             .collect::<Vec<_>>();
         for task in &pending_tasks {
-            let Some(card_box) = self.locate_or_cache_card(&window, task)? else {
+            let Some(card_box) = self.locate_or_cache_card(&screen, task)? else {
                 continue;
             };
             let price_roi = bottom_roi_from_card(card_box);
-            let gray = crop_gray(&window.image, price_roi)?;
+            let local_price_roi = global_box_to_local(&screen, price_roi)
+                .ok_or_else(|| anyhow!("price roi is outside screen"))?;
+            let gray = crop_gray(&screen.image, local_price_roi)?;
             jobs.push(PriceScanJob {
                 task_id: task.id.clone(),
                 card_box,
@@ -401,15 +398,14 @@ impl MultiSession {
 
     fn locate_or_cache_card(
         &mut self,
-        window: &CapturedWindow,
+        screen: &CapturedImage,
         task: &MultiTaskRecord,
     ) -> Result<Option<MatchBox>> {
         if let Some(card) = self.card_cache.get(&task.id).copied() {
             return Ok(Some(card));
         }
         let goods_path = resolve_path(&self.request.paths, &task.image_path);
-        let matched =
-            locate_template_in_image(&window.image, &goods_path, 0.80, self.grid_region)?;
+        let matched = self.locate_template_in_capture(screen, &goods_path, 0.80, self.grid_region)?;
         let Some(goods_box) = matched else {
             return Ok(None);
         };
@@ -430,7 +426,7 @@ impl MultiSession {
             let mut handles = Vec::new();
             for job in chunk.iter().cloned() {
                 let config = self.request.config.umi_ocr.clone();
-                handles.push(tokio::spawn(async move {
+                handles.push(async_runtime::spawn(async move {
                     let image = threshold(resize(job.image, 2.5));
                     let texts = recognize_text(&config, &image).await?;
                     let price = texts
@@ -455,8 +451,8 @@ impl MultiSession {
     }
 
     async fn purchase_once(&mut self, task: &MultiTaskRecord, card_box: MatchBox) -> Result<i64> {
-        let window = self.capture_active()?;
-        click_box(&window, card_box)?;
+        self.capture_screen()?;
+        click_box_global(card_box)?;
         self.nap(Duration::from_secs_f64(
             self.request
                 .config
@@ -490,7 +486,7 @@ impl MultiSession {
             .get("btn_buy")
             .copied()
             .ok_or_else(|| anyhow!("btn_buy missing"))?;
-        click_box(&self.capture_active()?, buy_box)?;
+        click_box_global(buy_box)?;
         if !self.wait_buy_ok().await? {
             let _ = self.close_detail().await?;
             self.bump_failure(task);
@@ -510,7 +506,7 @@ impl MultiSession {
                     / 1000.0,
             );
             for _ in 1..max_chain {
-                let center = to_global(&self.capture_active()?, buy_box);
+                let center = center_of_box(buy_box);
                 click_point(center.0, center.1)?;
                 self.nap(interval).await;
                 if !self.wait_buy_ok().await? {
@@ -532,7 +528,7 @@ impl MultiSession {
         if task.purchase_mode.trim().eq_ignore_ascii_case("restock") {
             if is_ammo {
                 if let Some(max_box) = self.detail.get("btn_max").copied() {
-                    click_box(&self.capture_active()?, max_box)?;
+                    click_box_global(max_box)?;
                     self.nap(Duration::from_millis(60)).await;
                     return Ok((self.read_qty().await?.unwrap_or(120).max(1), true));
                 }
@@ -561,7 +557,7 @@ impl MultiSession {
         let Some(qty_box) = self.qty_mid else {
             return Ok(false);
         };
-        click_box(&self.capture_active()?, qty_box)?;
+        click_box_global(qty_box)?;
         self.nap(Duration::from_millis(30)).await;
         type_text(&qty.to_string())?;
         self.nap(Duration::from_millis(30)).await;
@@ -572,7 +568,10 @@ impl MultiSession {
         let Some(roi) = self.qty_roi() else {
             return Ok(None);
         };
-        let gray = crop_gray(&self.capture_active()?.image, roi)?;
+        let screen = self.capture_screen()?;
+        let local_roi =
+            global_box_to_local(&screen, roi).ok_or_else(|| anyhow!("qty roi is outside screen"))?;
+        let gray = crop_gray(&screen.image, local_roi)?;
         let image = threshold(resize(gray, 2.0));
         let texts = recognize_text(&self.request.config.umi_ocr, &image).await?;
         Ok(texts
@@ -620,15 +619,17 @@ impl MultiSession {
             .get("btn_buy")
             .copied()
             .ok_or_else(|| anyhow!("btn_buy missing"))?;
-        let captured = self.capture_active()?;
+        let screen = self.capture_screen()?;
+        let local_buy_box = global_box_to_local(&screen, buy_box)
+            .ok_or_else(|| anyhow!("btn_buy is outside screen"))?;
         let roi = avg_price_roi(
-            buy_box,
+            local_buy_box,
             false,
             &self.request.config,
-            captured.width,
-            captured.height,
+            screen.width,
+            screen.height,
         );
-        let gray = crop_gray(&captured.image, roi)?;
+        let gray = crop_gray(&screen.image, roi)?;
         let image = threshold(resize(
             top_half(gray),
             self.request.config.avg_price_area.scale,
@@ -678,13 +679,13 @@ impl MultiSession {
     }
 
     async fn dismiss_overlay(&mut self) -> Result<()> {
-        if let Some((window, ok_box)) = self
+        if let Some(ok_box) = self
             .locate_active("buy_ok", Duration::from_millis(120), None)
             .await?
         {
-            click_box(&window, ok_box)?;
+            click_box_global(ok_box)?;
         } else if let Some(buy_box) = self.detail.get("btn_buy").copied() {
-            click_box(&self.capture_active()?, buy_box)?;
+            click_box_global(buy_box)?;
         }
         self.nap(Duration::from_secs_f64(
             self.request
@@ -699,7 +700,7 @@ impl MultiSession {
 
     async fn close_detail(&mut self) -> Result<bool> {
         if let Some(close_box) = self.detail.get("btn_close").copied() {
-            click_box(&self.capture_active()?, close_box)?;
+            click_box_global(close_box)?;
             self.nap(Duration::from_secs_f64(
                 self.request
                     .config
@@ -727,10 +728,10 @@ impl MultiSession {
     }
 
     async fn cache_detail_controls(&mut self) -> Result<()> {
-        let window = self.capture_active()?;
+        let screen = self.capture_screen()?;
         for key in ["btn_buy", "btn_close", "qty_minus", "qty_plus", "btn_max"] {
-            if let Some(box_rect) = find_in_window(
-                &window,
+            if let Some(box_rect) = self.locate_template_in_capture(
+                &screen,
                 &self.template(key)?.path,
                 self.template(key)?.confidence,
                 None,
@@ -793,11 +794,11 @@ impl MultiSession {
                 .max(5.0),
         ))
         .await;
-        if let Some((window, box_rect)) = self
+        if let Some(box_rect) = self
             .locate_active("btn_penalty_confirm", Duration::from_secs(2), None)
             .await?
         {
-            click_box(&window, box_rect)?;
+            click_box_global(box_rect)?;
             self.nap(Duration::from_secs_f64(
                 self.request
                     .config
@@ -812,11 +813,11 @@ impl MultiSession {
     }
 
     async fn navigate(&mut self, slug: &str) -> Result<()> {
-        let (window, box_rect) = self
+        let box_rect = self
             .locate_active(slug, Duration::from_secs(2), None)
             .await?
             .ok_or_else(|| anyhow!("template {slug} not found"))?;
-        click_box(&window, box_rect)?;
+        click_box_global(box_rect)?;
         self.nap(Duration::from_secs_f64(
             self.request
                 .config
@@ -829,67 +830,44 @@ impl MultiSession {
     }
 
     async fn detect_scene(&mut self) -> Result<&'static str> {
-        if self
-            .locate_active("home_indicator", Duration::from_millis(80), None)
-            .await?
-            .is_some()
-        {
-            return Ok("home");
-        }
-        if self
-            .locate_active("market_indicator", Duration::from_millis(80), None)
-            .await?
-            .is_some()
-        {
-            return Ok("market");
-        }
-        if self.detail_visible().await? {
-            return Ok("detail");
-        }
-        Ok("unknown")
+        let screen = self.capture_screen()?;
+        self.detect_scene_in_capture(&screen)
     }
 
-    async fn wait_any_scene(&mut self, timeout: Duration) -> Result<Option<CapturedWindow>> {
+    async fn wait_any_scene(&mut self, timeout: Duration) -> Result<bool> {
         let deadline = Instant::now() + timeout;
-        while Instant::now() < deadline {
-            if let Some(found) = self.find_scene_window().await? {
-                return Ok(Some(found));
+        loop {
+            let screen = self.capture_screen()?;
+            let scene = self.detect_scene_in_capture(&screen)?;
+            if matches!(scene, "home" | "market") {
+                return Ok(true);
+            }
+            if timeout.is_zero() || Instant::now() >= deadline {
+                return Ok(false);
             }
             self.nap(Duration::from_millis(180)).await;
         }
-        Ok(None)
     }
 
-    async fn find_scene_window(&mut self) -> Result<Option<CapturedWindow>> {
-        for slug in ["home_indicator", "market_indicator"] {
-            if let Some((window, _)) = self
-                .wait_any_template(slug, Duration::from_millis(0))
-                .await?
-            {
-                return Ok(Some(window));
-            }
-        }
-        Ok(None)
+    async fn find_scene_visible(&mut self) -> Result<bool> {
+        self.wait_any_scene(Duration::from_millis(0)).await
     }
 
     async fn wait_any_template(
         &mut self,
         slug: &str,
         timeout: Duration,
-    ) -> Result<Option<(CapturedWindow, MatchBox)>> {
+    ) -> Result<Option<MatchBox>> {
         let deadline = Instant::now() + timeout;
         loop {
-            for window in enum_windows()? {
-                let captured = capture_window(window)?;
-                if let Some(box_rect) = find_in_window(
-                    &captured,
-                    &self.template(slug)?.path,
-                    self.template(slug)?.confidence,
-                    None,
-                )? {
-                    self.active_window = Some(captured.hint.clone());
-                    return Ok(Some((captured, box_rect)));
-                }
+            let screen = self.capture_screen()?;
+            if let Some(box_rect) = self.locate_template_in_capture(
+                &screen,
+                &self.template(slug)?.path,
+                self.template(slug)?.confidence,
+                None,
+            )? {
+                return Ok(Some(box_rect));
             }
             if timeout.is_zero() || Instant::now() >= deadline {
                 return Ok(None);
@@ -903,18 +881,17 @@ impl MultiSession {
         slug: &str,
         timeout: Duration,
         region: Option<MatchBox>,
-    ) -> Result<Option<(CapturedWindow, MatchBox)>> {
+    ) -> Result<Option<MatchBox>> {
         let deadline = Instant::now() + timeout;
         loop {
-            if let Some(window) = self.capture_active_opt()? {
-                if let Some(box_rect) = find_in_window(
-                    &window,
-                    &self.template(slug)?.path,
-                    self.template(slug)?.confidence,
-                    region,
-                )? {
-                    return Ok(Some((window, box_rect)));
-                }
+            let screen = self.capture_screen()?;
+            if let Some(box_rect) = self.locate_template_in_capture(
+                &screen,
+                &self.template(slug)?.path,
+                self.template(slug)?.confidence,
+                region,
+            )? {
+                return Ok(Some(box_rect));
             }
             if timeout.is_zero() || Instant::now() >= deadline {
                 return Ok(None);
@@ -923,16 +900,55 @@ impl MultiSession {
         }
     }
 
-    fn capture_active(&mut self) -> Result<CapturedWindow> {
-        self.capture_active_opt()?
-            .ok_or_else(|| anyhow!("active window unavailable"))
+    fn capture_screen(&self) -> Result<CapturedImage> {
+        capture_full_screen()
     }
 
-    fn capture_active_opt(&mut self) -> Result<Option<CapturedWindow>> {
-        let Some(hint) = self.active_window.clone() else {
-            return Ok(None);
-        };
-        capture_matching_window(&hint)
+    fn detect_scene_in_capture(&self, screen: &CapturedImage) -> Result<&'static str> {
+        if self.locate_template_in_capture(
+            screen,
+            &self.template("home_indicator")?.path,
+            self.template("home_indicator")?.confidence,
+            None,
+        )?.is_some() {
+            return Ok("home");
+        }
+        if self.locate_template_in_capture(
+            screen,
+            &self.template("market_indicator")?.path,
+            self.template("market_indicator")?.confidence,
+            None,
+        )?.is_some() {
+            return Ok("market");
+        }
+        if self.locate_template_in_capture(
+            screen,
+            &self.template("btn_buy")?.path,
+            self.template("btn_buy")?.confidence,
+            None,
+        )?.is_some()
+            && self.locate_template_in_capture(
+                screen,
+                &self.template("btn_close")?.path,
+                self.template("btn_close")?.confidence,
+                None,
+            )?.is_some()
+        {
+            return Ok("detail");
+        }
+        Ok("unknown")
+    }
+
+    fn locate_template_in_capture(
+        &self,
+        screen: &CapturedImage,
+        template_path: &Path,
+        confidence: f64,
+        region: Option<MatchBox>,
+    ) -> Result<Option<MatchBox>> {
+        let local_region = region.and_then(|rect| global_box_to_local(screen, rect));
+        Ok(locate_template_in_image(&screen.image, template_path, confidence, local_region)?
+            .map(|rect| local_box_to_global(screen, rect)))
     }
 
     fn template(&self, slug: &str) -> Result<&TemplateEntry> {
@@ -1030,6 +1046,32 @@ fn resolve_path(paths: &AppPaths, raw: &str) -> PathBuf {
 
 fn split_args(raw: &str) -> Vec<String> {
     raw.split_whitespace().map(str::to_string).collect()
+}
+
+fn center_of_box(rect: MatchBox) -> (i32, i32) {
+    (rect.0 + rect.2 / 2, rect.1 + rect.3 / 2)
+}
+
+fn click_box_global(rect: MatchBox) -> Result<()> {
+    let center = center_of_box(rect);
+    click_point(center.0, center.1)
+}
+
+fn global_box_to_local(screen: &CapturedImage, rect: MatchBox) -> Option<MatchBox> {
+    let max_width = screen.image.width() as i32;
+    let max_height = screen.image.height() as i32;
+    let left = (rect.0 - screen.x).clamp(0, max_width.saturating_sub(1));
+    let top = (rect.1 - screen.y).clamp(0, max_height.saturating_sub(1));
+    let right = (rect.0 + rect.2 - screen.x).clamp(left + 1, max_width);
+    let bottom = (rect.1 + rect.3 - screen.y).clamp(top + 1, max_height);
+    if right <= left || bottom <= top {
+        return None;
+    }
+    Some((left, top, right - left, bottom - top))
+}
+
+fn local_box_to_global(screen: &CapturedImage, rect: MatchBox) -> MatchBox {
+    (rect.0 + screen.x, rect.1 + screen.y, rect.2, rect.3)
 }
 
 fn price_sane(unit_price: i64, task: &MultiTaskRecord) -> bool {

@@ -4,8 +4,7 @@ use std::sync::{
 };
 
 use anyhow::{Result, anyhow};
-use tauri::{AppHandle, Emitter};
-use tokio::task::JoinHandle;
+use tauri::{AppHandle, Emitter, async_runtime};
 use uuid::Uuid;
 
 use crate::app::types::{
@@ -23,7 +22,7 @@ use crate::storage::repository::Repository;
 #[derive(Default)]
 struct RuntimeControl {
     state: AutomationRunState,
-    task: Option<JoinHandle<()>>,
+    task: Option<async_runtime::JoinHandle<()>>,
     pause_flag: Option<Arc<AtomicBool>>,
 }
 
@@ -76,7 +75,7 @@ impl AutomationManager {
         let manager = self.clone();
         let state_clone = state.clone();
         let pause_clone = pause_flag.clone();
-        let handle = tokio::spawn(async move {
+        let handle = async_runtime::spawn(async move {
             let event_manager = manager.clone();
             let event_app = app.clone();
             let emit = move |event: AutomationEvent| {
@@ -151,7 +150,7 @@ impl AutomationManager {
         let manager = self.clone();
         let state_clone = state.clone();
         let pause_clone = pause_flag.clone();
-        let handle = tokio::spawn(async move {
+        let handle = async_runtime::spawn(async move {
             let event_manager = manager.clone();
             let event_app = app.clone();
             let emit = move |event: AutomationEvent| {

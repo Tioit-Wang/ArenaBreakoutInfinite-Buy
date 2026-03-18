@@ -3,8 +3,6 @@ use tauri::{AppHandle, Emitter, State};
 use crate::app::state::AppState;
 use crate::app::types::{AutomationRunState, OcrStatus};
 use crate::automation::input::{click_point, type_text};
-use crate::automation::window::WindowSnapshot;
-use crate::automation::window::list_windows;
 use crate::runtime::events::{OCR_STATUS_EVENT, SIDECAR_STATUS_EVENT};
 
 #[tauri::command]
@@ -176,11 +174,6 @@ pub fn ocr_restart(app: AppHandle, state: State<'_, AppState>) -> Result<OcrStat
     let _ = app.emit(OCR_STATUS_EVENT, &status);
     let _ = app.emit(SIDECAR_STATUS_EVENT, &status);
     Ok(status)
-}
-
-#[tauri::command]
-pub fn automation_list_windows() -> Vec<WindowSnapshot> {
-    list_windows()
 }
 
 #[tauri::command]

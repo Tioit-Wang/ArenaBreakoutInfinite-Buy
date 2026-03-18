@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{
@@ -8,6 +9,8 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
+use chrono::Utc;
+use image::GrayImage;
 use tokio::time::sleep;
 use uuid::Uuid;
 
@@ -15,6 +18,7 @@ use crate::app::types::{
     AppConfig, AutomationEvent, GoodsRecord, PriceHistoryRecord, PurchaseHistoryRecord,
     SingleTaskRecord, TemplateConfig, iso_to_epoch, now_iso,
 };
+use crate::automation::capture::CapturedImage;
 use crate::automation::common::{
     avg_price_roi, crop_gray, infer_qty_from_max, parse_digits, parse_price_text,
     price_with_premium, resize, threshold, top_half,
@@ -22,10 +26,7 @@ use crate::automation::common::{
 use crate::automation::input::{click_point, type_text};
 use crate::automation::ocr::recognize_text;
 use crate::automation::vision::{MatchBox, locate_template_in_image};
-use crate::automation::window::{
-    CapturedWindow, WindowHint, capture_matching_window, capture_window, click_box, enum_windows,
-    find_in_window, to_global,
-};
+use crate::automation::capture::capture_full_screen;
 use crate::config::paths::AppPaths;
 use crate::storage::repository::Repository;
 
@@ -35,6 +36,7 @@ const STEP_4: &str = "步骤4-搜索与列表定位";
 const STEP_5: &str = "步骤5-预缓存（预热）";
 const STEP_6: &str = "步骤6-价格读取与阈值判定";
 const STEP_8: &str = "步骤8-会话内循环与退出条件";
+const STEP_CAPTURE: &str = "抓图存档";
 
 type SharedEmitter = Arc<Mutex<Box<dyn FnMut(AutomationEvent) + Send>>>;
 
@@ -60,13 +62,14 @@ struct SingleSession {
     emitter: SharedEmitter,
     session_id: String,
     templates: HashMap<String, TemplateEntry>,
-    active_window: Option<WindowHint>,
     goods_box: Option<MatchBox>,
     detail: HashMap<String, MatchBox>,
     qty_mid: Option<MatchBox>,
     avg_ocr_streak: u32,
     ocr_miss_streak: u32,
     last_avg_ok: Instant,
+    capture_seq: u64,
+    capture_dir_announced: bool,
 }
 
 pub async fn run_single_flow(
@@ -99,18 +102,20 @@ impl SingleSession {
             emitter,
             session_id,
             templates,
-            active_window: None,
             goods_box: None,
             detail: HashMap::new(),
             qty_mid: None,
             avg_ocr_streak: 0,
             ocr_miss_streak: 0,
             last_avg_ok: Instant::now(),
+            capture_seq: 0,
+            capture_dir_announced: false,
         }
     }
 
     async fn run(&mut self) -> Result<()> {
         self.validate()?;
+        self.announce_capture_archive();
         self.log("info", STEP_1, "开始执行单商品会话", Some(0.05));
         self.ensure_ready().await?;
         self.clear_obstacles().await?;
@@ -175,7 +180,7 @@ impl SingleSession {
     }
 
     async fn ensure_ready(&mut self) -> Result<()> {
-        if self.find_scene_window().await?.is_some() {
+        if self.find_scene_visible().await? {
             self.log(
                 "info",
                 STEP_1,
@@ -207,18 +212,19 @@ impl SingleSession {
             .ok_or_else(|| anyhow!("launch button not found"))?;
         self.nap(Duration::from_secs(game.launch_click_delay_sec))
             .await;
-        click_box(&launch_button.0, launch_button.1)?;
+        click_box_global(launch_button)?;
         self.log(
             "info",
             STEP_1,
             "已点击启动按钮，等待首页/市场标识",
             Some(0.1),
         );
-        let scene = self
+        let scene_visible = self
             .wait_any_scene(Duration::from_secs(game.startup_timeout_sec.max(1)))
-            .await?
-            .ok_or_else(|| anyhow!("home/market indicator not found"))?;
-        self.active_window = Some(scene.hint);
+            .await?;
+        if !scene_visible {
+            return Err(anyhow!("home/market indicator not found"));
+        }
         Ok(())
     }
 
@@ -230,7 +236,7 @@ impl SingleSession {
         {
             self.dismiss_overlay().await?;
         }
-        if let Some((window, box_rect)) = self
+        if let Some(box_rect) = self
             .locate_active("btn_close", Duration::from_millis(80), None)
             .await?
         {
@@ -239,7 +245,7 @@ impl SingleSession {
                 .await?
                 .is_some()
             {
-                click_box(&window, box_rect)?;
+                click_box_global(box_rect)?;
                 self.nap(Duration::from_secs_f64(
                     self.request
                         .config
@@ -263,21 +269,21 @@ impl SingleSession {
             }
             _ => bail!("unable to determine scene before search"),
         }
-        let (window, input_box) = self
+        let input_box = self
             .locate_active("input_search", Duration::from_secs(2), None)
             .await?
             .ok_or_else(|| anyhow!("search input not found"))?;
-        click_box(&window, input_box)?;
+        click_box_global(input_box)?;
         self.nap(Duration::from_millis(30)).await;
         type_text(&self.request.goods.search_name)?;
         self.nap(Duration::from_millis(30)).await;
-        let (window, search_box) = self
+        let search_box = self
             .locate_active("btn_search", Duration::from_secs(1), None)
             .await?
             .ok_or_else(|| anyhow!("search button not found"))?;
-        click_box(&window, search_box)?;
+        click_box_global(search_box)?;
         self.nap(Duration::from_millis(40)).await;
-        let (_, goods_box) = self
+        let goods_box = self
             .locate_goods(Duration::from_secs_f64(2.5), None)
             .await?
             .ok_or_else(|| anyhow!("goods template not found"))?;
@@ -288,7 +294,7 @@ impl SingleSession {
 
     async fn precache(&mut self) -> Result<()> {
         for idx in 0..3 {
-            if self.open_detail().await?.is_some() {
+            if self.open_detail().await? {
                 self.cache_detail_controls().await?;
                 let _ = self.read_avg_price().await?;
                 let _ = self.close_detail().await?;
@@ -301,7 +307,7 @@ impl SingleSession {
     }
 
     async fn purchase_once(&mut self, task: &mut SingleTaskRecord) -> Result<i64> {
-        if self.open_detail().await?.is_none() {
+        if !self.open_detail().await? {
             self.log("info", STEP_5, "打开详情失败，等待下一轮", Some(0.46));
             return Ok(0);
         }
@@ -360,7 +366,7 @@ impl SingleSession {
         );
 
         if !fast_mode || max_chain <= 1 {
-            click_box(&self.capture_active()?, buy_box)?;
+            click_box_global(buy_box)?;
             if !self.wait_buy_ok().await? {
                 let _ = self.close_detail().await?;
                 return Ok(0);
@@ -370,7 +376,7 @@ impl SingleSession {
             return Ok(qty);
         }
 
-        click_box(&self.capture_active()?, buy_box)?;
+        click_box_global(buy_box)?;
         let mut bought = 0;
         for idx in 0..max_chain {
             if !self.wait_buy_ok().await? {
@@ -388,7 +394,7 @@ impl SingleSession {
                 self.dismiss_overlay().await?;
                 return Ok(bought);
             }
-            let center = to_global(&self.capture_active()?, buy_box);
+            let center = center_of_box(buy_box);
             click_point(center.0, center.1)?;
             self.nap(interval).await;
             click_point(center.0, center.1)?;
@@ -400,7 +406,7 @@ impl SingleSession {
     async fn prepare_restock_qty(&mut self) -> Result<(i64, bool)> {
         if self.request.goods.big_category.trim() == "弹药" {
             if let Some(max_box) = self.detail.get("btn_max").copied() {
-                click_box(&self.capture_active()?, max_box)?;
+                click_box_global(max_box)?;
                 self.nap(Duration::from_millis(60)).await;
                 return Ok((self.read_qty().await?.unwrap_or(120).max(1), true));
             }
@@ -422,7 +428,7 @@ impl SingleSession {
         let Some(qty_box) = self.qty_mid else {
             return Ok(false);
         };
-        click_box(&self.capture_active()?, qty_box)?;
+        click_box_global(qty_box)?;
         self.nap(Duration::from_millis(30)).await;
         type_text(&qty.to_string())?;
         self.nap(Duration::from_millis(30)).await;
@@ -433,8 +439,13 @@ impl SingleSession {
         let Some(roi) = self.qty_roi() else {
             return Ok(None);
         };
-        let gray = crop_gray(&self.capture_active()?.image, roi)?;
+        let captured = self.capture_screen("read_qty_window")?;
+        let local_roi =
+            global_box_to_local(&captured, roi).ok_or_else(|| anyhow!("qty roi is outside screen"))?;
+        let gray = crop_gray(&captured.image, local_roi)?;
+        self.archive_gray_capture("read_qty_raw", roi, &gray);
         let image = threshold(resize(gray, 2.0));
+        self.archive_gray_capture("read_qty_ocr", roi, &image);
         let texts = recognize_text(&self.request.config.umi_ocr, &image).await?;
         Ok(texts
             .into_iter()
@@ -482,19 +493,24 @@ impl SingleSession {
             .get("btn_buy")
             .copied()
             .ok_or_else(|| anyhow!("btn_buy missing"))?;
-        let captured = self.capture_active()?;
-        let roi = avg_price_roi(
-            buy_box,
+        let captured = self.capture_screen("avg_price_window")?;
+        let local_buy_box = global_box_to_local(&captured, buy_box)
+            .ok_or_else(|| anyhow!("btn_buy is outside screen"))?;
+        let local_roi = avg_price_roi(
+            local_buy_box,
             self.request.goods.exchangeable,
             &self.request.config,
             captured.width,
             captured.height,
         );
-        let gray = crop_gray(&captured.image, roi)?;
+        let roi = local_box_to_global(&captured, local_roi);
+        let gray = crop_gray(&captured.image, local_roi)?;
+        self.archive_gray_capture("avg_price_raw", roi, &gray);
         let image = threshold(resize(
             top_half(gray),
             self.request.config.avg_price_area.scale,
         ));
+        self.archive_gray_capture("avg_price_ocr", roi, &image);
         let texts = recognize_text(&self.request.config.umi_ocr, &image).await?;
         Ok(texts
             .into_iter()
@@ -541,12 +557,13 @@ impl SingleSession {
 
     async fn dismiss_overlay(&mut self) -> Result<()> {
         if let Some(buy_box) = self.detail.get("btn_buy").copied() {
-            click_box(&self.capture_active()?, buy_box)?;
-        } else if let Some((window, ok_box)) = self
+            self.capture_screen("dismiss_overlay_buy")?;
+            click_box_global(buy_box)?;
+        } else if let Some(ok_box) = self
             .locate_active("buy_ok", Duration::from_millis(120), None)
             .await?
         {
-            click_box(&window, ok_box)?;
+            click_box_global(ok_box)?;
         }
         self.nap(Duration::from_secs_f64(
             self.request
@@ -561,7 +578,8 @@ impl SingleSession {
 
     async fn close_detail(&mut self) -> Result<bool> {
         if let Some(close_box) = self.detail.get("btn_close").copied() {
-            click_box(&self.capture_active()?, close_box)?;
+            self.capture_screen("close_detail")?;
+            click_box_global(close_box)?;
             self.nap(Duration::from_secs_f64(
                 self.request
                     .config
@@ -605,11 +623,11 @@ impl SingleSession {
                 .max(5.0),
         ))
         .await;
-        if let Some((window, box_rect)) = self
+        if let Some(box_rect) = self
             .locate_active("btn_penalty_confirm", Duration::from_secs(2), None)
             .await?
         {
-            click_box(&window, box_rect)?;
+            click_box_global(box_rect)?;
             self.nap(Duration::from_secs_f64(
                 self.request
                     .config
@@ -624,11 +642,11 @@ impl SingleSession {
     }
 
     async fn navigate(&mut self, slug: &str) -> Result<()> {
-        let (window, box_rect) = self
+        let box_rect = self
             .locate_active(slug, Duration::from_secs(2), None)
             .await?
             .ok_or_else(|| anyhow!("template {slug} not found"))?;
-        click_box(&window, box_rect)?;
+        click_box_global(box_rect)?;
         self.nap(Duration::from_secs_f64(
             self.request
                 .config
@@ -640,15 +658,13 @@ impl SingleSession {
         Ok(())
     }
 
-    async fn open_detail(&mut self) -> Result<Option<(CapturedWindow, MatchBox)>> {
+    async fn open_detail(&mut self) -> Result<bool> {
         if self.detail_visible().await? {
-            let current = self.capture_active()?;
-            let buy_box = self.detail.get("btn_buy").copied().unwrap_or((0, 0, 0, 0));
-            return Ok(Some((current, buy_box)));
+            return Ok(true);
         }
         if let Some(goods_box) = self.goods_box {
-            let window = self.capture_active()?;
-            click_box(&window, goods_box)?;
+            self.capture_screen("open_detail_cached_goods")?;
+            click_box_global(goods_box)?;
             self.nap(Duration::from_secs_f64(
                 self.request
                     .config
@@ -658,13 +674,12 @@ impl SingleSession {
             ))
             .await;
             if self.detail_visible().await? {
-                return Ok(Some((self.capture_active()?, goods_box)));
+                return Ok(true);
             }
         }
-        let matched = self.locate_goods(Duration::from_secs(2), None).await?;
-        if let Some((window, goods_box)) = matched {
+        if let Some(goods_box) = self.locate_goods(Duration::from_secs(2), None).await? {
             self.goods_box = Some(goods_box);
-            click_box(&window, goods_box)?;
+            click_box_global(goods_box)?;
             self.nap(Duration::from_secs_f64(
                 self.request
                     .config
@@ -674,20 +689,20 @@ impl SingleSession {
             ))
             .await;
             if self.detail_visible().await? {
-                return Ok(Some((self.capture_active()?, goods_box)));
+                return Ok(true);
             }
         }
-        Ok(None)
+        Ok(false)
     }
 
     async fn cache_detail_controls(&mut self) -> Result<()> {
-        let window = self.capture_active()?;
+        let screen = self.capture_screen("cache_detail_controls")?;
         for key in ["btn_buy", "btn_close", "qty_minus", "qty_plus", "btn_max"] {
             if key == "btn_max" && self.request.goods.big_category.trim() != "弹药" {
                 continue;
             }
-            if let Some(box_rect) = find_in_window(
-                &window,
+            if let Some(box_rect) = self.locate_template_in_capture(
+                &screen,
                 &self.template(key)?.path,
                 self.template(key)?.confidence,
                 None,
@@ -734,67 +749,44 @@ impl SingleSession {
     }
 
     async fn detect_scene(&mut self) -> Result<&'static str> {
-        if self
-            .locate_active("home_indicator", Duration::from_millis(80), None)
-            .await?
-            .is_some()
-        {
-            return Ok("home");
-        }
-        if self
-            .locate_active("market_indicator", Duration::from_millis(80), None)
-            .await?
-            .is_some()
-        {
-            return Ok("market");
-        }
-        if self.detail_visible().await? {
-            return Ok("detail");
-        }
-        Ok("unknown")
+        let screen = self.capture_screen("detect_scene")?;
+        self.detect_scene_in_capture(&screen)
     }
 
-    async fn wait_any_scene(&mut self, timeout: Duration) -> Result<Option<CapturedWindow>> {
+    async fn wait_any_scene(&mut self, timeout: Duration) -> Result<bool> {
         let deadline = Instant::now() + timeout;
-        while Instant::now() < deadline {
-            if let Some(found) = self.find_scene_window().await? {
-                return Ok(Some(found));
+        loop {
+            let screen = self.capture_screen("wait_any_scene")?;
+            let scene = self.detect_scene_in_capture(&screen)?;
+            if matches!(scene, "home" | "market") {
+                return Ok(true);
+            }
+            if timeout.is_zero() || Instant::now() >= deadline {
+                return Ok(false);
             }
             self.nap(Duration::from_millis(180)).await;
         }
-        Ok(None)
     }
 
-    async fn find_scene_window(&mut self) -> Result<Option<CapturedWindow>> {
-        for slug in ["home_indicator", "market_indicator"] {
-            if let Some((window, _)) = self
-                .wait_any_template(slug, Duration::from_millis(0))
-                .await?
-            {
-                return Ok(Some(window));
-            }
-        }
-        Ok(None)
+    async fn find_scene_visible(&mut self) -> Result<bool> {
+        self.wait_any_scene(Duration::from_millis(0)).await
     }
 
     async fn wait_any_template(
         &mut self,
         slug: &str,
         timeout: Duration,
-    ) -> Result<Option<(CapturedWindow, MatchBox)>> {
+    ) -> Result<Option<MatchBox>> {
         let deadline = Instant::now() + timeout;
         loop {
-            for window in enum_windows()? {
-                let captured = capture_window(window)?;
-                if let Some(box_rect) = find_in_window(
-                    &captured,
-                    &self.template(slug)?.path,
-                    self.template(slug)?.confidence,
-                    None,
-                )? {
-                    self.active_window = Some(captured.hint.clone());
-                    return Ok(Some((captured, box_rect)));
-                }
+            let screen = self.capture_screen(&format!("wait_any_template_{slug}"))?;
+            if let Some(box_rect) = self.locate_template_in_capture(
+                &screen,
+                &self.template(slug)?.path,
+                self.template(slug)?.confidence,
+                None,
+            )? {
+                return Ok(Some(box_rect));
             }
             if timeout.is_zero() || Instant::now() >= deadline {
                 return Ok(None);
@@ -808,18 +800,17 @@ impl SingleSession {
         slug: &str,
         timeout: Duration,
         region: Option<MatchBox>,
-    ) -> Result<Option<(CapturedWindow, MatchBox)>> {
+    ) -> Result<Option<MatchBox>> {
         let deadline = Instant::now() + timeout;
         loop {
-            if let Some(window) = self.capture_active_opt()? {
-                if let Some(box_rect) = find_in_window(
-                    &window,
-                    &self.template(slug)?.path,
-                    self.template(slug)?.confidence,
-                    region,
-                )? {
-                    return Ok(Some((window, box_rect)));
-                }
+            let screen = self.capture_screen(&format!("locate_active_{slug}"))?;
+            if let Some(box_rect) = self.locate_template_in_capture(
+                &screen,
+                &self.template(slug)?.path,
+                self.template(slug)?.confidence,
+                region,
+            )? {
+                return Ok(Some(box_rect));
             }
             if timeout.is_zero() || Instant::now() >= deadline {
                 return Ok(None);
@@ -832,34 +823,72 @@ impl SingleSession {
         &mut self,
         timeout: Duration,
         region: Option<MatchBox>,
-    ) -> Result<Option<(CapturedWindow, MatchBox)>> {
+    ) -> Result<Option<MatchBox>> {
         let deadline = Instant::now() + timeout;
         let goods_path = resolve_path(&self.request.paths, &self.request.goods.image_path);
         loop {
-            if let Some(window) = self.capture_active_opt()? {
-                if let Some(box_rect) =
-                    locate_template_in_image(&window.image, &goods_path, 0.80, region)?
-                {
-                    return Ok(Some((window, box_rect)));
-                }
+            let screen = self.capture_screen("locate_goods")?;
+            if let Some(box_rect) = self.locate_template_in_capture(&screen, &goods_path, 0.80, region)? {
+                return Ok(Some(box_rect));
             }
-            if Instant::now() >= deadline {
+            if timeout.is_zero() || Instant::now() >= deadline {
                 return Ok(None);
             }
             self.nap(Duration::from_millis(60)).await;
         }
     }
 
-    fn capture_active(&mut self) -> Result<CapturedWindow> {
-        self.capture_active_opt()?
-            .ok_or_else(|| anyhow!("active window unavailable"))
+    fn capture_screen(&mut self, stage: &str) -> Result<CapturedImage> {
+        let screen = capture_full_screen()?;
+        self.archive_screen_capture(stage, &screen);
+        Ok(screen)
     }
 
-    fn capture_active_opt(&mut self) -> Result<Option<CapturedWindow>> {
-        let Some(hint) = self.active_window.clone() else {
-            return Ok(None);
-        };
-        capture_matching_window(&hint)
+    fn detect_scene_in_capture(&self, screen: &CapturedImage) -> Result<&'static str> {
+        if self.locate_template_in_capture(
+            screen,
+            &self.template("home_indicator")?.path,
+            self.template("home_indicator")?.confidence,
+            None,
+        )?.is_some() {
+            return Ok("home");
+        }
+        if self.locate_template_in_capture(
+            screen,
+            &self.template("market_indicator")?.path,
+            self.template("market_indicator")?.confidence,
+            None,
+        )?.is_some() {
+            return Ok("market");
+        }
+        if self.locate_template_in_capture(
+            screen,
+            &self.template("btn_buy")?.path,
+            self.template("btn_buy")?.confidence,
+            None,
+        )?.is_some()
+            && self.locate_template_in_capture(
+                screen,
+                &self.template("btn_close")?.path,
+                self.template("btn_close")?.confidence,
+                None,
+            )?.is_some()
+        {
+            return Ok("detail");
+        }
+        Ok("unknown")
+    }
+
+    fn locate_template_in_capture(
+        &self,
+        screen: &CapturedImage,
+        template_path: &Path,
+        confidence: f64,
+        region: Option<MatchBox>,
+    ) -> Result<Option<MatchBox>> {
+        let local_region = region.and_then(|rect| global_box_to_local(screen, rect));
+        Ok(locate_template_in_image(&screen.image, template_path, confidence, local_region)?
+            .map(|rect| local_box_to_global(screen, rect)))
     }
 
     fn template(&self, slug: &str) -> Result<&TemplateEntry> {
@@ -911,6 +940,105 @@ impl SingleSession {
         } else {
             self.request.goods.name.clone()
         }
+    }
+
+    fn announce_capture_archive(&mut self) {
+        if !self.request.config.debug.save_single_capture_images || self.capture_dir_announced {
+            return;
+        }
+        self.capture_dir_announced = true;
+        self.log(
+            "info",
+            STEP_CAPTURE,
+            format!(
+                "已启用单商品抓图存档，目录={}",
+                self.capture_archive_dir().display()
+            ),
+            None,
+        );
+    }
+
+    fn capture_archive_dir(&self) -> PathBuf {
+        self.request
+            .paths
+            .debug_dir
+            .join("single-captures")
+            .join(&self.session_id)
+    }
+
+    fn archive_screen_capture(&mut self, stage: &str, screen: &CapturedImage) {
+        if !self.request.config.debug.save_single_capture_images {
+            return;
+        }
+        self.persist_capture(
+            stage,
+            Some((screen.x, screen.y, screen.width, screen.height)),
+            None,
+            |path| screen.image.save(path),
+        );
+    }
+
+    fn archive_gray_capture(&mut self, stage: &str, roi: MatchBox, image: &GrayImage) {
+        if !self.request.config.debug.save_single_capture_images {
+            return;
+        }
+        self.persist_capture(stage, None, Some(roi), |path| image.save(path));
+    }
+
+    fn persist_capture<F>(
+        &mut self,
+        stage: &str,
+        screen: Option<(i32, i32, i32, i32)>,
+        roi: Option<MatchBox>,
+        save: F,
+    ) where
+        F: FnOnce(&Path) -> image::ImageResult<()>,
+    {
+        self.announce_capture_archive();
+        let path = self.next_capture_path(stage, screen, roi);
+        if let Some(parent) = path.parent()
+            && let Err(error) = fs::create_dir_all(parent)
+        {
+            self.log(
+                "error",
+                STEP_CAPTURE,
+                format!("创建抓图目录失败：{} ({error})", parent.display()),
+                None,
+            );
+            return;
+        }
+        if let Err(error) = save(&path) {
+            self.log(
+                "error",
+                STEP_CAPTURE,
+                format!("保存抓图失败：{} ({error})", path.display()),
+                None,
+            );
+        }
+    }
+
+    fn next_capture_path(
+        &mut self,
+        stage: &str,
+        screen: Option<(i32, i32, i32, i32)>,
+        roi: Option<MatchBox>,
+    ) -> PathBuf {
+        self.capture_seq = self.capture_seq.saturating_add(1);
+        let timestamp = Utc::now().format("%Y%m%dT%H%M%S%.3fZ").to_string();
+        let mut parts = vec![
+            format!("{:06}", self.capture_seq),
+            timestamp,
+            sanitize_capture_component(stage),
+        ];
+        if let Some((x, y, width, height)) = screen {
+            parts.push(format!("screen_{x}_{y}_{width}_{height}"));
+            parts.push(format!("{}x{}", width.max(0), height.max(0)));
+        }
+        if let Some((x, y, width, height)) = roi {
+            parts.push(format!("roi_{x}_{y}_{width}_{height}"));
+        }
+        self.capture_archive_dir()
+            .join(format!("{}.png", parts.join("__")))
     }
 
     fn log(&self, level: &str, step: &str, message: impl Into<String>, progress: Option<f64>) {
@@ -977,5 +1105,54 @@ fn optional_str(value: &str) -> Option<String> {
         None
     } else {
         Some(trimmed.to_string())
+    }
+}
+
+fn center_of_box(rect: MatchBox) -> (i32, i32) {
+    (rect.0 + rect.2 / 2, rect.1 + rect.3 / 2)
+}
+
+fn click_box_global(rect: MatchBox) -> Result<()> {
+    let center = center_of_box(rect);
+    click_point(center.0, center.1)
+}
+
+fn global_box_to_local(screen: &CapturedImage, rect: MatchBox) -> Option<MatchBox> {
+    let max_width = screen.image.width() as i32;
+    let max_height = screen.image.height() as i32;
+    let left = (rect.0 - screen.x).clamp(0, max_width.saturating_sub(1));
+    let top = (rect.1 - screen.y).clamp(0, max_height.saturating_sub(1));
+    let right = (rect.0 + rect.2 - screen.x).clamp(left + 1, max_width);
+    let bottom = (rect.1 + rect.3 - screen.y).clamp(top + 1, max_height);
+    if right <= left || bottom <= top {
+        return None;
+    }
+    Some((left, top, right - left, bottom - top))
+}
+
+fn local_box_to_global(screen: &CapturedImage, rect: MatchBox) -> MatchBox {
+    (rect.0 + screen.x, rect.1 + screen.y, rect.2, rect.3)
+}
+
+fn sanitize_capture_component(raw: &str) -> String {
+    let sanitized = raw
+        .trim()
+        .chars()
+        .map(|ch| match ch {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
+            c if c.is_whitespace() => '_',
+            c if c.is_control() => '_',
+            c => c,
+        })
+        .collect::<String>();
+    let collapsed = sanitized
+        .split('_')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("_");
+    if collapsed.is_empty() {
+        "capture".to_string()
+    } else {
+        collapsed.chars().take(72).collect()
     }
 }
