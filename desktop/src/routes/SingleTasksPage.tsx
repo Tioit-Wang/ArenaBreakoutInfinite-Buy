@@ -4,13 +4,14 @@ import {
   CircleHelp,
   Eye,
   Play,
+  SlidersHorizontal,
   Square,
   Trash2,
 } from "lucide-react"
 
 import { useRuntimeStore } from "@/app/store"
 import { api } from "@/lib/api"
-import type { GoodsRecord, SingleTaskRecord } from "@/lib/types"
+import type { AppBootstrap, GoodsRecord, SingleTaskRecord } from "@/lib/types"
 import { cn } from "@/lib/utils"
 import { InlineNote } from "@/components/minimal-page"
 import { Badge } from "@/components/ui/badge"
@@ -38,6 +39,18 @@ import {
 } from "@/components/ui/select"
 
 type NoticeTone = "slate" | "emerald" | "rose"
+type SingleTimingDraft = {
+  detailOpenSettleMs: string
+  postCloseDetailMs: string
+  postSuccessClickMs: string
+  buyClickSettleMs: string
+  buyResultTimeoutMs: string
+  buyResultPollStepMs: string
+  roundCooldownEveryNRounds: string
+  roundCooldownMinutes: string
+  restockRetriggerWindowMinutes: string
+  restockMissCooldownMinutes: string
+}
 
 const emptySingleTask = (): SingleTaskRecord => ({
   id: crypto.randomUUID(),
@@ -62,6 +75,10 @@ export function SingleTasksPage() {
   const logs = useRuntimeStore((state) => state.logs)
   const queryClient = useQueryClient()
   const [draft, setDraft] = useState<SingleTaskRecord | null>(null)
+  const [timingDialogOpen, setTimingDialogOpen] = useState(false)
+  const [timingDraft, setTimingDraft] = useState<SingleTimingDraft | null>(null)
+  const [timingMessage, setTimingMessage] = useState("")
+  const [timingMessageTone, setTimingMessageTone] = useState<NoticeTone>("slate")
   const [logDrawerOpen, setLogDrawerOpen] = useState(false)
   const [logsClearedAt, setLogsClearedAt] = useState<number | null>(null)
   const [captureArchiveSaving, setCaptureArchiveSaving] = useState(false)
@@ -70,6 +87,7 @@ export function SingleTasksPage() {
   const [captureArchiveMessageTone, setCaptureArchiveMessageTone] =
     useState<NoticeTone>("slate")
   const lastSavedRef = useRef("")
+  const lastSavedTimingRef = useRef("")
 
   useEffect(() => {
     if (!bootstrap) return
@@ -77,6 +95,9 @@ export function SingleTasksPage() {
     const nextDraft = current ? structuredClone(current) : emptySingleTask()
     setDraft(nextDraft)
     lastSavedRef.current = normalizeTask(nextDraft)
+    const nextTimingDraft = timingDraftFromConfig(bootstrap)
+    setTimingDraft(nextTimingDraft)
+    lastSavedTimingRef.current = normalizeTimingDraft(nextTimingDraft)
   }, [bootstrap])
 
   const goodsMap = useMemo(() => {
@@ -117,6 +138,57 @@ export function SingleTasksPage() {
     setCaptureArchiveOverride(null)
   }, [bootstrap?.config.debug.saveSingleCaptureImages])
 
+  const saveTimingDraft = useCallback(async (nextDraft: SingleTimingDraft) => {
+    if (!bootstrap) return null
+    const parsedDraft = parseTimingDraft(nextDraft)
+    const saved = await api.configSave({
+      ...bootstrap.config,
+      multiSnipeTuning: {
+        ...bootstrap.config.multiSnipeTuning,
+        detailOpenSettleSec: roundMs(parsedDraft.detailOpenSettleMs) / 1000,
+        postCloseDetailSec: roundMs(parsedDraft.postCloseDetailMs) / 1000,
+        postSuccessClickSec: roundMs(parsedDraft.postSuccessClickMs) / 1000,
+        buyClickSettleSec: roundMs(parsedDraft.buyClickSettleMs) / 1000,
+        buyResultTimeoutSec: roundMs(parsedDraft.buyResultTimeoutMs) / 1000,
+        buyResultPollStepSec: roundMs(parsedDraft.buyResultPollStepMs) / 1000,
+        roundCooldownEveryNRounds: roundCount(parsedDraft.roundCooldownEveryNRounds),
+        roundCooldownMinutes: roundMinutes(parsedDraft.roundCooldownMinutes),
+        restockRetriggerWindowMinutes: roundMinutes(parsedDraft.restockRetriggerWindowMinutes),
+        restockMissCooldownMinutes: roundMinutes(parsedDraft.restockMissCooldownMinutes),
+      },
+    })
+    const savedTimingDraft = timingDraftFromConfig({ config: saved })
+    const requestedTimingDraft = normalizeTimingDraft(nextDraft)
+    queryClient.setQueryData<AppBootstrap>(["bootstrap"], (current) =>
+      current
+        ? {
+            ...current,
+            config: saved,
+          }
+        : current,
+    )
+    lastSavedTimingRef.current = normalizeTimingDraft(savedTimingDraft)
+    setTimingDraft((current) =>
+      current && normalizeTimingDraft(current) === requestedTimingDraft ? savedTimingDraft : current
+    )
+    setTimingMessageTone("emerald")
+    setTimingMessage("运行参数已自动保存，新会话会按最新参数启动。")
+    return saved
+  }, [bootstrap, queryClient])
+
+  useEffect(() => {
+    if (!timingDraft) return
+    const normalized = normalizeTimingDraft(timingDraft)
+    if (normalized === lastSavedTimingRef.current) return
+    const timer = window.setTimeout(() => {
+      void saveTimingDraft(timingDraft).catch((error) => {
+        setTimingMessageTone("rose")
+        setTimingMessage(`运行参数未保存：${formatErrorMessage(error)}`)
+      })
+    }, 450)
+    return () => window.clearTimeout(timer)
+  }, [saveTimingDraft, timingDraft])
+
   const singleLogs = logs.filter((log) => {
     if (log.scope !== "automation:single") {
       return false
@@ -139,7 +211,7 @@ export function SingleTasksPage() {
 
   if (!bootstrap || !draft) return null
 
-  const isRunning = runtime.state === "running" || runtime.state === "paused"
+  const isRunning = runtime.state === "running"
   const runtimeTone =
     runtime.state === "running"
       ? "default"
@@ -241,6 +313,15 @@ export function SingleTasksPage() {
                       开始
                     </>
                   )}
+                </Button>
+                <Button
+                  size="lg"
+                  variant="secondary"
+                  onClick={() => setTimingDialogOpen(true)}
+                  className="h-12 rounded-full px-6"
+                >
+                  <SlidersHorizontal className="mr-2 size-4" />
+                  运行参数
                 </Button>
                 <Button
                   size="lg"
@@ -408,10 +489,217 @@ export function SingleTasksPage() {
         </Card>
       </div>
 
+      <Dialog open={timingDialogOpen} onOpenChange={setTimingDialogOpen}>
+        <DialogContent className="max-w-3xl rounded-[32px] p-0">
+          <DialogHeader className="border-b border-black/5 px-6 py-5">
+            <DialogTitle className="font-display text-3xl tracking-tight">
+              单商品运行参数
+            </DialogTitle>
+            <DialogDescription className="text-sm leading-6">
+              这里调整单商品抢购的详情稳定、结果识别与遮罩关闭时序。输入后会自动保存。
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="grid gap-6 px-6 py-6 md:px-8 md:py-8">
+            <div className="grid gap-8 md:grid-cols-2">
+              <FormNumberDraft
+                label="购买点击后固定等待"
+                hint="点击购买按钮后，先固定等待，再开始轮询购买成功/失败模板。填 0 关闭。"
+                value={timingDraft?.buyClickSettleMs ?? "50"}
+                min={0}
+                step="1"
+                suffix="ms"
+                onChange={(value) =>
+                  setTimingDraft((current) =>
+                    current
+                      ? {
+                          ...current,
+                          buyClickSettleMs: value,
+                        }
+                      : current
+                  )
+                }
+              />
+              <FormNumberDraft
+                label="详情打开稳定等待"
+                hint="点击商品卡片后，到开始判定详情已打开之间的等待。当前运行时下限为 50ms。"
+                value={timingDraft?.detailOpenSettleMs ?? "50"}
+                min={50}
+                step="1"
+                suffix="ms"
+                onChange={(value) =>
+                  setTimingDraft((current) =>
+                    current
+                      ? {
+                          ...current,
+                          detailOpenSettleMs: value,
+                        }
+                      : current
+                  )
+                }
+              />
+              <FormNumberDraft
+                label="关闭详情后等待"
+                hint="点击详情关闭按钮后的稳定等待。当前运行时下限为 50ms。"
+                value={timingDraft?.postCloseDetailMs ?? "50"}
+                min={50}
+                step="1"
+                suffix="ms"
+                onChange={(value) =>
+                  setTimingDraft((current) =>
+                    current
+                      ? {
+                          ...current,
+                          postCloseDetailMs: value,
+                        }
+                      : current
+                  )
+                }
+              />
+              <FormNumberDraft
+                label="成功遮罩点击后等待"
+                hint="购买成功后关闭遮罩，再进入下一步前的稳定等待。当前运行时下限为 50ms。"
+                value={timingDraft?.postSuccessClickMs ?? "50"}
+                min={50}
+                step="1"
+                suffix="ms"
+                onChange={(value) =>
+                  setTimingDraft((current) =>
+                    current
+                      ? {
+                          ...current,
+                          postSuccessClickMs: value,
+                        }
+                      : current
+                  )
+                }
+              />
+              <FormNumberDraft
+                label="购买结果识别窗口"
+                hint="点击购买后，在窗口内轮询 buy_ok / buy_fail。当前运行时下限为 250ms。"
+                value={timingDraft?.buyResultTimeoutMs ?? "350"}
+                min={250}
+                step="1"
+                suffix="ms"
+                onChange={(value) =>
+                  setTimingDraft((current) =>
+                    current
+                      ? {
+                          ...current,
+                          buyResultTimeoutMs: value,
+                        }
+                      : current
+                  )
+                }
+              />
+              <FormNumberDraft
+                label="购买结果轮询步进"
+                hint="识别窗口内每次重新检测 buy_ok / buy_fail 的间隔。当前运行时下限为 10ms。"
+                value={timingDraft?.buyResultPollStepMs ?? "10"}
+                min={10}
+                step="1"
+                suffix="ms"
+                onChange={(value) =>
+                  setTimingDraft((current) =>
+                    current
+                      ? {
+                          ...current,
+                          buyResultPollStepMs: value,
+                        }
+                      : current
+                  )
+                }
+              />
+            </div>
+
+            <div className="grid gap-8 rounded-[28px] border border-black/5 bg-white/55 px-5 py-5 md:grid-cols-2">
+              <FormNumberDraft
+                label="每 N 轮冷却"
+                hint="按成功进入详情并完成本轮判定计数。填 0 关闭。"
+                value={timingDraft?.roundCooldownEveryNRounds ?? "0"}
+                min={0}
+                step="1"
+                suffix="轮"
+                onChange={(value) =>
+                  setTimingDraft((current) =>
+                    current
+                      ? {
+                          ...current,
+                          roundCooldownEveryNRounds: value,
+                        }
+                      : current
+                  )
+                }
+              />
+              <FormNumberDraft
+                label="每轮冷却时长"
+                hint="达到上面的轮数后，保持 running 状态原地冷却的分钟数。填 0 关闭。"
+                value={timingDraft?.roundCooldownMinutes ?? "0"}
+                min={0}
+                step="0.1"
+                suffix="分钟"
+                onChange={(value) =>
+                  setTimingDraft((current) =>
+                    current
+                      ? {
+                          ...current,
+                          roundCooldownMinutes: value,
+                        }
+                      : current
+                  )
+                }
+              />
+              <FormNumberDraft
+                label="补货观察窗"
+                hint="某次进入补货模式后，若后续这段时间内没再次进入补货，就触发冷却。填 0 关闭。"
+                value={timingDraft?.restockRetriggerWindowMinutes ?? "0"}
+                min={0}
+                step="0.1"
+                suffix="分钟"
+                onChange={(value) =>
+                  setTimingDraft((current) =>
+                    current
+                      ? {
+                          ...current,
+                          restockRetriggerWindowMinutes: value,
+                        }
+                      : current
+                  )
+                }
+              />
+              <FormNumberDraft
+                label="补货缺失冷却时长"
+                hint="补货观察窗超时后，保持 running 状态冷却的分钟数。填 0 关闭。"
+                value={timingDraft?.restockMissCooldownMinutes ?? "0"}
+                min={0}
+                step="0.1"
+                suffix="分钟"
+                onChange={(value) =>
+                  setTimingDraft((current) =>
+                    current
+                      ? {
+                          ...current,
+                          restockMissCooldownMinutes: value,
+                        }
+                      : current
+                  )
+                }
+              />
+            </div>
+
+            {timingMessage || isRunning ? (
+              <InlineNote tone={timingMessage ? timingMessageTone : "slate"}>
+                {timingMessage || "参数会实时保存，但当前单商品会话已经持有启动时的配置；修改会在下一次点击开始后生效。"}
+              </InlineNote>
+            ) : null}
+          </div>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={logDrawerOpen} onOpenChange={setLogDrawerOpen}>
         <DialogContent className="left-1/2 top-auto bottom-0 max-w-6xl translate-x-[-50%] translate-y-0 gap-0 rounded-b-none rounded-t-[32px] border-b-0 p-0">
-          <DialogHeader className="border-b border-black/5 px-6 py-5">
-            <div className="flex items-start justify-between gap-4">
+          <DialogHeader className="border-b border-black/5 px-6 py-5 pr-20">
+            <div className="flex items-start gap-4">
               <div className="space-y-2">
                 <DialogTitle className="font-display text-3xl tracking-tight">
                   运行日志
@@ -425,7 +713,7 @@ export function SingleTasksPage() {
                 variant="ghost"
                 onClick={() => setLogsClearedAt(Date.now())}
                 aria-label="清空当前界面日志"
-                className="rounded-full"
+                className="ml-auto shrink-0 rounded-full"
               >
                 <Trash2 className="size-4" />
               </Button>
@@ -464,13 +752,17 @@ function FormNumber({
   label,
   hint,
   value,
+  min,
   step,
+  suffix,
   onChange,
 }: {
   label: string
   hint?: string
   value: number
+  min?: number
   step?: string
+  suffix?: string
   onChange: (value: number) => void
 }) {
   return (
@@ -481,11 +773,53 @@ function FormNumber({
       </div>
       <Input
         type="number"
+        min={min}
         step={step}
         value={value}
         className="h-12 rounded-none border-x-0 border-t-0 border-b border-slate-200 bg-transparent px-0 text-lg shadow-none focus-visible:ring-0 focus-visible:ring-offset-0"
         onChange={(event) => onChange(Number(event.target.value))}
       />
+      {suffix ? (
+        <p className="text-xs leading-5 text-slate-400">当前单位：{suffix}</p>
+      ) : null}
+    </div>
+  )
+}
+
+function FormNumberDraft({
+  label,
+  hint,
+  value,
+  min,
+  step,
+  suffix,
+  onChange,
+}: {
+  label: string
+  hint?: string
+  value: string
+  min?: number
+  step?: string
+  suffix?: string
+  onChange: (value: string) => void
+}) {
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-2">
+        <Label className="text-sm text-slate-500">{label}</Label>
+        {hint ? <HoverHint text={hint} /> : null}
+      </div>
+      <Input
+        type="number"
+        min={min}
+        step={step}
+        value={value}
+        className="h-12 rounded-none border-x-0 border-t-0 border-b border-slate-200 bg-transparent px-0 text-lg shadow-none focus-visible:ring-0 focus-visible:ring-offset-0"
+        onChange={(event) => onChange(event.target.value)}
+      />
+      {suffix ? (
+        <p className="text-xs leading-5 text-slate-400">当前单位：{suffix}</p>
+      ) : null}
     </div>
   )
 }
@@ -582,4 +916,87 @@ function normalizeTask(task: SingleTaskRecord) {
     targetTotal: task.targetTotal,
     purchased: task.purchased,
   })
+}
+
+function timingDraftFromConfig(source: { config: AppBootstrap["config"] | SingleTaskPageConfig }) {
+  const tuning = source.config.multiSnipeTuning
+  return {
+    detailOpenSettleMs: String(Math.round(tuning.detailOpenSettleSec * 1000)),
+    postCloseDetailMs: String(Math.round(tuning.postCloseDetailSec * 1000)),
+    postSuccessClickMs: String(Math.round(tuning.postSuccessClickSec * 1000)),
+    buyClickSettleMs: String(Math.round(tuning.buyClickSettleSec * 1000)),
+    buyResultTimeoutMs: String(Math.round(tuning.buyResultTimeoutSec * 1000)),
+    buyResultPollStepMs: String(Math.round(tuning.buyResultPollStepSec * 1000)),
+    roundCooldownEveryNRounds: String(tuning.roundCooldownEveryNRounds),
+    roundCooldownMinutes: formatMinutesDraft(tuning.roundCooldownMinutes),
+    restockRetriggerWindowMinutes: formatMinutesDraft(tuning.restockRetriggerWindowMinutes),
+    restockMissCooldownMinutes: formatMinutesDraft(tuning.restockMissCooldownMinutes),
+  }
+}
+
+type SingleTaskPageConfig = {
+  multiSnipeTuning: {
+    detailOpenSettleSec: number
+    postCloseDetailSec: number
+    postSuccessClickSec: number
+    buyClickSettleSec: number
+    buyResultTimeoutSec: number
+    buyResultPollStepSec: number
+    roundCooldownEveryNRounds: number
+    roundCooldownMinutes: number
+    restockRetriggerWindowMinutes: number
+    restockMissCooldownMinutes: number
+  }
+}
+
+function normalizeTimingDraft(draft: SingleTimingDraft) {
+  return JSON.stringify(draft)
+}
+
+function parseTimingDraft(draft: SingleTimingDraft) {
+  return {
+    detailOpenSettleMs: parseRequiredNumber(draft.detailOpenSettleMs, "详情打开稳定等待"),
+    postCloseDetailMs: parseRequiredNumber(draft.postCloseDetailMs, "关闭详情后等待"),
+    postSuccessClickMs: parseRequiredNumber(draft.postSuccessClickMs, "成功遮罩点击后等待"),
+    buyClickSettleMs: parseRequiredNumber(draft.buyClickSettleMs, "购买点击后固定等待"),
+    buyResultTimeoutMs: parseRequiredNumber(draft.buyResultTimeoutMs, "购买结果识别窗口"),
+    buyResultPollStepMs: parseRequiredNumber(draft.buyResultPollStepMs, "购买结果轮询步进"),
+    roundCooldownEveryNRounds: parseRequiredNumber(draft.roundCooldownEveryNRounds, "每 N 轮冷却"),
+    roundCooldownMinutes: parseRequiredNumber(draft.roundCooldownMinutes, "每轮冷却时长"),
+    restockRetriggerWindowMinutes: parseRequiredNumber(draft.restockRetriggerWindowMinutes, "补货观察窗"),
+    restockMissCooldownMinutes: parseRequiredNumber(draft.restockMissCooldownMinutes, "补货缺失冷却时长"),
+  }
+}
+
+function parseRequiredNumber(raw: string, label: string) {
+  const trimmed = raw.trim()
+  if (!trimmed) {
+    throw new Error(`${label}不能为空`)
+  }
+  const value = Number(trimmed)
+  if (!Number.isFinite(value)) {
+    throw new Error(`${label}必须是数字`)
+  }
+  return value
+}
+
+function formatErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error)
+}
+
+function roundMs(value: number) {
+  return Math.round(value)
+}
+
+function roundCount(value: number) {
+  return Math.max(0, Math.round(value))
+}
+
+function roundMinutes(value: number) {
+  return Math.max(0, Math.round(value * 10) / 10)
+}
+
+function formatMinutesDraft(value: number) {
+  const rounded = roundMinutes(value)
+  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1)
 }

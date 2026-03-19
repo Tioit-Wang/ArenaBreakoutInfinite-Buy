@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
 };
 use std::time::{Duration, Instant};
 
@@ -42,7 +41,6 @@ pub struct MultiRunRequest {
     pub templates: Vec<TemplateConfig>,
     pub paths: Arc<AppPaths>,
     pub repo: Arc<Repository>,
-    pub pause_flag: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone)]
@@ -127,7 +125,6 @@ impl MultiSession {
         self.ensure_ready().await?;
 
         while self.has_pending_tasks() {
-            self.wait_paused().await;
             self.refresh_favorites().await?;
             let scans = self.scan_visible_prices().await?;
             if scans.iter().any(|item| item.price.is_some()) {
@@ -1016,22 +1013,8 @@ impl MultiSession {
         }
     }
 
-    async fn wait_paused(&self) {
-        while self.request.pause_flag.load(Ordering::SeqCst) {
-            sleep(Duration::from_millis(200)).await;
-        }
-    }
-
     async fn nap(&self, duration: Duration) {
-        let deadline = Instant::now() + duration;
-        loop {
-            self.wait_paused().await;
-            let now = Instant::now();
-            if now >= deadline {
-                return;
-            }
-            sleep((deadline - now).min(Duration::from_millis(40))).await;
-        }
+        sleep(duration).await;
     }
 }
 

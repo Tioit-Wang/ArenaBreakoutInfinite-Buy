@@ -68,8 +68,6 @@ pub fn run() {
             commands::legacy::legacy_import,
             commands::runtime::automation_start_single,
             commands::runtime::automation_start_multi,
-            commands::runtime::automation_pause,
-            commands::runtime::automation_resume,
             commands::runtime::automation_stop,
             commands::runtime::ocr_status,
             commands::runtime::ocr_start,

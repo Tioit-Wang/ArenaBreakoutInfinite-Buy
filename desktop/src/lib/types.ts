@@ -49,6 +49,7 @@ export type AvgPriceAreaConfig = {
 export type MultiSnipeTuning = {
   buyResultTimeoutSec: number
   buyResultPollStepSec: number
+  buyClickSettleSec: number
   pollStepSec: number
   probeStepSec: number
   postClickWaitSec: number
@@ -70,6 +71,10 @@ export type MultiSnipeTuning = {
   fastChainMax: number
   fastChainIntervalMs: number
   relocateAfterFail: number
+  roundCooldownEveryNRounds: number
+  roundCooldownMinutes: number
+  restockRetriggerWindowMinutes: number
+  restockMissCooldownMinutes: number
 }
 
 export type AppConfig = {
@@ -258,8 +263,6 @@ export type AutomationRunState = {
   detail?: string | null
   startedAt?: string | null
   updatedAt: string
-  canPause: boolean
-  canResume: boolean
 }
 
 export type AutomationEvent = {

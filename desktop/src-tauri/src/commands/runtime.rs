@@ -82,28 +82,6 @@ pub fn automation_start_multi(
 }
 
 #[tauri::command]
-pub fn automation_pause(
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<AutomationRunState, String> {
-    state
-        .automation
-        .pause(&app)
-        .map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-pub fn automation_resume(
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<AutomationRunState, String> {
-    state
-        .automation
-        .resume(&app)
-        .map_err(|error| error.to_string())
-}
-
-#[tauri::command]
 pub fn automation_stop(
     app: AppHandle,
     state: State<'_, AppState>,

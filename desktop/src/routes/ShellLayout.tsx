@@ -84,7 +84,7 @@ export function ShellLayout() {
             return
           }
           const currentRuntime = useRuntimeStore.getState().runtime
-          if (currentRuntime.state === "running" || currentRuntime.state === "paused") {
+          if (currentRuntime.state === "running") {
             void api
               .automationStop()
               .then((nextRuntime) => {

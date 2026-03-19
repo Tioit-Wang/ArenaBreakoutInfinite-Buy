@@ -186,7 +186,7 @@ export function MultiTasksPage() {
     await queryClient.invalidateQueries({ queryKey: ["bootstrap"] })
   }
 
-  const isRunning = runtime.state === "running" || runtime.state === "paused"
+  const isRunning = runtime.state === "running"
   const runtimeTone =
     runtime.state === "running"
       ? "default"
@@ -486,8 +486,8 @@ export function MultiTasksPage() {
 
       <Dialog open={logDrawerOpen} onOpenChange={setLogDrawerOpen}>
         <DialogContent className="left-1/2 top-auto bottom-0 max-w-6xl translate-x-[-50%] translate-y-0 gap-0 rounded-b-none rounded-t-[32px] border-b-0 p-0">
-          <DialogHeader className="border-b border-black/5 px-6 py-5">
-            <div className="flex items-start justify-between gap-4">
+          <DialogHeader className="border-b border-black/5 px-6 py-5 pr-20">
+            <div className="flex items-start gap-4">
               <div className="space-y-2">
                 <DialogTitle className="font-display text-3xl tracking-tight">运行日志</DialogTitle>
                 <DialogDescription className="text-sm leading-6">
@@ -499,7 +499,7 @@ export function MultiTasksPage() {
                 variant="ghost"
                 onClick={() => setLogsClearedAt(Date.now())}
                 aria-label="清空当前界面日志"
-                className="rounded-full"
+                className="ml-auto shrink-0 rounded-full"
               >
                 <Trash2 className="size-4" />
               </Button>

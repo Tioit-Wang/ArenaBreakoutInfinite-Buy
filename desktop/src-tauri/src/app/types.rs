@@ -120,9 +120,11 @@ impl Default for AvgPriceAreaConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(default)]
 pub struct MultiSnipeTuning {
     pub buy_result_timeout_sec: f64,
     pub buy_result_poll_step_sec: f64,
+    pub buy_click_settle_sec: f64,
     pub poll_step_sec: f64,
     pub probe_step_sec: f64,
     pub post_click_wait_sec: f64,
@@ -144,6 +146,10 @@ pub struct MultiSnipeTuning {
     pub fast_chain_max: u32,
     pub fast_chain_interval_ms: f64,
     pub relocate_after_fail: u32,
+    pub round_cooldown_every_n_rounds: u32,
+    pub round_cooldown_minutes: f64,
+    pub restock_retrigger_window_minutes: f64,
+    pub restock_miss_cooldown_minutes: f64,
 }
 
 impl Default for MultiSnipeTuning {
@@ -151,6 +157,7 @@ impl Default for MultiSnipeTuning {
         Self {
             buy_result_timeout_sec: 0.35,
             buy_result_poll_step_sec: 0.01,
+            buy_click_settle_sec: 0.05,
             poll_step_sec: 0.02,
             probe_step_sec: 0.06,
             post_click_wait_sec: 0.2,
@@ -172,6 +179,10 @@ impl Default for MultiSnipeTuning {
             fast_chain_max: 10,
             fast_chain_interval_ms: 35.0,
             relocate_after_fail: 3,
+            round_cooldown_every_n_rounds: 0,
+            round_cooldown_minutes: 0.0,
+            restock_retrigger_window_minutes: 0.0,
+            restock_miss_cooldown_minutes: 0.0,
         }
     }
 }
@@ -384,8 +395,6 @@ pub struct AutomationRunState {
     pub detail: Option<String>,
     pub started_at: Option<String>,
     pub updated_at: String,
-    pub can_pause: bool,
-    pub can_resume: bool,
 }
 
 impl Default for AutomationRunState {
@@ -397,8 +406,6 @@ impl Default for AutomationRunState {
             detail: None,
             started_at: None,
             updated_at: Utc::now().to_rfc3339(),
-            can_pause: false,
-            can_resume: false,
         }
     }
 }

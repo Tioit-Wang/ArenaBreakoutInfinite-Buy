@@ -1,6 +1,5 @@
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
 };
 
 use anyhow::{Result, anyhow};
@@ -23,7 +22,6 @@ use crate::storage::repository::Repository;
 struct RuntimeControl {
     state: AutomationRunState,
     task: Option<async_runtime::JoinHandle<()>>,
-    pause_flag: Option<Arc<AtomicBool>>,
 }
 
 #[derive(Clone)]
@@ -59,7 +57,6 @@ impl AutomationManager {
     ) -> Result<AutomationRunState> {
         self.stop_internal();
         let session_id = format!("single-{}", Uuid::new_v4());
-        let pause_flag = Arc::new(AtomicBool::new(false));
         let state = AutomationRunState {
             session_id: Some(session_id.clone()),
             mode: Some("single".to_string()),
@@ -67,14 +64,11 @@ impl AutomationManager {
             detail: Some("single automation started".to_string()),
             started_at: Some(now_iso()),
             updated_at: now_iso(),
-            can_pause: true,
-            can_resume: false,
         };
         self.repo.upsert_runtime_session(&state)?;
         let _ = app.emit(AUTOMATION_STATE_EVENT, state.clone());
         let manager = self.clone();
         let state_clone = state.clone();
-        let pause_clone = pause_flag.clone();
         let handle = async_runtime::spawn(async move {
             let event_manager = manager.clone();
             let event_app = app.clone();
@@ -88,7 +82,6 @@ impl AutomationManager {
                 templates,
                 paths,
                 repo: manager.repo.clone(),
-                pause_flag: pause_clone,
             };
             let result = single_runner::run_single_flow(request, emit, session_id.clone()).await;
             let final_state = AutomationRunState {
@@ -106,8 +99,6 @@ impl AutomationManager {
                     .or_else(|| Some("single automation finished".to_string())),
                 started_at: state_clone.started_at.clone(),
                 updated_at: now_iso(),
-                can_pause: false,
-                can_resume: false,
             };
             let _ = manager.finish_run(&app, final_state);
         });
@@ -117,7 +108,6 @@ impl AutomationManager {
             .expect("automation control mutex poisoned");
         control.state = state.clone();
         control.task = Some(handle);
-        control.pause_flag = Some(pause_flag);
         Ok(state)
     }
 
@@ -134,7 +124,6 @@ impl AutomationManager {
         }
         self.stop_internal();
         let session_id = format!("multi-{}", Uuid::new_v4());
-        let pause_flag = Arc::new(AtomicBool::new(false));
         let state = AutomationRunState {
             session_id: Some(session_id.clone()),
             mode: Some("multi".to_string()),
@@ -142,14 +131,11 @@ impl AutomationManager {
             detail: Some("multi automation started".to_string()),
             started_at: Some(now_iso()),
             updated_at: now_iso(),
-            can_pause: true,
-            can_resume: false,
         };
         self.repo.upsert_runtime_session(&state)?;
         let _ = app.emit(AUTOMATION_STATE_EVENT, state.clone());
         let manager = self.clone();
         let state_clone = state.clone();
-        let pause_clone = pause_flag.clone();
         let handle = async_runtime::spawn(async move {
             let event_manager = manager.clone();
             let event_app = app.clone();
@@ -162,7 +148,6 @@ impl AutomationManager {
                 templates,
                 paths,
                 repo: manager.repo.clone(),
-                pause_flag: pause_clone,
             };
             let result = multi_runner::run_multi_flow(request, emit, session_id.clone()).await;
             let final_state = AutomationRunState {
@@ -180,8 +165,6 @@ impl AutomationManager {
                     .or_else(|| Some("multi automation finished".to_string())),
                 started_at: state_clone.started_at.clone(),
                 updated_at: now_iso(),
-                can_pause: false,
-                can_resume: false,
             };
             let _ = manager.finish_run(&app, final_state);
         });
@@ -191,42 +174,7 @@ impl AutomationManager {
             .expect("automation control mutex poisoned");
         control.state = state.clone();
         control.task = Some(handle);
-        control.pause_flag = Some(pause_flag);
         Ok(state)
-    }
-
-    pub fn pause(&self, app: &AppHandle) -> Result<AutomationRunState> {
-        let mut control = self
-            .control
-            .lock()
-            .expect("automation control mutex poisoned");
-        control.state.state = "paused".to_string();
-        control.state.updated_at = now_iso();
-        control.state.can_pause = false;
-        control.state.can_resume = true;
-        if let Some(flag) = &control.pause_flag {
-            flag.store(true, Ordering::SeqCst);
-        }
-        self.repo.upsert_runtime_session(&control.state)?;
-        let _ = app.emit(AUTOMATION_STATE_EVENT, control.state.clone());
-        Ok(control.state.clone())
-    }
-
-    pub fn resume(&self, app: &AppHandle) -> Result<AutomationRunState> {
-        let mut control = self
-            .control
-            .lock()
-            .expect("automation control mutex poisoned");
-        control.state.state = "running".to_string();
-        control.state.updated_at = now_iso();
-        control.state.can_pause = true;
-        control.state.can_resume = false;
-        if let Some(flag) = &control.pause_flag {
-            flag.store(false, Ordering::SeqCst);
-        }
-        self.repo.upsert_runtime_session(&control.state)?;
-        let _ = app.emit(AUTOMATION_STATE_EVENT, control.state.clone());
-        Ok(control.state.clone())
     }
 
     pub fn stop(&self, app: &AppHandle) -> Result<AutomationRunState> {
@@ -238,8 +186,6 @@ impl AutomationManager {
         control.state.state = "stopped".to_string();
         control.state.updated_at = now_iso();
         control.state.detail = Some("automation stopped by user".to_string());
-        control.state.can_pause = false;
-        control.state.can_resume = false;
         self.repo.upsert_runtime_session(&control.state)?;
         let _ = app.emit(AUTOMATION_STATE_EVENT, control.state.clone());
         Ok(control.state.clone())
@@ -250,10 +196,6 @@ impl AutomationManager {
             .control
             .lock()
             .expect("automation control mutex poisoned");
-        if let Some(flag) = &control.pause_flag {
-            flag.store(false, Ordering::SeqCst);
-        }
-        control.pause_flag = None;
         if let Some(handle) = control.task.take() {
             handle.abort();
         }
@@ -268,7 +210,6 @@ impl AutomationManager {
             .expect("automation control mutex poisoned");
         control.state = state;
         control.task = None;
-        control.pause_flag = None;
         Ok(())
     }
 

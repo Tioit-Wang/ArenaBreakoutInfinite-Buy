@@ -24,8 +24,6 @@ type RuntimeStore = {
 const idleRuntime: AutomationRunState = {
   state: 'idle',
   updatedAt: new Date().toISOString(),
-  canPause: false,
-  canResume: false,
 }
 
 const emptyOcrStatus: OcrStatus = {

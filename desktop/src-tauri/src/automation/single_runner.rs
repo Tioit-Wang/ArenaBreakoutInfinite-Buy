@@ -2,10 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -33,12 +30,13 @@ use crate::storage::repository::Repository;
 const STEP_1: &str = "步骤1-全局启动与准备";
 const STEP_3: &str = "步骤3-障碍清理与初始化检查";
 const STEP_4: &str = "步骤4-搜索与列表定位";
-const STEP_5: &str = "步骤5-预缓存（预热）";
 const STEP_6: &str = "步骤6-价格读取与阈值判定";
 const STEP_8: &str = "步骤8-会话内循环与退出条件";
 const STEP_CAPTURE: &str = "抓图存档";
 
 type SharedEmitter = Arc<Mutex<Box<dyn FnMut(AutomationEvent) + Send>>>;
+
+type ScreenPoint = (i32, i32);
 
 #[derive(Clone)]
 pub struct SingleRunRequest {
@@ -48,7 +46,6 @@ pub struct SingleRunRequest {
     pub templates: Vec<TemplateConfig>,
     pub paths: Arc<AppPaths>,
     pub repo: Arc<Repository>,
-    pub pause_flag: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone)]
@@ -57,17 +54,47 @@ struct TemplateEntry {
     confidence: f64,
 }
 
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
+struct ClickPoints {
+    center: ScreenPoint,
+    top_left: ScreenPoint,
+    top_right: ScreenPoint,
+    bottom_left: ScreenPoint,
+    bottom_right: ScreenPoint,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CachedClickTarget {
+    rect: MatchBox,
+    points: ClickPoints,
+}
+
+#[derive(Default)]
+struct DetailCache {
+    controls: HashMap<String, CachedClickTarget>,
+    qty_mid: Option<ScreenPoint>,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct PurchaseOutcome {
+    bought: i64,
+    round_completed: bool,
+    restock_triggered: bool,
+}
+
 struct SingleSession {
     request: SingleRunRequest,
     emitter: SharedEmitter,
     session_id: String,
     templates: HashMap<String, TemplateEntry>,
-    goods_box: Option<MatchBox>,
-    detail: HashMap<String, MatchBox>,
-    qty_mid: Option<MatchBox>,
-    avg_ocr_streak: u32,
+    goods_target: Option<CachedClickTarget>,
+    detail: DetailCache,
+    detail_open_hint: bool,
     ocr_miss_streak: u32,
     last_avg_ok: Instant,
+    completed_rounds: u32,
+    last_restock_trigger_at: Option<Instant>,
     capture_seq: u64,
     capture_dir_announced: bool,
 }
@@ -102,12 +129,13 @@ impl SingleSession {
             emitter,
             session_id,
             templates,
-            goods_box: None,
-            detail: HashMap::new(),
-            qty_mid: None,
-            avg_ocr_streak: 0,
+            goods_target: None,
+            detail: DetailCache::default(),
+            detail_open_hint: false,
             ocr_miss_streak: 0,
             last_avg_ok: Instant::now(),
+            completed_rounds: 0,
+            last_restock_trigger_at: None,
             capture_seq: 0,
             capture_dir_announced: false,
         }
@@ -120,16 +148,26 @@ impl SingleSession {
         self.ensure_ready().await?;
         self.clear_obstacles().await?;
         self.build_search_context().await?;
-        self.precache().await?;
 
         let mut task = self.request.task.clone();
         while !target_reached(&task) {
-            self.wait_paused().await;
-            let bought = self.purchase_once(&mut task).await?;
-            if bought > 0 {
-                task.purchased += bought;
+            let outcome = self.purchase_once(&mut task).await?;
+            if outcome.bought > 0 {
+                task.purchased += outcome.bought;
                 task.updated_at = now_iso();
                 self.request.repo.save_single_task(&task)?;
+            }
+            if outcome.round_completed {
+                self.completed_rounds = self.completed_rounds.saturating_add(1);
+                if outcome.restock_triggered {
+                    self.last_restock_trigger_at = Some(Instant::now());
+                }
+                if self.apply_round_cooldown_if_needed().await? {
+                    self.last_restock_trigger_at = None;
+                }
+            }
+            if self.apply_restock_window_cooldown_if_needed().await? {
+                self.last_restock_trigger_at = None;
             }
             if self.ocr_miss_streak
                 >= self
@@ -236,6 +274,22 @@ impl SingleSession {
         {
             self.dismiss_overlay().await?;
         }
+        if self.detail_open_hint {
+            if let Some(target) = self.detail.controls.get("btn_close").copied() {
+                click_point(target.points.center.0, target.points.center.1)?;
+                self.nap(Duration::from_secs_f64(
+                    self.request
+                        .config
+                        .multi_snipe_tuning
+                        .post_close_detail_sec
+                        .max(0.05),
+                ))
+                .await;
+                self.detail_open_hint = false;
+                self.log("debug", STEP_3, "使用缓存关闭遗留详情", None);
+                return Ok(());
+            }
+        }
         if let Some(box_rect) = self
             .locate_active("btn_close", Duration::from_millis(80), None)
             .await?
@@ -254,6 +308,7 @@ impl SingleSession {
                         .max(0.05),
                 ))
                 .await;
+                self.detail_open_hint = false;
             }
         }
         self.log("debug", STEP_3, "障碍清理完成", None);
@@ -262,7 +317,10 @@ impl SingleSession {
 
     async fn build_search_context(&mut self) -> Result<()> {
         match self.detect_scene().await? {
-            "home" => self.navigate("btn_market").await?,
+            "home" => {
+                self.clear_cached_positions();
+                self.navigate("btn_market").await?;
+            }
             "market" => {
                 self.navigate("btn_home").await?;
                 self.navigate("btn_market").await?;
@@ -287,36 +345,20 @@ impl SingleSession {
             .locate_goods(Duration::from_secs_f64(2.5), None)
             .await?
             .ok_or_else(|| anyhow!("goods template not found"))?;
-        self.goods_box = Some(goods_box);
+        self.goods_target = Some(cached_click_target(goods_box));
         self.log("info", STEP_4, "已建立搜索上下文并缓存商品卡片", Some(0.32));
         Ok(())
     }
 
-    async fn precache(&mut self) -> Result<()> {
-        for idx in 0..3 {
-            if self.open_detail().await? {
-                self.cache_detail_controls().await?;
-                let _ = self.read_avg_price().await?;
-                let _ = self.close_detail().await?;
-                self.log("info", STEP_5, "预缓存完成", Some(0.4));
-                return Ok(());
-            }
-            self.nap(Duration::from_secs(1 << idx)).await;
-        }
-        bail!("failed to precache detail")
-    }
-
-    async fn purchase_once(&mut self, task: &mut SingleTaskRecord) -> Result<i64> {
+    async fn purchase_once(&mut self, task: &mut SingleTaskRecord) -> Result<PurchaseOutcome> {
         if !self.open_detail().await? {
-            self.log("info", STEP_5, "打开详情失败，等待下一轮", Some(0.46));
-            return Ok(0);
+            self.log("info", STEP_6, "打开详情失败，等待下一轮", Some(0.46));
+            return Ok(PurchaseOutcome::default());
         }
-        self.cache_detail_controls().await?;
         let Some(unit_price) = self.read_avg_price().await? else {
-            self.avg_ocr_streak += 1;
             self.ocr_miss_streak += 1;
             self.clear_obstacles().await?;
-            return Ok(0);
+            return Ok(PurchaseOutcome::default());
         };
         self.last_avg_ok = Instant::now();
         self.ocr_miss_streak = 0;
@@ -324,11 +366,17 @@ impl SingleSession {
         let restock_limit = price_with_premium(task.restock_price, task.restock_premium_pct);
         if !price_sane(unit_price, task) {
             let _ = self.close_detail().await?;
-            return Ok(0);
+            return Ok(PurchaseOutcome::default());
         }
         self.record_price(unit_price)?;
 
+        let mut outcome = PurchaseOutcome {
+            round_completed: true,
+            ..PurchaseOutcome::default()
+        };
+
         let (qty, used_max, fast_mode) = if task.restock_price > 0 && unit_price <= restock_limit {
+            outcome.restock_triggered = true;
             let (qty, used_max) = self.prepare_restock_qty().await?;
             (
                 qty,
@@ -347,13 +395,12 @@ impl SingleSession {
             )
         } else {
             let _ = self.close_detail().await?;
-            return Ok(0);
+            return Ok(outcome);
         };
 
-        let buy_box = self
-            .detail
-            .get("btn_buy")
-            .copied()
+        let buy_target = self
+            .resolve_detail_control("btn_buy", Duration::from_millis(300))
+            .await?
             .ok_or_else(|| anyhow!("btn_buy missing"))?;
         let max_chain = self.request.config.multi_snipe_tuning.fast_chain_max.max(1) as usize;
         let interval = Duration::from_secs_f64(
@@ -366,47 +413,70 @@ impl SingleSession {
         );
 
         if !fast_mode || max_chain <= 1 {
-            click_box_global(buy_box)?;
+            click_point(buy_target.points.center.0, buy_target.points.center.1)?;
+            self.nap(Duration::from_secs_f64(
+                self.request
+                    .config
+                    .multi_snipe_tuning
+                    .buy_click_settle_sec
+                    .max(0.0),
+            ))
+            .await;
             if !self.wait_buy_ok().await? {
                 let _ = self.close_detail().await?;
-                return Ok(0);
+                return Ok(outcome);
             }
             self.record_purchase(task, unit_price, qty, used_max)?;
             self.dismiss_overlay().await?;
-            return Ok(qty);
+            outcome.bought = qty;
+            return Ok(outcome);
         }
 
-        click_box_global(buy_box)?;
+        click_point(buy_target.points.center.0, buy_target.points.center.1)?;
+        self.nap(Duration::from_secs_f64(
+            self.request
+                .config
+                .multi_snipe_tuning
+                .buy_click_settle_sec
+                .max(0.0),
+        ))
+        .await;
         let mut bought = 0;
         for idx in 0..max_chain {
             if !self.wait_buy_ok().await? {
                 let _ = self.close_detail().await?;
-                return Ok(bought);
+                outcome.bought = bought;
+                return Ok(outcome);
             }
             bought += qty;
             self.record_purchase(task, unit_price, qty, used_max)?;
             if task.target_total > 0 && task.purchased + bought >= task.target_total {
                 self.dismiss_overlay().await?;
                 let _ = self.close_detail().await?;
-                return Ok(bought);
+                outcome.bought = bought;
+                return Ok(outcome);
             }
             if idx + 1 >= max_chain {
                 self.dismiss_overlay().await?;
-                return Ok(bought);
+                outcome.bought = bought;
+                return Ok(outcome);
             }
-            let center = center_of_box(buy_box);
-            click_point(center.0, center.1)?;
+            click_point(buy_target.points.center.0, buy_target.points.center.1)?;
             self.nap(interval).await;
-            click_point(center.0, center.1)?;
+            click_point(buy_target.points.center.0, buy_target.points.center.1)?;
             self.nap(interval).await;
         }
-        Ok(bought)
+        outcome.bought = bought;
+        Ok(outcome)
     }
 
     async fn prepare_restock_qty(&mut self) -> Result<(i64, bool)> {
         if self.request.goods.big_category.trim() == "弹药" {
-            if let Some(max_box) = self.detail.get("btn_max").copied() {
-                click_box_global(max_box)?;
+            if let Some(max_target) = self
+                .resolve_detail_control("btn_max", Duration::from_millis(220))
+                .await?
+            {
+                click_point(max_target.points.center.0, max_target.points.center.1)?;
                 self.nap(Duration::from_millis(60)).await;
                 return Ok((self.read_qty().await?.unwrap_or(120).max(1), true));
             }
@@ -422,13 +492,10 @@ impl SingleSession {
     }
 
     async fn focus_type_qty(&mut self, qty: i64) -> Result<bool> {
-        if self.qty_mid.is_none() {
-            self.cache_qty_mid();
-        }
-        let Some(qty_box) = self.qty_mid else {
+        let Some(qty_center) = self.resolve_qty_mid().await? else {
             return Ok(false);
         };
-        click_box_global(qty_box)?;
+        click_point(qty_center.0, qty_center.1)?;
         self.nap(Duration::from_millis(30)).await;
         type_text(&qty.to_string())?;
         self.nap(Duration::from_millis(30)).await;
@@ -488,13 +555,12 @@ impl SingleSession {
     }
 
     async fn try_read_avg_price(&mut self) -> Result<Option<i64>> {
-        let buy_box = self
-            .detail
-            .get("btn_buy")
-            .copied()
+        let buy_target = self
+            .resolve_detail_control("btn_buy", Duration::from_millis(300))
+            .await?
             .ok_or_else(|| anyhow!("btn_buy missing"))?;
         let captured = self.capture_screen("avg_price_window")?;
-        let local_buy_box = global_box_to_local(&captured, buy_box)
+        let local_buy_box = global_box_to_local(&captured, buy_target.rect)
             .ok_or_else(|| anyhow!("btn_buy is outside screen"))?;
         let local_roi = avg_price_roi(
             local_buy_box,
@@ -552,13 +618,13 @@ impl SingleSession {
             }
             self.nap(step).await;
         }
-        Ok(!saw_fail && self.detail_visible().await?)
+        Ok(!saw_fail && self.detail_visible())
     }
 
     async fn dismiss_overlay(&mut self) -> Result<()> {
-        if let Some(buy_box) = self.detail.get("btn_buy").copied() {
+        if let Some(buy_target) = self.detail.controls.get("btn_buy").copied() {
             self.capture_screen("dismiss_overlay_buy")?;
-            click_box_global(buy_box)?;
+            click_point(buy_target.points.center.0, buy_target.points.center.1)?;
         } else if let Some(ok_box) = self
             .locate_active("buy_ok", Duration::from_millis(120), None)
             .await?
@@ -577,9 +643,12 @@ impl SingleSession {
     }
 
     async fn close_detail(&mut self) -> Result<bool> {
-        if let Some(close_box) = self.detail.get("btn_close").copied() {
+        if let Some(close_target) = self
+            .resolve_detail_control("btn_close", Duration::from_millis(220))
+            .await?
+        {
             self.capture_screen("close_detail")?;
-            click_box_global(close_box)?;
+            click_point(close_target.points.center.0, close_target.points.center.1)?;
             self.nap(Duration::from_secs_f64(
                 self.request
                     .config
@@ -588,22 +657,14 @@ impl SingleSession {
                     .max(0.05),
             ))
             .await;
-            self.detail.clear();
-            self.qty_mid = None;
+            self.detail_open_hint = false;
             return Ok(true);
         }
         Ok(false)
     }
 
-    async fn detail_visible(&mut self) -> Result<bool> {
-        Ok(self
-            .locate_active("btn_buy", Duration::from_millis(60), None)
-            .await?
-            .is_some()
-            && self
-                .locate_active("btn_close", Duration::from_millis(60), None)
-                .await?
-                .is_some())
+    fn detail_visible(&self) -> bool {
+        self.detail_open_hint
     }
 
     async fn handle_penalty(&mut self) -> Result<()> {
@@ -655,16 +716,19 @@ impl SingleSession {
                 .max(0.05),
         ))
         .await;
+        if slug == "btn_home" {
+            self.clear_cached_positions();
+        }
         Ok(())
     }
 
     async fn open_detail(&mut self) -> Result<bool> {
-        if self.detail_visible().await? {
+        if self.detail_visible() {
             return Ok(true);
         }
-        if let Some(goods_box) = self.goods_box {
+        if let Some(goods_target) = self.goods_target {
             self.capture_screen("open_detail_cached_goods")?;
-            click_box_global(goods_box)?;
+            click_point(goods_target.points.center.0, goods_target.points.center.1)?;
             self.nap(Duration::from_secs_f64(
                 self.request
                     .config
@@ -673,12 +737,18 @@ impl SingleSession {
                     .max(0.05),
             ))
             .await;
-            if self.detail_visible().await? {
+            self.detail_open_hint = true;
+            if self.detail.controls.contains_key("btn_buy")
+                || self
+                    .resolve_detail_control("btn_buy", Duration::from_millis(300))
+                    .await?
+                    .is_some()
+            {
                 return Ok(true);
             }
         }
         if let Some(goods_box) = self.locate_goods(Duration::from_secs(2), None).await? {
-            self.goods_box = Some(goods_box);
+            self.goods_target = Some(cached_click_target(goods_box));
             click_box_global(goods_box)?;
             self.nap(Duration::from_secs_f64(
                 self.request
@@ -688,64 +758,150 @@ impl SingleSession {
                     .max(0.05),
             ))
             .await;
-            if self.detail_visible().await? {
+            self.detail_open_hint = true;
+            if self
+                .resolve_detail_control("btn_buy", Duration::from_millis(300))
+                .await?
+                .is_some()
+            {
                 return Ok(true);
             }
         }
+        self.detail_open_hint = false;
         Ok(false)
-    }
-
-    async fn cache_detail_controls(&mut self) -> Result<()> {
-        let screen = self.capture_screen("cache_detail_controls")?;
-        for key in ["btn_buy", "btn_close", "qty_minus", "qty_plus", "btn_max"] {
-            if key == "btn_max" && self.request.goods.big_category.trim() != "弹药" {
-                continue;
-            }
-            if let Some(box_rect) = self.locate_template_in_capture(
-                &screen,
-                &self.template(key)?.path,
-                self.template(key)?.confidence,
-                None,
-            )? {
-                self.detail.insert(key.to_string(), box_rect);
-            }
-        }
-        self.cache_qty_mid();
-        Ok(())
-    }
-
-    fn cache_qty_mid(&mut self) {
-        if let (Some(minus), Some(plus)) = (
-            self.detail.get("qty_minus").copied(),
-            self.detail.get("qty_plus").copied(),
-        ) {
-            let mx = minus.0 + minus.2 / 2;
-            let my = minus.1 + minus.3 / 2;
-            let px = plus.0 + plus.2 / 2;
-            let py = plus.1 + plus.3 / 2;
-            self.qty_mid = Some((((mx + px) / 2) - 2, ((my + py) / 2) - 2, 4, 4));
-        } else if let Some(max_box) = self.detail.get("btn_max").copied() {
-            self.qty_mid = Some(infer_qty_from_max(max_box));
-        }
     }
 
     fn qty_roi(&self) -> Option<MatchBox> {
         if let (Some(minus), Some(plus)) = (
-            self.detail.get("qty_minus").copied(),
-            self.detail.get("qty_plus").copied(),
+            self.detail.controls.get("qty_minus").copied(),
+            self.detail.controls.get("qty_plus").copied(),
         ) {
-            let left = minus.0 + minus.2 + 2;
-            let right = plus.0 - 2;
+            let left = minus.rect.0 + minus.rect.2 + 2;
+            let right = plus.rect.0 - 2;
             if right > left {
-                let cy = (minus.1 + minus.3 / 2 + plus.1 + plus.3 / 2) / 2;
+                let cy = (minus.rect.1 + minus.rect.3 / 2 + plus.rect.1 + plus.rect.3 / 2) / 2;
                 return Some((left, cy - 18, right - left, 36));
             }
         }
-        self.qty_mid.map(|mid| {
-            let cx = mid.0 + mid.2 / 2;
-            let cy = mid.1 + mid.3 / 2;
-            (cx - 40, cy - 18, 80, 36)
-        })
+        self.detail.qty_mid.map(|mid| (mid.0 - 40, mid.1 - 18, 80, 36))
+    }
+
+    fn clear_cached_positions(&mut self) {
+        self.goods_target = None;
+        self.detail = DetailCache::default();
+        self.detail_open_hint = false;
+    }
+
+    async fn resolve_detail_control(
+        &mut self,
+        slug: &str,
+        timeout: Duration,
+    ) -> Result<Option<CachedClickTarget>> {
+        if let Some(target) = self.detail.controls.get(slug).copied() {
+            return Ok(Some(target));
+        }
+        if slug == "btn_max" && self.request.goods.big_category.trim() != "弹药" {
+            return Ok(None);
+        }
+        let Some(box_rect) = self.locate_active(slug, timeout, None).await? else {
+            return Ok(None);
+        };
+        let target = cached_click_target(box_rect);
+        self.detail.controls.insert(slug.to_string(), target);
+        Ok(Some(target))
+    }
+
+    async fn resolve_qty_mid(&mut self) -> Result<Option<ScreenPoint>> {
+        if let Some(qty_mid) = self.detail.qty_mid {
+            return Ok(Some(qty_mid));
+        }
+        let minus = self
+            .resolve_detail_control("qty_minus", Duration::from_millis(220))
+            .await?;
+        let plus = self
+            .resolve_detail_control("qty_plus", Duration::from_millis(220))
+            .await?;
+        if let (Some(minus), Some(plus)) = (minus, plus) {
+            let qty_mid = (
+                (minus.points.center.0 + plus.points.center.0) / 2,
+                (minus.points.center.1 + plus.points.center.1) / 2,
+            );
+            self.detail.qty_mid = Some(qty_mid);
+            return Ok(Some(qty_mid));
+        }
+        if let Some(max_target) = self
+            .resolve_detail_control("btn_max", Duration::from_millis(220))
+            .await?
+        {
+            let inferred = infer_qty_from_max(max_target.rect);
+            let qty_mid = center_of_box(inferred);
+            self.detail.qty_mid = Some(qty_mid);
+            return Ok(Some(qty_mid));
+        }
+        Ok(None)
+    }
+
+    async fn apply_round_cooldown_if_needed(&mut self) -> Result<bool> {
+        let every_rounds = self
+            .request
+            .config
+            .multi_snipe_tuning
+            .round_cooldown_every_n_rounds;
+        let cooldown_minutes = self
+            .request
+            .config
+            .multi_snipe_tuning
+            .round_cooldown_minutes;
+        if every_rounds == 0 || cooldown_minutes <= 0.0 {
+            return Ok(false);
+        }
+        if self.completed_rounds == 0 || self.completed_rounds % every_rounds != 0 {
+            return Ok(false);
+        }
+        self.run_cooldown(
+            format!("达到 {} 个成功详情轮，开始冷却 {} 分钟", every_rounds, cooldown_minutes),
+            Duration::from_secs_f64(cooldown_minutes * 60.0),
+        )
+        .await?;
+        Ok(true)
+    }
+
+    async fn apply_restock_window_cooldown_if_needed(&mut self) -> Result<bool> {
+        let window_minutes = self
+            .request
+            .config
+            .multi_snipe_tuning
+            .restock_retrigger_window_minutes;
+        let cooldown_minutes = self
+            .request
+            .config
+            .multi_snipe_tuning
+            .restock_miss_cooldown_minutes;
+        let Some(last_triggered_at) = self.last_restock_trigger_at else {
+            return Ok(false);
+        };
+        if window_minutes <= 0.0 || cooldown_minutes <= 0.0 {
+            return Ok(false);
+        }
+        if last_triggered_at.elapsed() < Duration::from_secs_f64(window_minutes * 60.0) {
+            return Ok(false);
+        }
+        self.run_cooldown(
+            format!(
+                "补货触发后 {} 分钟内未再次命中补货，开始冷却 {} 分钟",
+                window_minutes, cooldown_minutes
+            ),
+            Duration::from_secs_f64(cooldown_minutes * 60.0),
+        )
+        .await?;
+        Ok(true)
+    }
+
+    async fn run_cooldown(&mut self, reason: String, duration: Duration) -> Result<()> {
+        self.log("info", STEP_8, reason, Some(0.9));
+        self.nap(duration).await;
+        self.log("info", STEP_8, "冷却结束，继续执行单商品会话", Some(0.92));
+        Ok(())
     }
 
     async fn detect_scene(&mut self) -> Result<&'static str> {
@@ -1054,22 +1210,25 @@ impl SingleSession {
         }
     }
 
-    async fn wait_paused(&self) {
-        while self.request.pause_flag.load(Ordering::SeqCst) {
-            sleep(Duration::from_millis(200)).await;
-        }
-    }
-
     async fn nap(&self, duration: Duration) {
-        let deadline = Instant::now() + duration;
-        loop {
-            self.wait_paused().await;
-            let now = Instant::now();
-            if now >= deadline {
-                return;
-            }
-            sleep((deadline - now).min(Duration::from_millis(40))).await;
-        }
+        sleep(duration).await;
+    }
+}
+
+fn cached_click_target(rect: MatchBox) -> CachedClickTarget {
+    let left = rect.0;
+    let top = rect.1;
+    let right = rect.0 + rect.2 - 1;
+    let bottom = rect.1 + rect.3 - 1;
+    CachedClickTarget {
+        rect,
+        points: ClickPoints {
+            center: center_of_box(rect),
+            top_left: (left, top),
+            top_right: (right, top),
+            bottom_left: (left, bottom),
+            bottom_right: (right, bottom),
+        },
     }
 }
 
