@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from "react"
+import { useEffect, useMemo, useState, type ReactNode } from "react"
 import { Outlet, useLocation, useNavigate } from "react-router-dom"
 import { useQuery } from "@tanstack/react-query"
 import { register, unregister } from "@tauri-apps/plugin-global-shortcut"
@@ -14,8 +14,8 @@ import type {
   RuntimeLogEntry,
 } from "@/lib/types"
 import { Card, CardContent } from "@/components/ui/card"
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { WindowBar } from "@/components/window-bar"
+import { ShellToolbarProvider } from "@/components/shell-toolbar"
+import { WindowBar, type WindowBarNavItem } from "@/components/window-bar"
 
 const navItems = [
   { value: "single", to: "/single", label: "单商品抢购", icon: Sparkles },
@@ -23,7 +23,7 @@ const navItems = [
   { value: "goods", to: "/goods", label: "物品库", icon: Boxes },
   { value: "history", to: "/history", label: "历史统计", icon: History },
   { value: "settings", to: "/settings", label: "设置", icon: Settings },
-] as const
+] satisfies ReadonlyArray<WindowBarNavItem & { to: string }>
 
 const routeToTab = (pathname: string) =>
   navItems.find((item) => pathname.startsWith(item.to))?.value ?? "single"
@@ -38,6 +38,7 @@ export function ShellLayout() {
   const pushProgress = useRuntimeStore((state) => state.pushProgress)
   const bootstrap = useRuntimeStore((state) => state.bootstrap)
   const toggleShortcut = bootstrap?.config.hotkeys.toggle.trim()
+  const [toolbarActions, setToolbarActions] = useState<ReactNode>(null)
 
   const bootstrapQuery = useQuery({
     queryKey: ["bootstrap"],
@@ -115,55 +116,43 @@ export function ShellLayout() {
   }, [setRuntime, toggleShortcut])
 
   const activeTab = useMemo(() => routeToTab(location.pathname), [location.pathname])
+  const handleNavigate = (value: string) => {
+    navigate(navItems.find((item) => item.value === value)?.to ?? "/single")
+  }
+
   return (
-    <div className="min-h-screen">
-      <WindowBar title="ArenaBuyer Desktop" />
+    <ShellToolbarProvider setActions={setToolbarActions}>
+      <div className="flex h-screen flex-col overflow-hidden">
+        <WindowBar
+          title="ArenaBuyer Desktop"
+          navItems={navItems}
+          activeValue={activeTab}
+          onNavigate={handleNavigate}
+          actions={toolbarActions}
+        />
 
-      <div className="mx-auto flex min-h-screen w-full max-w-[1440px] flex-col px-4 pb-24 pt-[4.25rem] md:px-6 xl:px-8">
-        <div className="flex-1">
-          {bootstrapQuery.isLoading ? (
-            <Card className="border-white/70 bg-white/80 shadow-xl shadow-emerald-950/5 backdrop-blur">
-              <CardContent className="p-10 text-center text-sm text-slate-600">
-                正在加载桌面工作台...
-              </CardContent>
-            </Card>
-          ) : bootstrapQuery.error ? (
-            <Card className="border-red-200 bg-red-50 shadow-lg">
-              <CardContent className="p-6 text-sm text-red-700">
-                {String(bootstrapQuery.error)}
-              </CardContent>
-            </Card>
-          ) : (
-            <Outlet />
-          )}
-        </div>
+        <main className="flex-1 overflow-y-auto">
+          <div className="mx-auto flex min-h-full w-full max-w-[1440px] flex-col px-4 py-6 md:px-6 md:py-8 xl:px-8">
+            <div className="flex-1">
+              {bootstrapQuery.isLoading ? (
+                <Card className="border-white/70 bg-white/80 shadow-xl shadow-emerald-950/5 backdrop-blur">
+                  <CardContent className="p-10 text-center text-sm text-slate-600">
+                    正在加载桌面工作台...
+                  </CardContent>
+                </Card>
+              ) : bootstrapQuery.error ? (
+                <Card className="border-red-200 bg-red-50 shadow-lg">
+                  <CardContent className="p-6 text-sm text-red-700">
+                    {String(bootstrapQuery.error)}
+                  </CardContent>
+                </Card>
+              ) : (
+                <Outlet />
+              )}
+            </div>
+          </div>
+        </main>
       </div>
-
-      <div className="fixed inset-x-0 bottom-3 z-30 flex justify-center px-4">
-        <Tabs
-          value={activeTab}
-          onValueChange={(value) =>
-            navigate(navItems.find((item) => item.value === value)?.to ?? "/single")
-          }
-          className="w-full max-w-5xl"
-        >
-          <TabsList className="grid h-auto w-full grid-cols-2 gap-1.5 rounded-[24px] border border-white/55 bg-white/82 p-1.5 shadow-md shadow-slate-900/5 backdrop-blur-md md:grid-cols-5">
-            {navItems.map((item) => {
-              const Icon = item.icon
-              return (
-                <TabsTrigger
-                  key={item.value}
-                  value={item.value}
-                  className="flex h-10 items-center gap-2 rounded-full px-3 text-[13px] font-medium text-slate-600 data-[state=active]:bg-white/95 data-[state=active]:text-emerald-900 data-[state=active]:shadow-sm"
-                >
-                  <Icon className="size-[15px]" />
-                  <span>{item.label}</span>
-                </TabsTrigger>
-              )
-            })}
-          </TabsList>
-        </Tabs>
-      </div>
-    </div>
+    </ShellToolbarProvider>
   )
 }

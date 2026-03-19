@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useQueryClient } from "@tanstack/react-query"
 import {
   ChevronDown,
@@ -8,13 +8,24 @@ import {
   Play,
   Plus,
   Save,
+  SlidersHorizontal,
   Square,
   Trash2,
 } from "lucide-react"
 
 import { api } from "@/lib/api"
 import { useRuntimeStore } from "@/app/store"
-import type { GoodsRecord, MultiTaskRecord } from "@/lib/types"
+import type { AppBootstrap, GoodsRecord, MultiTaskRecord } from "@/lib/types"
+import { useRegisterShellToolbar } from "@/components/shell-toolbar"
+import {
+  InlineNote,
+  PageHero,
+  PageSurface,
+  PageSurfaceContent,
+  SectionHeading,
+  minimalFieldClassName,
+  minimalSelectTriggerClassName,
+} from "@/components/minimal-page"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -43,14 +54,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
-import {
-  PageHero,
-  PageSurface,
-  PageSurfaceContent,
-  SectionHeading,
-  minimalFieldClassName,
-  minimalSelectTriggerClassName,
-} from "@/components/minimal-page"
+import { cn } from "@/lib/utils"
 
 const emptyMultiTask = (): MultiTaskRecord => ({
   id: crypto.randomUUID(),
@@ -68,6 +72,79 @@ const emptyMultiTask = (): MultiTaskRecord => ({
   createdAt: new Date().toISOString(),
   updatedAt: new Date().toISOString(),
 })
+
+type NoticeTone = "slate" | "emerald" | "rose"
+
+type MultiTimingDraft = {
+  detailOpenSettleMs: string
+  postCloseDetailMs: string
+  postSuccessClickMs: string
+  buyClickSettleMs: string
+  buyResultTimeoutMs: string
+  buyResultPollStepMs: string
+}
+
+function MultiToolbarActions({
+  isRunning,
+  enabledCount,
+  onStartOrStop,
+  onOpenTiming,
+  onOpenLogs,
+}: {
+  isRunning: boolean
+  enabledCount: number
+  onStartOrStop: () => void
+  onOpenTiming: () => void
+  onOpenLogs: () => void
+}) {
+  const toolbarActions = useMemo(
+    () => (
+      <>
+        <Button
+          size="sm"
+          variant={isRunning ? "destructive" : "default"}
+          onClick={onStartOrStop}
+          disabled={!isRunning && enabledCount === 0}
+          className="min-w-24 rounded-lg"
+        >
+          {isRunning ? (
+            <>
+              <Square className="size-4" />
+              终止
+            </>
+          ) : (
+            <>
+              <Play className="size-4" />
+              启动
+            </>
+          )}
+        </Button>
+        <Button
+          size="sm"
+          variant="secondary"
+          onClick={onOpenTiming}
+          className="rounded-lg border-white/0 bg-transparent hover:bg-white"
+        >
+          <SlidersHorizontal className="size-4" />
+          运行参数
+        </Button>
+        <Button
+          size="sm"
+          variant="secondary"
+          onClick={onOpenLogs}
+          className="rounded-lg border-white/0 bg-transparent hover:bg-white"
+        >
+          <Eye className="size-4" />
+          运行日志
+        </Button>
+      </>
+    ),
+    [enabledCount, isRunning, onOpenLogs, onOpenTiming, onStartOrStop],
+  )
+
+  useRegisterShellToolbar(toolbarActions)
+  return null
+}
 
 function moveIdOrder(ids: string[], id: string, direction: -1 | 1) {
   const index = ids.indexOf(id)
@@ -90,14 +167,35 @@ export function MultiTasksPage() {
   const progress = useRuntimeStore((state) => state.progress)
   const queryClient = useQueryClient()
   const [modal, setModal] = useState<ModalState>({ open: false })
+  const [timingDialogOpen, setTimingDialogOpen] = useState(false)
+  const [timingDraft, setTimingDraft] = useState<MultiTimingDraft | null>(null)
+  const [timingMessage, setTimingMessage] = useState("")
+  const [timingMessageTone, setTimingMessageTone] = useState<NoticeTone>("slate")
+  const [captureArchiveSaving, setCaptureArchiveSaving] = useState(false)
+  const [captureArchiveOverride, setCaptureArchiveOverride] = useState<boolean | null>(null)
+  const [captureArchiveMessage, setCaptureArchiveMessage] = useState("")
+  const [captureArchiveMessageTone, setCaptureArchiveMessageTone] =
+    useState<NoticeTone>("slate")
   const [logDrawerOpen, setLogDrawerOpen] = useState(false)
   const [logsClearedAt, setLogsClearedAt] = useState<number | null>(null)
+  const lastSavedTimingRef = useRef("")
 
   const goodsMap = useMemo(() => {
     const map = new Map<string, GoodsRecord>()
     bootstrap?.goods.forEach((item) => map.set(item.id, item))
     return map
   }, [bootstrap?.goods])
+
+  useEffect(() => {
+    if (!bootstrap) return
+    const nextTimingDraft = multiTimingDraftFromConfig(bootstrap)
+    setTimingDraft(nextTimingDraft)
+    lastSavedTimingRef.current = normalizeMultiTimingDraft(nextTimingDraft)
+  }, [bootstrap])
+
+  useEffect(() => {
+    setCaptureArchiveOverride(null)
+  }, [bootstrap?.config.debug.saveMultiCaptureImages])
 
   const multiLogs = useMemo(
     () =>
@@ -123,9 +221,120 @@ export function MultiTasksPage() {
     return filtered.slice(0, 80)
   }, [logsClearedAt, multiLogs])
 
+  const isRunning = runtime.state === "running"
+  const runtimeTone =
+    runtime.state === "running"
+      ? "default"
+      : runtime.state === "failed"
+        ? "destructive"
+        : "outline"
+
+  const startOrStop = async () => {
+    if (!bootstrap) return
+    if (isRunning) {
+      await api.automationStop()
+      await queryClient.invalidateQueries({ queryKey: ["bootstrap"] })
+      return
+    }
+    await api.automationStartMulti()
+    await queryClient.invalidateQueries({ queryKey: ["bootstrap"] })
+  }
+
+  const saveTimingDraft = useCallback(async (nextDraft: MultiTimingDraft) => {
+    if (!bootstrap) return null
+    const parsedDraft = parseMultiTimingDraft(nextDraft)
+    const saved = await api.configSave({
+      ...bootstrap.config,
+      multiSnipeTuning: {
+        ...bootstrap.config.multiSnipeTuning,
+        detailOpenSettleSec: roundMs(parsedDraft.detailOpenSettleMs) / 1000,
+        postCloseDetailSec: roundMs(parsedDraft.postCloseDetailMs) / 1000,
+        postSuccessClickSec: roundMs(parsedDraft.postSuccessClickMs) / 1000,
+        buyClickSettleSec: roundMs(parsedDraft.buyClickSettleMs) / 1000,
+        buyResultTimeoutSec: roundMs(parsedDraft.buyResultTimeoutMs) / 1000,
+        buyResultPollStepSec: roundMs(parsedDraft.buyResultPollStepMs) / 1000,
+      },
+    })
+    const savedTimingDraft = multiTimingDraftFromConfig({ config: saved })
+    const requestedTimingDraft = normalizeMultiTimingDraft(nextDraft)
+    queryClient.setQueryData<AppBootstrap>(["bootstrap"], (current) =>
+      current
+        ? {
+            ...current,
+            config: saved,
+          }
+        : current,
+    )
+    lastSavedTimingRef.current = normalizeMultiTimingDraft(savedTimingDraft)
+    setTimingDraft((current) =>
+      current && normalizeMultiTimingDraft(current) === requestedTimingDraft ? savedTimingDraft : current,
+    )
+    setTimingMessageTone("emerald")
+    setTimingMessage("运行参数已自动保存，新会话会按最新参数启动。")
+    return saved
+  }, [bootstrap, queryClient])
+
+  useEffect(() => {
+    if (!timingDraft) return
+    const normalized = normalizeMultiTimingDraft(timingDraft)
+    if (normalized === lastSavedTimingRef.current) return
+    const timer = window.setTimeout(() => {
+      void saveTimingDraft(timingDraft).catch((error) => {
+        setTimingMessageTone("rose")
+        setTimingMessage(`运行参数未保存：${formatErrorMessage(error)}`)
+      })
+    }, 450)
+    return () => window.clearTimeout(timer)
+  }, [saveTimingDraft, timingDraft])
+
+  const toggleCaptureArchive = async () => {
+    if (!bootstrap) return
+    const captureArchiveEnabled =
+      captureArchiveOverride ?? bootstrap.config.debug.saveMultiCaptureImages
+    const captureArchiveDir = `${bootstrap.paths.debugDir}\\multi-captures\\<sessionId>`
+    if (captureArchiveSaving || isRunning) {
+      return
+    }
+    const nextEnabled = !captureArchiveEnabled
+    setCaptureArchiveOverride(nextEnabled)
+    setCaptureArchiveSaving(true)
+    try {
+      const saved = await api.configSave({
+        ...bootstrap.config,
+        debug: {
+          ...bootstrap.config.debug,
+          saveMultiCaptureImages: nextEnabled,
+        },
+      })
+      queryClient.setQueryData<AppBootstrap>(["bootstrap"], (current) =>
+        current
+          ? {
+              ...current,
+              config: saved,
+            }
+          : current,
+      )
+      setCaptureArchiveMessageTone("emerald")
+      setCaptureArchiveMessage(
+        nextEnabled
+          ? `已开启商品抓图存档。新会话会保存到 ${captureArchiveDir}`
+          : "已关闭商品抓图存档。后续多商品会话不再自动保存抓图。",
+      )
+    } catch (error) {
+      setCaptureArchiveOverride(null)
+      setCaptureArchiveMessageTone("rose")
+      setCaptureArchiveMessage(`商品抓图存档设置保存失败：${formatErrorMessage(error)}`)
+    } finally {
+      setCaptureArchiveSaving(false)
+    }
+  }
+
   if (!bootstrap) return null
 
   const enabledCount = bootstrap.multiTasks.filter((item) => item.enabled).length
+  const captureArchiveEnabled =
+    captureArchiveOverride ?? bootstrap.config.debug.saveMultiCaptureImages
+  const captureArchiveDir = `${bootstrap.paths.debugDir}\\multi-captures\\<sessionId>`
 
   const openCreate = () =>
     setModal({
@@ -186,26 +395,16 @@ export function MultiTasksPage() {
     await queryClient.invalidateQueries({ queryKey: ["bootstrap"] })
   }
 
-  const isRunning = runtime.state === "running"
-  const runtimeTone =
-    runtime.state === "running"
-      ? "default"
-      : runtime.state === "failed"
-        ? "destructive"
-        : "outline"
-
-  const startOrStop = async () => {
-    if (isRunning) {
-      await api.automationStop()
-      await queryClient.invalidateQueries({ queryKey: ["bootstrap"] })
-      return
-    }
-    await api.automationStartMulti()
-    await queryClient.invalidateQueries({ queryKey: ["bootstrap"] })
-  }
-
   return (
     <div className="grid gap-10">
+      <MultiToolbarActions
+        isRunning={isRunning}
+        enabledCount={enabledCount}
+        onStartOrStop={() => void startOrStop()}
+        onOpenTiming={() => setTimingDialogOpen(true)}
+        onOpenLogs={() => setLogDrawerOpen(true)}
+      />
+
       <PageHero
         eyebrow="Favorites"
         badges={
@@ -215,33 +414,6 @@ export function MultiTasksPage() {
           </>
         }
         title="收藏商品抢购"
-        actions={
-          <>
-            <Button
-              size="lg"
-              variant={isRunning ? "destructive" : "default"}
-              onClick={() => void startOrStop()}
-              disabled={!isRunning && enabledCount === 0}
-              className="h-12 min-w-32 rounded-full px-8"
-            >
-              {isRunning ? (
-                <>
-                  <Square className="mr-2 size-4" />
-                  终止
-                </>
-              ) : (
-                <>
-                  <Play className="mr-2 size-4" />
-                  开始
-                </>
-              )}
-            </Button>
-            <Button size="lg" variant="secondary" onClick={() => setLogDrawerOpen(true)}>
-              <Eye className="mr-2 size-4" />
-              查看日志
-            </Button>
-          </>
-        }
       />
 
       <PageSurface>
@@ -484,6 +656,197 @@ export function MultiTasksPage() {
         </DialogContent>
       </Dialog>
 
+      <Dialog open={timingDialogOpen} onOpenChange={setTimingDialogOpen}>
+        <DialogContent className="max-h-[92vh] max-w-3xl gap-0 rounded-[32px] p-0 !overflow-hidden">
+          <DialogHeader className="shrink-0 border-b border-black/5 bg-white/88 px-6 py-5 pr-20 backdrop-blur-xl">
+            <DialogTitle className="font-display text-3xl tracking-tight">
+              收藏商品运行参数
+            </DialogTitle>
+            <DialogDescription className="text-sm leading-6">
+              这里调整收藏商品抢购的抓图存档、详情稳定与购买结果识别时序。输入后会自动保存。
+            </DialogDescription>
+          </DialogHeader>
+
+          <ScrollArea className="max-h-[70vh]">
+            <div className="grid gap-6 px-6 py-6 md:px-8 md:py-8">
+              <div className="grid gap-4 rounded-[28px] border border-black/5 bg-white/60 px-5 py-5">
+                <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+                  <div className="space-y-2">
+                    <p className="text-xs font-semibold uppercase tracking-[0.28em] text-slate-400">
+                      Capture Archive
+                    </p>
+                    <h3 className="font-display text-2xl leading-tight tracking-tight text-slate-950">
+                      商品抓图存档
+                    </h3>
+                    <p className="max-w-2xl text-sm leading-6 text-slate-600">
+                      保存多商品流程里的商品卡片抓图和关键 OCR ROI，目录按每次会话拆分。
+                    </p>
+                  </div>
+
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={captureArchiveEnabled}
+                    aria-label="切换商品抓图存档"
+                    onClick={() => void toggleCaptureArchive()}
+                    disabled={captureArchiveSaving || isRunning}
+                    className={cn(
+                      "inline-flex min-h-12 items-center gap-3 self-start rounded-full border px-4 py-2 text-sm font-medium transition md:self-center",
+                      captureArchiveEnabled
+                        ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                        : "border-slate-200 bg-white text-slate-600",
+                      (captureArchiveSaving || isRunning) && "cursor-not-allowed opacity-60",
+                    )}
+                  >
+                    <span
+                      className={cn(
+                        "relative inline-flex h-7 w-12 shrink-0 rounded-full transition",
+                        captureArchiveEnabled ? "bg-emerald-500" : "bg-slate-300",
+                      )}
+                    >
+                      <span
+                        className={cn(
+                          "absolute top-1 size-5 rounded-full bg-white shadow-sm transition",
+                          captureArchiveEnabled ? "left-6" : "left-1",
+                        )}
+                      />
+                    </span>
+                    <span>
+                      {captureArchiveSaving
+                        ? "保存中..."
+                        : captureArchiveEnabled
+                          ? "已开启"
+                          : "已关闭"}
+                    </span>
+                  </button>
+                </div>
+
+                <InlineNote tone={captureArchiveMessage ? captureArchiveMessageTone : "slate"}>
+                  {captureArchiveMessage || `抓图将保存到 ${captureArchiveDir}。运行中不可切换，启动前设置生效。`}
+                </InlineNote>
+              </div>
+
+              <div className="grid gap-8 md:grid-cols-2">
+                <FormNumberDraft
+                  label="购买点击后固定等待"
+                  hint="点击购买按钮后，先固定等待，再开始轮询购买成功/失败模板。填 0 关闭。"
+                  value={timingDraft?.buyClickSettleMs ?? "50"}
+                  min={0}
+                  step="1"
+                  suffix="ms"
+                  onChange={(value) =>
+                    setTimingDraft((current) =>
+                      current
+                        ? {
+                            ...current,
+                            buyClickSettleMs: value,
+                          }
+                        : current,
+                    )
+                  }
+                />
+                <FormNumberDraft
+                  label="详情打开稳定等待"
+                  hint="点击商品卡片后，到开始判定详情已打开之间的等待。当前运行时下限为 50ms。"
+                  value={timingDraft?.detailOpenSettleMs ?? "50"}
+                  min={50}
+                  step="1"
+                  suffix="ms"
+                  onChange={(value) =>
+                    setTimingDraft((current) =>
+                      current
+                        ? {
+                            ...current,
+                            detailOpenSettleMs: value,
+                          }
+                        : current,
+                    )
+                  }
+                />
+                <FormNumberDraft
+                  label="关闭详情后等待"
+                  hint="点击详情关闭按钮后的稳定等待。当前运行时下限为 50ms。"
+                  value={timingDraft?.postCloseDetailMs ?? "50"}
+                  min={50}
+                  step="1"
+                  suffix="ms"
+                  onChange={(value) =>
+                    setTimingDraft((current) =>
+                      current
+                        ? {
+                            ...current,
+                            postCloseDetailMs: value,
+                          }
+                        : current,
+                    )
+                  }
+                />
+                <FormNumberDraft
+                  label="成功遮罩点击后等待"
+                  hint="购买成功后关闭遮罩，再进入下一步前的稳定等待。当前运行时下限为 50ms。"
+                  value={timingDraft?.postSuccessClickMs ?? "50"}
+                  min={50}
+                  step="1"
+                  suffix="ms"
+                  onChange={(value) =>
+                    setTimingDraft((current) =>
+                      current
+                        ? {
+                            ...current,
+                            postSuccessClickMs: value,
+                          }
+                        : current,
+                    )
+                  }
+                />
+                <FormNumberDraft
+                  label="购买结果识别窗口"
+                  hint="点击购买后，在窗口内轮询 buy_ok / buy_fail。当前运行时下限为 250ms。"
+                  value={timingDraft?.buyResultTimeoutMs ?? "350"}
+                  min={250}
+                  step="1"
+                  suffix="ms"
+                  onChange={(value) =>
+                    setTimingDraft((current) =>
+                      current
+                        ? {
+                            ...current,
+                            buyResultTimeoutMs: value,
+                          }
+                        : current,
+                    )
+                  }
+                />
+                <FormNumberDraft
+                  label="购买结果轮询步进"
+                  hint="识别窗口内每次重新检测 buy_ok / buy_fail 的间隔。当前运行时下限为 10ms。"
+                  value={timingDraft?.buyResultPollStepMs ?? "10"}
+                  min={10}
+                  step="1"
+                  suffix="ms"
+                  onChange={(value) =>
+                    setTimingDraft((current) =>
+                      current
+                        ? {
+                            ...current,
+                            buyResultPollStepMs: value,
+                          }
+                        : current,
+                    )
+                  }
+                />
+              </div>
+
+              {timingMessage || isRunning ? (
+                <InlineNote tone={timingMessage ? timingMessageTone : "slate"}>
+                  {timingMessage || "参数会实时保存，但当前收藏商品会话已经持有启动时的配置；修改会在下一次点击启动后生效。"}
+                </InlineNote>
+              ) : null}
+            </div>
+          </ScrollArea>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={logDrawerOpen} onOpenChange={setLogDrawerOpen}>
         <DialogContent className="left-1/2 top-auto bottom-0 max-w-6xl translate-x-[-50%] translate-y-0 gap-0 rounded-b-none rounded-t-[32px] border-b-0 p-0">
           <DialogHeader className="border-b border-black/5 px-6 py-5 pr-20">
@@ -562,4 +925,98 @@ function FormNumber({
       />
     </div>
   )
+}
+
+function FormNumberDraft({
+  label,
+  hint,
+  value,
+  min,
+  step,
+  suffix,
+  onChange,
+}: {
+  label: string
+  hint?: string
+  value: string
+  min?: number
+  step?: string
+  suffix?: string
+  onChange: (value: string) => void
+}) {
+  return (
+    <div className="space-y-3">
+      <Label>{label}</Label>
+      <Input
+        className={minimalFieldClassName}
+        type="number"
+        min={min}
+        step={step}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+      />
+      {hint ? <p className="text-xs leading-5 text-slate-400">{hint}</p> : null}
+      {suffix ? <p className="text-xs leading-5 text-slate-400">当前单位：{suffix}</p> : null}
+    </div>
+  )
+}
+
+function multiTimingDraftFromConfig(source: {
+  config: AppBootstrap["config"] | MultiTaskPageConfig
+}) {
+  const tuning = source.config.multiSnipeTuning
+  return {
+    detailOpenSettleMs: String(Math.round(tuning.detailOpenSettleSec * 1000)),
+    postCloseDetailMs: String(Math.round(tuning.postCloseDetailSec * 1000)),
+    postSuccessClickMs: String(Math.round(tuning.postSuccessClickSec * 1000)),
+    buyClickSettleMs: String(Math.round(tuning.buyClickSettleSec * 1000)),
+    buyResultTimeoutMs: String(Math.round(tuning.buyResultTimeoutSec * 1000)),
+    buyResultPollStepMs: String(Math.round(tuning.buyResultPollStepSec * 1000)),
+  }
+}
+
+type MultiTaskPageConfig = {
+  multiSnipeTuning: {
+    detailOpenSettleSec: number
+    postCloseDetailSec: number
+    postSuccessClickSec: number
+    buyClickSettleSec: number
+    buyResultTimeoutSec: number
+    buyResultPollStepSec: number
+  }
+}
+
+function normalizeMultiTimingDraft(draft: MultiTimingDraft) {
+  return JSON.stringify(draft)
+}
+
+function parseMultiTimingDraft(draft: MultiTimingDraft) {
+  return {
+    detailOpenSettleMs: parseRequiredNumber(draft.detailOpenSettleMs, "详情打开稳定等待"),
+    postCloseDetailMs: parseRequiredNumber(draft.postCloseDetailMs, "关闭详情后等待"),
+    postSuccessClickMs: parseRequiredNumber(draft.postSuccessClickMs, "成功遮罩点击后等待"),
+    buyClickSettleMs: parseRequiredNumber(draft.buyClickSettleMs, "购买点击后固定等待"),
+    buyResultTimeoutMs: parseRequiredNumber(draft.buyResultTimeoutMs, "购买结果识别窗口"),
+    buyResultPollStepMs: parseRequiredNumber(draft.buyResultPollStepMs, "购买结果轮询步进"),
+  }
+}
+
+function parseRequiredNumber(raw: string, label: string) {
+  const trimmed = raw.trim()
+  if (!trimmed) {
+    throw new Error(`${label}不能为空`)
+  }
+  const value = Number(trimmed)
+  if (!Number.isFinite(value)) {
+    throw new Error(`${label}必须是数字`)
+  }
+  return value
+}
+
+function formatErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error)
+}
+
+function roundMs(value: number) {
+  return Math.round(value)
 }

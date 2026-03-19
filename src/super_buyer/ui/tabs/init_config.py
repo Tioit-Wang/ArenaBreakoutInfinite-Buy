@@ -739,32 +739,6 @@ class InitConfigTab(BaseTab):
             except Exception:
                 pass
 
-        # 调试（OCR/ROI）：识别轮最终失败时保存 ROI 图
-        dbg_cfg = self.cfg.get("debug", {}) if isinstance(self.cfg.get("debug"), dict) else {}
-        try:
-            self.var_save_roi_on_fail = tk.BooleanVar(value=bool(dbg_cfg.get("save_roi_on_fail", False)))
-        except Exception:
-            self.var_save_roi_on_fail = tk.BooleanVar(value=False)
-        box_dbg_roi = ttk.LabelFrame(outer, text="调试（OCR/ROI）")
-        box_dbg_roi.pack(fill=tk.X, padx=8, pady=(0, 8))
-        try:
-            chk_roi = ttk.Checkbutton(
-                box_dbg_roi,
-                text="识别轮最终失败时保存 ROI 图（output/roi_debug）",
-                variable=self.var_save_roi_on_fail,
-            )
-        except Exception:
-            chk_roi = tk.Checkbutton(
-                box_dbg_roi,
-                text="识别轮最终失败时保存 ROI 图（output/roi_debug）",
-                variable=self.var_save_roi_on_fail,
-            )
-        chk_roi.pack(anchor="w", padx=8, pady=6)
-        try:
-            self.var_save_roi_on_fail.trace_add("write", lambda *_: self._schedule_autosave())
-        except Exception:
-            pass
-
         # 调试模式（已迁移至“多商品抢购模式”页面）
         def _refresh_scroll_state() -> None:
             try:
@@ -953,17 +927,6 @@ class InitConfigTab(BaseTab):
                 sc = 2.5
             self.cfg["avg_price_area"]["scale"] = float(sc)
             # 已弃用字段（ocr_engine）不再保存
-        except Exception:
-            pass
-
-        # Flush debug config（本页仅负责 ROI 失败截图开关；
-        # 多商品页自己的调试选项由 MultiSnipeTab 刷入 cfg）
-        try:
-            self.cfg.setdefault("debug", {})
-            try:
-                self.cfg["debug"]["save_roi_on_fail"] = bool(self.var_save_roi_on_fail.get())
-            except Exception:
-                self.cfg["debug"]["save_roi_on_fail"] = False
         except Exception:
             pass
 

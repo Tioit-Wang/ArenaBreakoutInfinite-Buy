@@ -37,10 +37,21 @@ class BaseTab(ttk.Frame):
     def _build_modal_shell(self, top: tk.Toplevel, *, title: str, description: str | None = None) -> dict[str, Any]:
         """创建统一的弹窗骨架：标题区、工具区、内容区、底部区。"""
         root = ttk.Frame(top)
-        root.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        try:
+            top.rowconfigure(0, weight=1)
+            top.columnconfigure(0, weight=1)
+        except Exception:
+            pass
+        root.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+        try:
+            root.columnconfigure(0, weight=1)
+            # 中间内容区独占可伸缩空间，确保头部/底部固定。
+            root.rowconfigure(2, weight=1)
+        except Exception:
+            pass
 
         header = ttk.Frame(root)
-        header.pack(fill=tk.X, pady=(0, 6))
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 6))
 
         header_text = ttk.Frame(header)
         header_text.pack(side=tk.LEFT, fill=tk.X, expand=True)
@@ -57,13 +68,18 @@ class BaseTab(ttk.Frame):
         summary.pack(side=tk.RIGHT, padx=(12, 0))
 
         toolbar = ttk.Frame(root)
-        toolbar.pack(fill=tk.X)
+        toolbar.grid(row=1, column=0, sticky="ew")
 
         content = ttk.Frame(root)
-        content.pack(fill=tk.BOTH, expand=True)
+        content.grid(row=2, column=0, sticky="nsew")
+        try:
+            content.columnconfigure(0, weight=1)
+            content.rowconfigure(0, weight=1)
+        except Exception:
+            pass
 
         footer = ttk.Frame(root)
-        footer.pack(fill=tk.X, pady=(6, 0))
+        footer.grid(row=3, column=0, sticky="ew", pady=(6, 0))
 
         return {
             "root": root,

@@ -85,6 +85,8 @@ pub struct DebugConfig {
     pub save_overlay_images: bool,
     #[serde(default)]
     pub save_single_capture_images: bool,
+    #[serde(default)]
+    pub save_multi_capture_images: bool,
 }
 
 impl Default for DebugConfig {
@@ -96,6 +98,7 @@ impl Default for DebugConfig {
             step_sleep: 0.0,
             save_overlay_images: false,
             save_single_capture_images: false,
+            save_multi_capture_images: false,
         }
     }
 }

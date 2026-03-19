@@ -13,6 +13,7 @@ import { useRuntimeStore } from "@/app/store"
 import { api } from "@/lib/api"
 import type { AppBootstrap, GoodsRecord, SingleTaskRecord } from "@/lib/types"
 import { cn } from "@/lib/utils"
+import { useRegisterShellToolbar } from "@/components/shell-toolbar"
 import { InlineNote } from "@/components/minimal-page"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -68,6 +69,68 @@ const emptySingleTask = (): SingleTaskRecord => ({
   createdAt: new Date().toISOString(),
   updatedAt: new Date().toISOString(),
 })
+
+function SingleToolbarActions({
+  isRunning,
+  hasItem,
+  onStartOrStop,
+  onOpenTiming,
+  onOpenLogs,
+}: {
+  isRunning: boolean
+  hasItem: boolean
+  onStartOrStop: () => void
+  onOpenTiming: () => void
+  onOpenLogs: () => void
+}) {
+  const toolbarActions = useMemo(
+    () => (
+      <>
+        <Button
+          size="sm"
+          variant={isRunning ? "destructive" : "default"}
+          onClick={onStartOrStop}
+          disabled={!hasItem}
+          className="min-w-24 rounded-lg"
+        >
+          {isRunning ? (
+            <>
+              <Square className="size-4" />
+              终止
+            </>
+          ) : (
+            <>
+              <Play className="size-4" />
+              启动
+            </>
+          )}
+        </Button>
+        <Button
+          size="sm"
+          variant="secondary"
+          onClick={onOpenTiming}
+          className="rounded-lg border-white/0 bg-transparent hover:bg-white"
+        >
+          <SlidersHorizontal className="size-4" />
+          运行参数
+        </Button>
+        <Button
+          size="sm"
+          variant="secondary"
+          onClick={onOpenLogs}
+          className="rounded-lg border-white/0 bg-transparent hover:bg-white"
+        >
+          <Eye className="size-4" />
+          运行日志
+        </Button>
+      </>
+    ),
+    [hasItem, isRunning, onOpenLogs, onOpenTiming, onStartOrStop],
+  )
+
+  useRegisterShellToolbar(toolbarActions)
+  return null
+}
 
 export function SingleTasksPage() {
   const bootstrap = useRuntimeStore((state) => state.bootstrap)
@@ -275,6 +338,14 @@ export function SingleTasksPage() {
 
   return (
     <div className="grid gap-10">
+      <SingleToolbarActions
+        isRunning={isRunning}
+        hasItem={!!draft.itemId}
+        onStartOrStop={() => void startOrStop()}
+        onOpenTiming={() => setTimingDialogOpen(true)}
+        onOpenLogs={() => setLogDrawerOpen(true)}
+      />
+
       <div className="grid gap-10">
         <section className="px-1 pt-4 md:pt-8">
           <div className="space-y-5">
@@ -289,50 +360,10 @@ export function SingleTasksPage() {
               ) : null}
             </div>
 
-            <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+            <div className="space-y-3">
               <h1 className="font-display text-4xl leading-tight tracking-tight text-slate-950 md:text-5xl">
                 单商品抢购
               </h1>
-
-              <div className="flex flex-wrap items-center gap-3">
-                <Button
-                  size="lg"
-                  variant={isRunning ? "destructive" : "default"}
-                  onClick={() => void startOrStop()}
-                  disabled={!draft.itemId}
-                  className="h-12 min-w-32 rounded-full px-8"
-                >
-                  {isRunning ? (
-                    <>
-                      <Square className="mr-2 size-4" />
-                      终止
-                    </>
-                  ) : (
-                    <>
-                      <Play className="mr-2 size-4" />
-                      开始
-                    </>
-                  )}
-                </Button>
-                <Button
-                  size="lg"
-                  variant="secondary"
-                  onClick={() => setTimingDialogOpen(true)}
-                  className="h-12 rounded-full px-6"
-                >
-                  <SlidersHorizontal className="mr-2 size-4" />
-                  运行参数
-                </Button>
-                <Button
-                  size="lg"
-                  variant="secondary"
-                  onClick={() => setLogDrawerOpen(true)}
-                  className="h-12 rounded-full px-6"
-                >
-                  <Eye className="mr-2 size-4" />
-                  查看日志
-                </Button>
-              </div>
             </div>
           </div>
 
@@ -502,190 +533,190 @@ export function SingleTasksPage() {
 
           <div className="grid gap-6 px-6 py-6 md:px-8 md:py-8">
             <div className="grid gap-8 md:grid-cols-2">
-              <FormNumberDraft
-                label="购买点击后固定等待"
-                hint="点击购买按钮后，先固定等待，再开始轮询购买成功/失败模板。填 0 关闭。"
-                value={timingDraft?.buyClickSettleMs ?? "50"}
-                min={0}
-                step="1"
-                suffix="ms"
-                onChange={(value) =>
-                  setTimingDraft((current) =>
-                    current
-                      ? {
-                          ...current,
-                          buyClickSettleMs: value,
-                        }
-                      : current
-                  )
-                }
-              />
-              <FormNumberDraft
-                label="详情打开稳定等待"
-                hint="点击商品卡片后，到开始判定详情已打开之间的等待。当前运行时下限为 50ms。"
-                value={timingDraft?.detailOpenSettleMs ?? "50"}
-                min={50}
-                step="1"
-                suffix="ms"
-                onChange={(value) =>
-                  setTimingDraft((current) =>
-                    current
-                      ? {
-                          ...current,
-                          detailOpenSettleMs: value,
-                        }
-                      : current
-                  )
-                }
-              />
-              <FormNumberDraft
-                label="关闭详情后等待"
-                hint="点击详情关闭按钮后的稳定等待。当前运行时下限为 50ms。"
-                value={timingDraft?.postCloseDetailMs ?? "50"}
-                min={50}
-                step="1"
-                suffix="ms"
-                onChange={(value) =>
-                  setTimingDraft((current) =>
-                    current
-                      ? {
-                          ...current,
-                          postCloseDetailMs: value,
-                        }
-                      : current
-                  )
-                }
-              />
-              <FormNumberDraft
-                label="成功遮罩点击后等待"
-                hint="购买成功后关闭遮罩，再进入下一步前的稳定等待。当前运行时下限为 50ms。"
-                value={timingDraft?.postSuccessClickMs ?? "50"}
-                min={50}
-                step="1"
-                suffix="ms"
-                onChange={(value) =>
-                  setTimingDraft((current) =>
-                    current
-                      ? {
-                          ...current,
-                          postSuccessClickMs: value,
-                        }
-                      : current
-                  )
-                }
-              />
-              <FormNumberDraft
-                label="购买结果识别窗口"
-                hint="点击购买后，在窗口内轮询 buy_ok / buy_fail。当前运行时下限为 250ms。"
-                value={timingDraft?.buyResultTimeoutMs ?? "350"}
-                min={250}
-                step="1"
-                suffix="ms"
-                onChange={(value) =>
-                  setTimingDraft((current) =>
-                    current
-                      ? {
-                          ...current,
-                          buyResultTimeoutMs: value,
-                        }
-                      : current
-                  )
-                }
-              />
-              <FormNumberDraft
-                label="购买结果轮询步进"
-                hint="识别窗口内每次重新检测 buy_ok / buy_fail 的间隔。当前运行时下限为 10ms。"
-                value={timingDraft?.buyResultPollStepMs ?? "10"}
-                min={10}
-                step="1"
-                suffix="ms"
-                onChange={(value) =>
-                  setTimingDraft((current) =>
-                    current
-                      ? {
-                          ...current,
-                          buyResultPollStepMs: value,
-                        }
-                      : current
-                  )
-                }
-              />
-            </div>
+                <FormNumberDraft
+                  label="购买点击后固定等待"
+                  hint="点击购买按钮后，先固定等待，再开始轮询购买成功/失败模板。填 0 关闭。"
+                  value={timingDraft?.buyClickSettleMs ?? "50"}
+                  min={0}
+                  step="1"
+                  suffix="ms"
+                  onChange={(value) =>
+                    setTimingDraft((current) =>
+                      current
+                        ? {
+                            ...current,
+                            buyClickSettleMs: value,
+                          }
+                        : current
+                    )
+                  }
+                />
+                <FormNumberDraft
+                  label="详情打开稳定等待"
+                  hint="点击商品卡片后，到开始判定详情已打开之间的等待。当前运行时下限为 50ms。"
+                  value={timingDraft?.detailOpenSettleMs ?? "50"}
+                  min={50}
+                  step="1"
+                  suffix="ms"
+                  onChange={(value) =>
+                    setTimingDraft((current) =>
+                      current
+                        ? {
+                            ...current,
+                            detailOpenSettleMs: value,
+                          }
+                        : current
+                    )
+                  }
+                />
+                <FormNumberDraft
+                  label="关闭详情后等待"
+                  hint="点击详情关闭按钮后的稳定等待。当前运行时下限为 50ms。"
+                  value={timingDraft?.postCloseDetailMs ?? "50"}
+                  min={50}
+                  step="1"
+                  suffix="ms"
+                  onChange={(value) =>
+                    setTimingDraft((current) =>
+                      current
+                        ? {
+                            ...current,
+                            postCloseDetailMs: value,
+                          }
+                        : current
+                    )
+                  }
+                />
+                <FormNumberDraft
+                  label="成功遮罩点击后等待"
+                  hint="购买成功后关闭遮罩，再进入下一步前的稳定等待。当前运行时下限为 50ms。"
+                  value={timingDraft?.postSuccessClickMs ?? "50"}
+                  min={50}
+                  step="1"
+                  suffix="ms"
+                  onChange={(value) =>
+                    setTimingDraft((current) =>
+                      current
+                        ? {
+                            ...current,
+                            postSuccessClickMs: value,
+                          }
+                        : current
+                    )
+                  }
+                />
+                <FormNumberDraft
+                  label="购买结果识别窗口"
+                  hint="点击购买后，在窗口内轮询 buy_ok / buy_fail。当前运行时下限为 250ms。"
+                  value={timingDraft?.buyResultTimeoutMs ?? "350"}
+                  min={250}
+                  step="1"
+                  suffix="ms"
+                  onChange={(value) =>
+                    setTimingDraft((current) =>
+                      current
+                        ? {
+                            ...current,
+                            buyResultTimeoutMs: value,
+                          }
+                        : current
+                    )
+                  }
+                />
+                <FormNumberDraft
+                  label="购买结果轮询步进"
+                  hint="识别窗口内每次重新检测 buy_ok / buy_fail 的间隔。当前运行时下限为 10ms。"
+                  value={timingDraft?.buyResultPollStepMs ?? "10"}
+                  min={10}
+                  step="1"
+                  suffix="ms"
+                  onChange={(value) =>
+                    setTimingDraft((current) =>
+                      current
+                        ? {
+                            ...current,
+                            buyResultPollStepMs: value,
+                          }
+                        : current
+                    )
+                  }
+                />
+              </div>
 
             <div className="grid gap-8 rounded-[28px] border border-black/5 bg-white/55 px-5 py-5 md:grid-cols-2">
-              <FormNumberDraft
-                label="每 N 轮冷却"
-                hint="按成功进入详情并完成本轮判定计数。填 0 关闭。"
-                value={timingDraft?.roundCooldownEveryNRounds ?? "0"}
-                min={0}
-                step="1"
-                suffix="轮"
-                onChange={(value) =>
-                  setTimingDraft((current) =>
-                    current
-                      ? {
-                          ...current,
-                          roundCooldownEveryNRounds: value,
-                        }
-                      : current
-                  )
-                }
-              />
-              <FormNumberDraft
-                label="每轮冷却时长"
-                hint="达到上面的轮数后，保持 running 状态原地冷却的分钟数。填 0 关闭。"
-                value={timingDraft?.roundCooldownMinutes ?? "0"}
-                min={0}
-                step="0.1"
-                suffix="分钟"
-                onChange={(value) =>
-                  setTimingDraft((current) =>
-                    current
-                      ? {
-                          ...current,
-                          roundCooldownMinutes: value,
-                        }
-                      : current
-                  )
-                }
-              />
-              <FormNumberDraft
-                label="补货观察窗"
-                hint="某次进入补货模式后，若后续这段时间内没再次进入补货，就触发冷却。填 0 关闭。"
-                value={timingDraft?.restockRetriggerWindowMinutes ?? "0"}
-                min={0}
-                step="0.1"
-                suffix="分钟"
-                onChange={(value) =>
-                  setTimingDraft((current) =>
-                    current
-                      ? {
-                          ...current,
-                          restockRetriggerWindowMinutes: value,
-                        }
-                      : current
-                  )
-                }
-              />
-              <FormNumberDraft
-                label="补货缺失冷却时长"
-                hint="补货观察窗超时后，保持 running 状态冷却的分钟数。填 0 关闭。"
-                value={timingDraft?.restockMissCooldownMinutes ?? "0"}
-                min={0}
-                step="0.1"
-                suffix="分钟"
-                onChange={(value) =>
-                  setTimingDraft((current) =>
-                    current
-                      ? {
-                          ...current,
-                          restockMissCooldownMinutes: value,
-                        }
-                      : current
-                  )
-                }
-              />
-            </div>
+                <FormNumberDraft
+                  label="每 N 轮冷却"
+                  hint="按成功进入详情并完成本轮判定计数。填 0 关闭。"
+                  value={timingDraft?.roundCooldownEveryNRounds ?? "0"}
+                  min={0}
+                  step="1"
+                  suffix="轮"
+                  onChange={(value) =>
+                    setTimingDraft((current) =>
+                      current
+                        ? {
+                            ...current,
+                            roundCooldownEveryNRounds: value,
+                          }
+                        : current
+                    )
+                  }
+                />
+                <FormNumberDraft
+                  label="每轮冷却时长"
+                  hint="达到上面的轮数后，保持 running 状态原地冷却的分钟数。填 0 关闭。"
+                  value={timingDraft?.roundCooldownMinutes ?? "0"}
+                  min={0}
+                  step="0.1"
+                  suffix="分钟"
+                  onChange={(value) =>
+                    setTimingDraft((current) =>
+                      current
+                        ? {
+                            ...current,
+                            roundCooldownMinutes: value,
+                          }
+                        : current
+                    )
+                  }
+                />
+                <FormNumberDraft
+                  label="补货观察窗"
+                  hint="某次进入补货模式后，若后续这段时间内没再次进入补货，就触发冷却。填 0 关闭。"
+                  value={timingDraft?.restockRetriggerWindowMinutes ?? "0"}
+                  min={0}
+                  step="0.1"
+                  suffix="分钟"
+                  onChange={(value) =>
+                    setTimingDraft((current) =>
+                      current
+                        ? {
+                            ...current,
+                            restockRetriggerWindowMinutes: value,
+                          }
+                        : current
+                    )
+                  }
+                />
+                <FormNumberDraft
+                  label="补货缺失冷却时长"
+                  hint="补货观察窗超时后，保持 running 状态冷却的分钟数。填 0 关闭。"
+                  value={timingDraft?.restockMissCooldownMinutes ?? "0"}
+                  min={0}
+                  step="0.1"
+                  suffix="分钟"
+                  onChange={(value) =>
+                    setTimingDraft((current) =>
+                      current
+                        ? {
+                            ...current,
+                            restockMissCooldownMinutes: value,
+                          }
+                        : current
+                    )
+                  }
+                />
+              </div>
 
             {timingMessage || isRunning ? (
               <InlineNote tone={timingMessage ? timingMessageTone : "slate"}>

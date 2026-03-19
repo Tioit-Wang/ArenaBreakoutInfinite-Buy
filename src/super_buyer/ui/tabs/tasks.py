@@ -411,7 +411,7 @@ class SingleFastBuyTab(BaseTab):
                 old.destroy()
             except Exception:
                 pass
-        panel = ttk.LabelFrame(parent, text="高级设置（购买/连击）")
+        panel = ttk.LabelFrame(parent, text="单商品运行参数")
         panel.pack(fill=tk.X, padx=4, pady=(0, 6))
         self._step_panel = panel
         sections = ttk.Frame(panel)
@@ -664,13 +664,34 @@ class SingleFastBuyTab(BaseTab):
             ),
         )
 
+        dbg_cfg = self.cfg.get("debug") if isinstance(self.cfg.get("debug"), dict) else {}
+        try:
+            save_roi_cur = bool((dbg_cfg or {}).get("save_roi_on_fail", False))
+        except Exception:
+            save_roi_cur = False
+        var_save_roi_on_fail = tk.BooleanVar(value=save_roi_cur)
+        chk_save_roi = _make_row(
+            box_timing,
+            5,
+            "单商品抓图存档",
+            lambda row: ttk.Checkbutton(
+                row,
+                text="启用失败抓图（输出目录/roi_debug）",
+                variable=var_save_roi_on_fail,
+            ),
+            tooltip=(
+                "仅在单商品均价识别轮最终失败时，保存最近一次 ROI 原图、上下半图和二值图。\n"
+                "文件写入当前输出目录下的 roi_debug，便于排查 OCR 与 ROI 配置问题。"
+            ),
+        )
+
         try:
             ttk.Label(
                 box_timing,
                 text="这些时序参数会同步到全局 multi_snipe_tuning。",
                 foreground="#666666",
                 justify=tk.LEFT,
-            ).grid(row=5, column=0, sticky="w", padx=8, pady=(0, 8))
+            ).grid(row=6, column=0, sticky="w", padx=8, pady=(0, 8))
         except Exception:
             pass
 
@@ -802,6 +823,31 @@ class SingleFastBuyTab(BaseTab):
             except Exception:
                 pass
 
+        def _apply_debug_from_widget() -> None:
+            """将单商品失败抓图开关写回 cfg.debug 并保存到配置文件。"""
+            try:
+                cfg = dict(self.app.cfg)
+            except Exception:
+                cfg = self.app.cfg
+            debug_cfg = cfg.get("debug") if isinstance(cfg.get("debug"), dict) else {}
+            if not isinstance(debug_cfg, dict):
+                debug_cfg = {}
+            try:
+                debug_cfg["save_roi_on_fail"] = bool(var_save_roi_on_fail.get())
+            except Exception:
+                debug_cfg["save_roi_on_fail"] = False
+            cfg["debug"] = debug_cfg
+            try:
+                from super_buyer.config import save_config  # type: ignore
+                save_config(cfg, path=self.config_path)
+                self.app.cfg = cfg
+                try:
+                    self.__dict__.pop("cfg", None)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
         # Real-time save: on value change, focus out, and Enter
         try:
             var_delay_ms.trace_add("write", lambda *_: _apply_delay_ms_from_widget())
@@ -827,6 +873,14 @@ class SingleFastBuyTab(BaseTab):
             pass
         try:
             chk_fast.bind("<Return>", lambda _e=None: _apply_fast_chain_from_widget())
+        except Exception:
+            pass
+        try:
+            var_save_roi_on_fail.trace_add("write", lambda *_: _apply_debug_from_widget())
+        except Exception:
+            pass
+        try:
+            chk_save_roi.bind("<Return>", lambda _e=None: _apply_debug_from_widget())
         except Exception:
             pass
 

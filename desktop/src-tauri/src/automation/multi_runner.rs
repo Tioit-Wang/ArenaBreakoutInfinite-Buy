@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{
@@ -7,6 +8,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
+use chrono::Utc;
 use image::GrayImage;
 use tauri::async_runtime;
 use tokio::time::sleep;
@@ -31,6 +33,7 @@ const STEP_PREPARE: &str = "步骤1-准备多商品上下文";
 const STEP_FAVORITES: &str = "步骤2-刷新并进入收藏页";
 const STEP_SCAN: &str = "步骤3-批量读价与筛选";
 const STEP_BUY: &str = "步骤4-进入详情并购买";
+const STEP_CAPTURE: &str = "抓图存档";
 
 type SharedEmitter = Arc<Mutex<Box<dyn FnMut(AutomationEvent) + Send>>>;
 
@@ -76,6 +79,8 @@ struct MultiSession {
     fail_counts: HashMap<String, u32>,
     ocr_miss_streak: u32,
     last_ocr_ok: Instant,
+    capture_seq: u64,
+    capture_dir_announced: bool,
 }
 
 pub async fn run_multi_flow(
@@ -116,11 +121,14 @@ impl MultiSession {
             fail_counts: HashMap::new(),
             ocr_miss_streak: 0,
             last_ocr_ok: Instant::now(),
+            capture_seq: 0,
+            capture_dir_announced: false,
         }
     }
 
     async fn run(&mut self) -> Result<()> {
         self.validate()?;
+        self.announce_capture_archive();
         self.log("info", STEP_PREPARE, "开始执行多商品会话", Some(0.04));
         self.ensure_ready().await?;
 
@@ -377,10 +385,13 @@ impl MultiSession {
             let local_price_roi = global_box_to_local(&screen, price_roi)
                 .ok_or_else(|| anyhow!("price roi is outside screen"))?;
             let gray = crop_gray(&screen.image, local_price_roi)?;
+            self.archive_gray_capture(&format!("scan_price_raw_{}", task.name), price_roi, &gray);
+            let ocr_image = threshold(resize(gray.clone(), 2.5));
+            self.archive_gray_capture(&format!("scan_price_ocr_{}", task.name), price_roi, &ocr_image);
             jobs.push(PriceScanJob {
                 task_id: task.id.clone(),
                 card_box,
-                image: gray,
+                image: ocr_image,
             });
         }
         let scans = self.ocr_price_jobs(jobs).await?;
@@ -424,8 +435,7 @@ impl MultiSession {
             for job in chunk.iter().cloned() {
                 let config = self.request.config.umi_ocr.clone();
                 handles.push(async_runtime::spawn(async move {
-                    let image = threshold(resize(job.image, 2.5));
-                    let texts = recognize_text(&config, &image).await?;
+                    let texts = recognize_text(&config, &job.image).await?;
                     let price = texts
                         .iter()
                         .filter_map(|item| parse_price_text(&item.text))
@@ -569,7 +579,9 @@ impl MultiSession {
         let local_roi =
             global_box_to_local(&screen, roi).ok_or_else(|| anyhow!("qty roi is outside screen"))?;
         let gray = crop_gray(&screen.image, local_roi)?;
+        self.archive_gray_capture("read_qty_raw", roi, &gray);
         let image = threshold(resize(gray, 2.0));
+        self.archive_gray_capture("read_qty_ocr", roi, &image);
         let texts = recognize_text(&self.request.config.umi_ocr, &image).await?;
         Ok(texts
             .into_iter()
@@ -626,11 +638,14 @@ impl MultiSession {
             screen.width,
             screen.height,
         );
+        let global_roi = local_box_to_global(&screen, roi);
         let gray = crop_gray(&screen.image, roi)?;
+        self.archive_gray_capture("avg_price_raw", global_roi, &gray);
         let image = threshold(resize(
             top_half(gray),
             self.request.config.avg_price_area.scale,
         ));
+        self.archive_gray_capture("avg_price_ocr", global_roi, &image);
         let texts = recognize_text(&self.request.config.umi_ocr, &image).await?;
         Ok(texts
             .into_iter()
@@ -901,6 +916,79 @@ impl MultiSession {
         capture_full_screen()
     }
 
+    fn announce_capture_archive(&mut self) {
+        if !self.request.config.debug.save_multi_capture_images || self.capture_dir_announced {
+            return;
+        }
+        self.capture_dir_announced = true;
+        self.log(
+            "info",
+            STEP_CAPTURE,
+            format!(
+                "已启用多商品抓图存档，目录={}",
+                self.capture_archive_dir().display()
+            ),
+            None,
+        );
+    }
+
+    fn capture_archive_dir(&self) -> PathBuf {
+        self.request
+            .paths
+            .debug_dir
+            .join("multi-captures")
+            .join(&self.session_id)
+    }
+
+    fn archive_gray_capture(&mut self, stage: &str, roi: MatchBox, image: &GrayImage) {
+        if !self.request.config.debug.save_multi_capture_images {
+            return;
+        }
+        self.persist_capture(stage, Some(roi), |path| image.save(path));
+    }
+
+    fn persist_capture<F>(&mut self, stage: &str, roi: Option<MatchBox>, save: F)
+    where
+        F: FnOnce(&Path) -> image::ImageResult<()>,
+    {
+        self.announce_capture_archive();
+        let path = self.next_capture_path(stage, roi);
+        if let Some(parent) = path.parent()
+            && let Err(error) = fs::create_dir_all(parent)
+        {
+            self.log(
+                "error",
+                STEP_CAPTURE,
+                format!("创建抓图目录失败：{} ({error})", parent.display()),
+                None,
+            );
+            return;
+        }
+        if let Err(error) = save(&path) {
+            self.log(
+                "error",
+                STEP_CAPTURE,
+                format!("保存抓图失败：{} ({error})", path.display()),
+                None,
+            );
+        }
+    }
+
+    fn next_capture_path(&mut self, stage: &str, roi: Option<MatchBox>) -> PathBuf {
+        self.capture_seq = self.capture_seq.saturating_add(1);
+        let timestamp = Utc::now().format("%Y%m%dT%H%M%S%.3fZ").to_string();
+        let mut parts = vec![
+            format!("{:06}", self.capture_seq),
+            timestamp,
+            sanitize_capture_component(stage),
+        ];
+        if let Some((x, y, width, height)) = roi {
+            parts.push(format!("roi_{x}_{y}_{width}_{height}"));
+        }
+        self.capture_archive_dir()
+            .join(format!("{}.png", parts.join("__")))
+    }
+
     fn detect_scene_in_capture(&self, screen: &CapturedImage) -> Result<&'static str> {
         if self.locate_template_in_capture(
             screen,
@@ -1072,6 +1160,29 @@ fn optional_str(value: &str) -> Option<String> {
         None
     } else {
         Some(trimmed.to_string())
+    }
+}
+
+fn sanitize_capture_component(raw: &str) -> String {
+    let sanitized = raw
+        .trim()
+        .chars()
+        .map(|ch| match ch {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
+            c if c.is_whitespace() => '_',
+            c if c.is_control() => '_',
+            c => c,
+        })
+        .collect::<String>();
+    let collapsed = sanitized
+        .split('_')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("_");
+    if collapsed.is_empty() {
+        "capture".to_string()
+    } else {
+        collapsed.chars().take(72).collect()
     }
 }
 
