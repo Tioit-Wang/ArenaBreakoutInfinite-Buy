@@ -18,6 +18,7 @@ import { useRuntimeStore } from "@/app/store"
 import { getMultiStartBlockReason } from "@/lib/runtime-preflight"
 import type { AppBootstrap, GoodsRecord, MultiTaskRecord } from "@/lib/types"
 import { useRegisterShellToolbar } from "@/components/shell-toolbar"
+import { DebugModeCard } from "@/components/debug-mode-card"
 import {
   InlineNote,
   PageHero,
@@ -56,7 +57,6 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
-import { cn } from "@/lib/utils"
 
 const emptyMultiTask = (): MultiTaskRecord => ({
   id: crypto.randomUUID(),
@@ -198,7 +198,7 @@ export function MultiTasksPage() {
 
   useEffect(() => {
     setCaptureArchiveOverride(null)
-  }, [bootstrap?.config.debug.saveMultiCaptureImages])
+  }, [bootstrap?.config.debug.multiEnabled])
 
   const multiLogs = useMemo(
     () =>
@@ -297,8 +297,8 @@ export function MultiTasksPage() {
   const toggleCaptureArchive = async () => {
     if (!bootstrap) return
     const captureArchiveEnabled =
-      captureArchiveOverride ?? bootstrap.config.debug.saveMultiCaptureImages
-    const captureArchiveDir = `${bootstrap.paths.debugDir}\\multi-captures\\<sessionId>`
+      captureArchiveOverride ?? bootstrap.config.debug.multiEnabled
+    const captureArchiveDir = `${bootstrap.paths.debugDir}\\multi\\<sessionId>`
     if (captureArchiveSaving || isRunning) {
       return
     }
@@ -310,7 +310,7 @@ export function MultiTasksPage() {
         ...bootstrap.config,
         debug: {
           ...bootstrap.config.debug,
-          saveMultiCaptureImages: nextEnabled,
+          multiEnabled: nextEnabled,
         },
       })
       queryClient.setQueryData<AppBootstrap>(["bootstrap"], (current) =>
@@ -324,13 +324,13 @@ export function MultiTasksPage() {
       setCaptureArchiveMessageTone("emerald")
       setCaptureArchiveMessage(
         nextEnabled
-          ? `已开启商品抓图存档。新会话会保存到 ${captureArchiveDir}`
-          : "已关闭商品抓图存档。后续多商品会话不再自动保存抓图。",
+          ? `已开启收藏商品调试模式。新会话会写入 ${captureArchiveDir}`
+          : "已关闭收藏商品调试模式。后续会话不再生成调试图。",
       )
     } catch (error) {
       setCaptureArchiveOverride(null)
       setCaptureArchiveMessageTone("rose")
-      setCaptureArchiveMessage(`商品抓图存档设置保存失败：${formatErrorMessage(error)}`)
+      setCaptureArchiveMessage(`收藏商品调试模式保存失败：${formatErrorMessage(error)}`)
     } finally {
       setCaptureArchiveSaving(false)
     }
@@ -340,8 +340,8 @@ export function MultiTasksPage() {
 
   const enabledCount = bootstrap.multiTasks.filter((item) => item.enabled).length
   const captureArchiveEnabled =
-    captureArchiveOverride ?? bootstrap.config.debug.saveMultiCaptureImages
-  const captureArchiveDir = `${bootstrap.paths.debugDir}\\multi-captures\\<sessionId>`
+    captureArchiveOverride ?? bootstrap.config.debug.multiEnabled
+  const captureArchiveDir = `${bootstrap.paths.debugDir}\\multi\\<sessionId>`
 
   const openCreate = () =>
     setModal({
@@ -674,68 +674,24 @@ export function MultiTasksPage() {
               收藏商品运行参数
             </DialogTitle>
             <DialogDescription className="text-sm leading-6">
-              这里调整收藏商品抢购的抓图存档、详情稳定与购买结果识别时序。输入后会自动保存。
+              这里调整收藏商品抢购的调试模式、详情稳定与购买结果识别时序。输入后会自动保存。
             </DialogDescription>
           </DialogHeader>
 
           <ScrollArea className="max-h-[70vh]">
             <div className="grid gap-6 px-6 py-6 md:px-8 md:py-8">
-              <div className="grid gap-4 rounded-[28px] border border-black/5 bg-white/60 px-5 py-5">
-                <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-                  <div className="space-y-2">
-                    <p className="text-xs font-semibold uppercase tracking-[0.28em] text-slate-400">
-                      Capture Archive
-                    </p>
-                    <h3 className="font-display text-2xl leading-tight tracking-tight text-slate-950">
-                      商品抓图存档
-                    </h3>
-                    <p className="max-w-2xl text-sm leading-6 text-slate-600">
-                      保存多商品流程里的商品卡片抓图和关键 OCR ROI，目录按每次会话拆分。
-                    </p>
-                  </div>
-
-                  <button
-                    type="button"
-                    role="switch"
-                    aria-checked={captureArchiveEnabled}
-                    aria-label="切换商品抓图存档"
-                    onClick={() => void toggleCaptureArchive()}
-                    disabled={captureArchiveSaving || isRunning}
-                    className={cn(
-                      "inline-flex min-h-12 items-center gap-3 self-start rounded-full border px-4 py-2 text-sm font-medium transition md:self-center",
-                      captureArchiveEnabled
-                        ? "border-emerald-200 bg-emerald-50 text-emerald-800"
-                        : "border-slate-200 bg-white text-slate-600",
-                      (captureArchiveSaving || isRunning) && "cursor-not-allowed opacity-60",
-                    )}
-                  >
-                    <span
-                      className={cn(
-                        "relative inline-flex h-7 w-12 shrink-0 rounded-full transition",
-                        captureArchiveEnabled ? "bg-emerald-500" : "bg-slate-300",
-                      )}
-                    >
-                      <span
-                        className={cn(
-                          "absolute top-1 size-5 rounded-full bg-white shadow-sm transition",
-                          captureArchiveEnabled ? "left-6" : "left-1",
-                        )}
-                      />
-                    </span>
-                    <span>
-                      {captureArchiveSaving
-                        ? "保存中..."
-                        : captureArchiveEnabled
-                          ? "已开启"
-                          : "已关闭"}
-                    </span>
-                  </button>
-                </div>
-
-                <InlineNote tone={captureArchiveMessage ? captureArchiveMessageTone : "slate"}>
-                  {captureArchiveMessage || `抓图将保存到 ${captureArchiveDir}。运行中不可切换，启动前设置生效。`}
-                </InlineNote>
-              </div>
+              <DebugModeCard
+                title="收藏商品调试模式"
+                description="按轮缓存模板识别、OCR、点击和输入的调试图，当前轮结束后一次性写入磁盘。"
+                enabled={captureArchiveEnabled}
+                saving={captureArchiveSaving}
+                isRunning={isRunning}
+                onToggle={() => void toggleCaptureArchive()}
+                message={captureArchiveMessage}
+                messageTone={captureArchiveMessageTone}
+                defaultMessage={`调试图将写入 ${captureArchiveDir}\\round-0001-completed。运行中不可切换，启动前设置生效。`}
+                ariaLabel="切换收藏商品调试模式"
+              />
 
               <div className="grid gap-8 md:grid-cols-2">
                 <FormNumberDraft

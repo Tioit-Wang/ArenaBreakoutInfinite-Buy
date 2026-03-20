@@ -10,12 +10,10 @@ import {
   XAxis,
   YAxis,
 } from "recharts"
-import { TrendingUp } from "lucide-react"
 
 import { useRuntimeStore } from "@/app/store"
 import { api } from "@/lib/api"
 import type { ItemPriceTrendPoint } from "@/lib/types"
-import { Badge } from "@/components/ui/badge"
 import { Card, CardContent } from "@/components/ui/card"
 import { Label } from "@/components/ui/label"
 import {
@@ -37,10 +35,8 @@ import {
   InlineNote,
   MetricCard,
   MetricGrid,
-  PageHero,
   PageSurface,
   PageSurfaceContent,
-  SectionHeading,
   minimalSelectTriggerClassName,
 } from "@/components/minimal-page"
 
@@ -102,34 +98,22 @@ export function HistoryPage() {
   const hasData = points.length > 0
 
   return (
-    <div className="grid gap-10">
-      <PageHero
-        eyebrow="History"
-        badges={
-          <>
-            <Badge variant="secondary">
-              <TrendingUp className="mr-2 size-4" />
-              SQLite 主库
-            </Badge>
-            <Badge variant="outline">{selectedItemName}</Badge>
-          </>
-        }
-        title="物品价格趋势"
-        description="以物品为主视角查看价格趋势，聚焦每天最高价、最低价和均价变化。"
-        detail="先选物品，再切换 7 / 30 / 90 天时间窗；图表和每日统计表会同步更新。"
-      />
-
+    <div className="grid gap-6">
       <PageSurface>
-        <PageSurfaceContent className="gap-8">
-          <SectionHeading
-            eyebrow="Filter"
-            title="观察范围"
-            description="不默认聚合全部物品，避免把不同物品的价格波动混在一起。"
-          />
+        <PageSurfaceContent className="gap-6">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-black/5 pb-4">
+            <h1 className="font-display text-2xl tracking-tight text-slate-950">
+              历史统计
+            </h1>
+            <div className="rounded-full border border-black/5 bg-white/70 px-4 py-2 text-sm text-slate-600">
+              当前物品
+              <span className="ml-2 font-medium text-slate-900">{selectedItemName}</span>
+            </div>
+          </div>
 
-          <div className="grid gap-8 lg:grid-cols-[minmax(0,320px)_minmax(0,1fr)]">
-            <div className="space-y-3">
-              <Label>选择物品</Label>
+          <div className="grid gap-4 rounded-[24px] border border-black/5 bg-white/55 p-4 lg:grid-cols-[minmax(0,360px)_minmax(0,1fr)] lg:items-end">
+            <div className="space-y-2">
+              <Label className="text-xs uppercase tracking-[0.18em] text-slate-400">物品</Label>
               <Select value={selectedItemId || undefined} onValueChange={setSelectedItemId}>
                 <SelectTrigger className={minimalSelectTriggerClassName}>
                   <SelectValue placeholder="请选择一个物品" />
@@ -144,8 +128,8 @@ export function HistoryPage() {
               </Select>
             </div>
 
-            <div className="space-y-3">
-              <Label>时间范围</Label>
+            <div className="space-y-2">
+              <Label className="text-xs uppercase tracking-[0.18em] text-slate-400">时间范围</Label>
               <div className="flex flex-wrap gap-2">
                 {RANGE_OPTIONS.map((option) => {
                   const active = option.value === rangePreset
@@ -157,7 +141,7 @@ export function HistoryPage() {
                       className={`rounded-full border px-4 py-2 text-sm transition ${
                         active
                           ? "border-emerald-300 bg-emerald-50 text-emerald-900"
-                          : "border-black/10 bg-white/70 text-slate-600 hover:border-slate-300 hover:text-slate-900"
+                          : "border-black/10 bg-white/80 text-slate-600 hover:border-slate-300 hover:text-slate-900"
                       }`}
                     >
                       {option.label}
@@ -174,135 +158,131 @@ export function HistoryPage() {
             <MetricCard label="区间最高" value={fmtNullable(trendQuery.data?.rangeMaxPrice)} />
             <MetricCard label="区间均价" value={fmtNullable(trendQuery.data?.rangeAvgPrice)} />
           </MetricGrid>
-        </PageSurfaceContent>
-      </PageSurface>
 
-      <PageSurface>
-        <PageSurfaceContent className="gap-8">
-          <SectionHeading
-            eyebrow="Trend"
-            title="价格趋势图"
-            description="固定展示每日最高价、最低价和均价，不再把原始明细直接堆进图表。"
-          />
-
-          {!selectedItemId ? (
-            <InlineNote>请选择一个物品查看价格趋势。</InlineNote>
-          ) : trendQuery.isLoading ? (
-            <InlineNote>正在加载该物品的价格趋势...</InlineNote>
-          ) : trendQuery.error ? (
-            <InlineNote tone="rose">{String(trendQuery.error)}</InlineNote>
-          ) : hasData ? (
-            <Card className="rounded-[32px] border border-black/5 bg-white/55 shadow-none">
-              <CardContent className="p-4 md:p-6">
-                <div className="h-[360px] w-full">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <LineChart
-                      data={points}
-                      margin={{ top: 12, right: 12, left: -16, bottom: 0 }}
-                    >
-                      <CartesianGrid stroke="rgba(148, 163, 184, 0.20)" strokeDasharray="4 4" />
-                      <XAxis dataKey="day" axisLine={false} tickLine={false} dy={8} />
-                      <YAxis
-                        axisLine={false}
-                        tickLine={false}
-                        width={84}
-                        tickFormatter={(value) => fmt(Number(value))}
-                      />
-                      <Tooltip content={<PriceTrendTooltip />} />
-                      <Legend />
-                      <Line
-                        type="monotone"
-                        dataKey="maxPrice"
-                        name="每日最高价"
-                        stroke="#166534"
-                        strokeWidth={2.5}
-                        dot={false}
-                        activeDot={{ r: 4 }}
-                      />
-                      <Line
-                        type="monotone"
-                        dataKey="minPrice"
-                        name="每日最低价"
-                        stroke="#be123c"
-                        strokeWidth={2.5}
-                        dot={false}
-                        activeDot={{ r: 4 }}
-                      />
-                      <Line
-                        type="monotone"
-                        dataKey="avgPrice"
-                        name="每日均价"
-                        stroke="#475569"
-                        strokeWidth={2}
-                        strokeDasharray="6 4"
-                        dot={false}
-                        activeDot={{ r: 3 }}
-                      />
-                    </LineChart>
-                  </ResponsiveContainer>
-                </div>
-              </CardContent>
-            </Card>
-          ) : (
-            <InlineNote>该物品暂无价格历史。</InlineNote>
-          )}
-        </PageSurfaceContent>
-      </PageSurface>
-
-      <PageSurface>
-        <PageSurfaceContent className="gap-8">
-          <SectionHeading
-            eyebrow="Daily"
-            title="每日高低价"
-            description="按本机时区把价格历史聚合到天，方便快速回看日内价格区间。"
-          />
-
-          {!selectedItemId ? (
-            <InlineNote>请选择一个物品查看每日最高价与最低价。</InlineNote>
-          ) : trendQuery.isLoading ? (
-            <InlineNote>正在准备每日高低价表...</InlineNote>
-          ) : trendQuery.error ? (
-            <InlineNote tone="rose">{String(trendQuery.error)}</InlineNote>
-          ) : hasData ? (
-            <div className="overflow-hidden rounded-[32px] border border-black/5 bg-white/55">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>日期</TableHead>
-                    <TableHead className="text-right">最低价</TableHead>
-                    <TableHead className="text-right">最高价</TableHead>
-                    <TableHead className="text-right">均价</TableHead>
-                    <TableHead className="text-right">最新价</TableHead>
-                    <TableHead className="text-right">样本数</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {points.map((point) => (
-                    <TableRow key={point.day}>
-                      <TableCell className="py-5 text-slate-700">{point.day}</TableCell>
-                      <TableCell className="py-5 text-right text-rose-700">
-                        {fmt(point.minPrice)}
-                      </TableCell>
-                      <TableCell className="py-5 text-right text-emerald-800">
-                        {fmt(point.maxPrice)}
-                      </TableCell>
-                      <TableCell className="py-5 text-right text-slate-700">
-                        {fmt(point.avgPrice)}
-                      </TableCell>
-                      <TableCell className="py-5 text-right font-medium text-slate-900">
-                        {fmt(point.latestPrice)}
-                      </TableCell>
-                      <TableCell className="py-5 text-right text-slate-600">
-                        {fmt(point.sampleCount)}
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
+          <div className="space-y-3 border-t border-black/5 pt-6">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-semibold text-slate-950">价格趋势图</h2>
+                <p className="text-sm text-slate-500">展示每日最高价、最低价和均价。</p>
+              </div>
             </div>
-          ) : (
-            <InlineNote>该物品暂无价格历史。</InlineNote>
-          )}
+
+            {!selectedItemId ? (
+              <InlineNote>请选择一个物品查看价格趋势。</InlineNote>
+            ) : trendQuery.isLoading ? (
+              <InlineNote>正在加载该物品的价格趋势...</InlineNote>
+            ) : trendQuery.error ? (
+              <InlineNote tone="rose">{String(trendQuery.error)}</InlineNote>
+            ) : hasData ? (
+              <Card className="rounded-[28px] border border-black/5 bg-white/55 shadow-none">
+                <CardContent className="p-4 md:p-6">
+                  <div className="h-[340px] w-full">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <LineChart
+                        data={points}
+                        margin={{ top: 12, right: 12, left: -16, bottom: 0 }}
+                      >
+                        <CartesianGrid stroke="rgba(148, 163, 184, 0.20)" strokeDasharray="4 4" />
+                        <XAxis dataKey="day" axisLine={false} tickLine={false} dy={8} />
+                        <YAxis
+                          axisLine={false}
+                          tickLine={false}
+                          width={84}
+                          tickFormatter={(value) => fmt(Number(value))}
+                        />
+                        <Tooltip content={<PriceTrendTooltip />} />
+                        <Legend />
+                        <Line
+                          type="monotone"
+                          dataKey="maxPrice"
+                          name="每日最高价"
+                          stroke="#166534"
+                          strokeWidth={2.5}
+                          dot={false}
+                          activeDot={{ r: 4 }}
+                        />
+                        <Line
+                          type="monotone"
+                          dataKey="minPrice"
+                          name="每日最低价"
+                          stroke="#be123c"
+                          strokeWidth={2.5}
+                          dot={false}
+                          activeDot={{ r: 4 }}
+                        />
+                        <Line
+                          type="monotone"
+                          dataKey="avgPrice"
+                          name="每日均价"
+                          stroke="#475569"
+                          strokeWidth={2}
+                          strokeDasharray="6 4"
+                          dot={false}
+                          activeDot={{ r: 3 }}
+                        />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                </CardContent>
+              </Card>
+            ) : (
+              <InlineNote>该物品暂无价格历史。</InlineNote>
+            )}
+          </div>
+
+          <div className="space-y-3 border-t border-black/5 pt-6">
+            <div>
+              <h2 className="text-lg font-semibold text-slate-950">每日高低价</h2>
+              <p className="text-sm text-slate-500">按本机时区聚合到天，便于回看日内区间。</p>
+            </div>
+
+            {!selectedItemId ? (
+              <InlineNote>请选择一个物品查看每日最高价与最低价。</InlineNote>
+            ) : trendQuery.isLoading ? (
+              <InlineNote>正在准备每日高低价表...</InlineNote>
+            ) : trendQuery.error ? (
+              <InlineNote tone="rose">{String(trendQuery.error)}</InlineNote>
+            ) : hasData ? (
+              <div className="overflow-hidden rounded-[28px] border border-black/5 bg-white/55">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>日期</TableHead>
+                      <TableHead className="text-right">最低价</TableHead>
+                      <TableHead className="text-right">最高价</TableHead>
+                      <TableHead className="text-right">均价</TableHead>
+                      <TableHead className="text-right">最新价</TableHead>
+                      <TableHead className="text-right">样本数</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {points.map((point) => (
+                      <TableRow key={point.day}>
+                        <TableCell className="py-4 text-slate-700">{point.day}</TableCell>
+                        <TableCell className="py-4 text-right text-rose-700">
+                          {fmt(point.minPrice)}
+                        </TableCell>
+                        <TableCell className="py-4 text-right text-emerald-800">
+                          {fmt(point.maxPrice)}
+                        </TableCell>
+                        <TableCell className="py-4 text-right text-slate-700">
+                          {fmt(point.avgPrice)}
+                        </TableCell>
+                        <TableCell className="py-4 text-right font-medium text-slate-900">
+                          {fmt(point.latestPrice)}
+                        </TableCell>
+                        <TableCell className="py-4 text-right text-slate-600">
+                          {fmt(point.sampleCount)}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            ) : (
+              <InlineNote>该物品暂无价格历史。</InlineNote>
+            )}
+          </div>
         </PageSurfaceContent>
       </PageSurface>
     </div>

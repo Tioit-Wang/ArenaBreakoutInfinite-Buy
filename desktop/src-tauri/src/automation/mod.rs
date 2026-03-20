@@ -1,8 +1,10 @@
 pub mod capture;
 pub mod common;
+pub mod debug_recorder;
 pub mod input;
 pub mod multi_runner;
 pub mod native_capture;
 pub mod ocr;
+pub mod session_support;
 pub mod single_runner;
 pub mod vision;

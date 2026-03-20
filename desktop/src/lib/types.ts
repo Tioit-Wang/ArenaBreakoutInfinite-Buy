@@ -32,13 +32,8 @@ export type HotkeyConfig = {
 }
 
 export type DebugConfig = {
-  enabled: boolean
-  saveRoiOnFail: boolean
-  overlaySec: number
-  stepSleep: number
-  saveOverlayImages: boolean
-  saveSingleCaptureImages: boolean
-  saveMultiCaptureImages: boolean
+  singleEnabled: boolean
+  multiEnabled: boolean
 }
 
 export type AvgPriceAreaConfig = {

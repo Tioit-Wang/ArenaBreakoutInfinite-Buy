@@ -1,5 +1,6 @@
 use std::sync::{
     Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
 };
 
 use anyhow::{Result, anyhow};
@@ -22,6 +23,7 @@ use crate::storage::repository::Repository;
 struct RuntimeControl {
     state: AutomationRunState,
     task: Option<async_runtime::JoinHandle<()>>,
+    stop_requested: Option<Arc<AtomicBool>>,
 }
 
 #[derive(Clone)]
@@ -71,6 +73,8 @@ impl AutomationManager {
         let _ = app.emit(AUTOMATION_STATE_EVENT, state.clone());
         let manager = self.clone();
         let state_clone = state.clone();
+        let stop_requested = Arc::new(AtomicBool::new(false));
+        let stop_requested_for_task = stop_requested.clone();
         let handle = async_runtime::spawn(async move {
             let event_manager = manager.clone();
             let event_app = app.clone();
@@ -84,6 +88,7 @@ impl AutomationManager {
                 templates,
                 paths,
                 repo: manager.repo.clone(),
+                stop_requested: stop_requested_for_task,
             };
             let result = single_runner::run_single_flow(request, emit, session_id.clone()).await;
             let final_state = AutomationRunState {
@@ -110,6 +115,7 @@ impl AutomationManager {
             .expect("automation control mutex poisoned");
         control.state = state.clone();
         control.task = Some(handle);
+        control.stop_requested = Some(stop_requested);
         Ok(state)
     }
 
@@ -138,6 +144,8 @@ impl AutomationManager {
         let _ = app.emit(AUTOMATION_STATE_EVENT, state.clone());
         let manager = self.clone();
         let state_clone = state.clone();
+        let stop_requested = Arc::new(AtomicBool::new(false));
+        let stop_requested_for_task = stop_requested.clone();
         let handle = async_runtime::spawn(async move {
             let event_manager = manager.clone();
             let event_app = app.clone();
@@ -150,6 +158,7 @@ impl AutomationManager {
                 templates,
                 paths,
                 repo: manager.repo.clone(),
+                stop_requested: stop_requested_for_task,
             };
             let result = multi_runner::run_multi_flow(request, emit, session_id.clone()).await;
             let final_state = AutomationRunState {
@@ -176,6 +185,7 @@ impl AutomationManager {
             .expect("automation control mutex poisoned");
         control.state = state.clone();
         control.task = Some(handle);
+        control.stop_requested = Some(stop_requested);
         Ok(state)
     }
 
@@ -198,9 +208,13 @@ impl AutomationManager {
             .control
             .lock()
             .expect("automation control mutex poisoned");
+        if let Some(stop_requested) = control.stop_requested.as_ref() {
+            stop_requested.store(true, Ordering::Relaxed);
+        }
         if let Some(handle) = control.task.take() {
             handle.abort();
         }
+        control.stop_requested = None;
     }
 
     fn finish_run(&self, app: &AppHandle, state: AutomationRunState) -> Result<()> {
@@ -212,6 +226,7 @@ impl AutomationManager {
             .expect("automation control mutex poisoned");
         control.state = state;
         control.task = None;
+        control.stop_requested = None;
         Ok(())
     }
 

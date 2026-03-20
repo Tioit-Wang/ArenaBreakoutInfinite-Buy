@@ -78,27 +78,17 @@ impl Default for HotkeyConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DebugConfig {
-    pub enabled: bool,
-    pub save_roi_on_fail: bool,
-    pub overlay_sec: f64,
-    pub step_sleep: f64,
-    pub save_overlay_images: bool,
     #[serde(default)]
-    pub save_single_capture_images: bool,
+    pub single_enabled: bool,
     #[serde(default)]
-    pub save_multi_capture_images: bool,
+    pub multi_enabled: bool,
 }
 
 impl Default for DebugConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
-            save_roi_on_fail: false,
-            overlay_sec: 5.0,
-            step_sleep: 0.0,
-            save_overlay_images: false,
-            save_single_capture_images: false,
-            save_multi_capture_images: false,
+            single_enabled: false,
+            multi_enabled: false,
         }
     }
 }
@@ -496,4 +486,25 @@ pub fn iso_to_epoch(raw: &str) -> i64 {
     DateTime::parse_from_rfc3339(raw)
         .map(|value| value.timestamp())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DebugConfig;
+
+    #[test]
+    fn debug_config_defaults_to_disabled_modes() {
+        let config = DebugConfig::default();
+        assert!(!config.single_enabled);
+        assert!(!config.multi_enabled);
+    }
+
+    #[test]
+    fn debug_config_serializes_using_camel_case_keys() {
+        let value = serde_json::to_value(DebugConfig::default()).expect("debug config should serialize");
+        assert!(value.get("singleEnabled").is_some());
+        assert!(value.get("multiEnabled").is_some());
+        assert!(value.get("single_enabled").is_none());
+        assert!(value.get("multi_enabled").is_none());
+    }
 }

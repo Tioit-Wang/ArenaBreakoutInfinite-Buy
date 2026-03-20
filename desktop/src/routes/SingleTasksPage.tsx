@@ -15,6 +15,7 @@ import { getSingleStartBlockReason } from "@/lib/runtime-preflight"
 import type { AppBootstrap, GoodsRecord, SingleTaskRecord } from "@/lib/types"
 import { cn } from "@/lib/utils"
 import { useRegisterShellToolbar } from "@/components/shell-toolbar"
+import { DebugModeCard } from "@/components/debug-mode-card"
 import { InlineNote } from "@/components/minimal-page"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -145,6 +146,10 @@ export function SingleTasksPage() {
   const [timingDraft, setTimingDraft] = useState<SingleTimingDraft | null>(null)
   const [timingMessage, setTimingMessage] = useState("")
   const [timingMessageTone, setTimingMessageTone] = useState<NoticeTone>("slate")
+  const [debugModeSaving, setDebugModeSaving] = useState(false)
+  const [debugModeOverride, setDebugModeOverride] = useState<boolean | null>(null)
+  const [debugModeMessage, setDebugModeMessage] = useState("")
+  const [debugModeMessageTone, setDebugModeMessageTone] = useState<NoticeTone>("slate")
   const [logDrawerOpen, setLogDrawerOpen] = useState(false)
   const [logsClearedAt, setLogsClearedAt] = useState<number | null>(null)
   const lastSavedRef = useRef("")
@@ -246,6 +251,51 @@ export function SingleTasksPage() {
     return () => window.clearTimeout(timer)
   }, [saveTimingDraft, timingDraft])
 
+  useEffect(() => {
+    setDebugModeOverride(null)
+  }, [bootstrap?.config.debug.singleEnabled])
+
+  const toggleDebugMode = async () => {
+    if (!bootstrap) return
+    const debugModeEnabled = debugModeOverride ?? bootstrap.config.debug.singleEnabled
+    const debugDir = `${bootstrap.paths.debugDir}\\single\\<sessionId>`
+    if (debugModeSaving || isRunning) {
+      return
+    }
+    const nextEnabled = !debugModeEnabled
+    setDebugModeOverride(nextEnabled)
+    setDebugModeSaving(true)
+    try {
+      const saved = await api.configSave({
+        ...bootstrap.config,
+        debug: {
+          ...bootstrap.config.debug,
+          singleEnabled: nextEnabled,
+        },
+      })
+      queryClient.setQueryData<AppBootstrap>(["bootstrap"], (current) =>
+        current
+          ? {
+              ...current,
+              config: saved,
+            }
+          : current,
+      )
+      setDebugModeMessageTone("emerald")
+      setDebugModeMessage(
+        nextEnabled
+          ? `已开启单商品调试模式。新会话会写入 ${debugDir}`
+          : "已关闭单商品调试模式。后续会话不再生成调试图。",
+      )
+    } catch (error) {
+      setDebugModeOverride(null)
+      setDebugModeMessageTone("rose")
+      setDebugModeMessage(`单商品调试模式保存失败：${formatErrorMessage(error)}`)
+    } finally {
+      setDebugModeSaving(false)
+    }
+  }
+
   const singleLogs = logs.filter((log) => {
     if (log.scope !== "automation:single") {
       return false
@@ -284,6 +334,8 @@ export function SingleTasksPage() {
     draft.priceThreshold > 0
       ? Math.round(draft.priceThreshold * (1 + draft.pricePremiumPct / 100))
       : 0
+  const debugModeEnabled = debugModeOverride ?? bootstrap.config.debug.singleEnabled
+  const debugDir = `${bootstrap.paths.debugDir}\\single\\<sessionId>`
   const startBlockedReason = getSingleStartBlockReason(bootstrap, draft.itemId)
 
   const startOrStop = async () => {
@@ -436,11 +488,24 @@ export function SingleTasksPage() {
               单商品运行参数
             </DialogTitle>
             <DialogDescription className="text-sm leading-6">
-              这里调整单商品抢购的详情稳定、结果识别与遮罩关闭时序。输入后会自动保存。
+              这里调整单商品抢购的调试模式、详情稳定、结果识别与遮罩关闭时序。输入后会自动保存。
             </DialogDescription>
           </DialogHeader>
 
           <div className="grid gap-6 px-6 py-6 md:px-8 md:py-8">
+            <DebugModeCard
+              title="单商品调试模式"
+              description="按轮缓存模板识别、OCR、点击和输入的调试图，当前轮结束后一次性写入磁盘。"
+              enabled={debugModeEnabled}
+              saving={debugModeSaving}
+              isRunning={isRunning}
+              onToggle={() => void toggleDebugMode()}
+              message={debugModeMessage}
+              messageTone={debugModeMessageTone}
+              defaultMessage={`调试图将写入 ${debugDir}\\round-0001-completed。运行中不可切换，启动前设置生效。`}
+              ariaLabel="切换单商品调试模式"
+            />
+
             <div className="grid gap-8 md:grid-cols-2">
                 <FormNumberDraft
                   label="购买点击后固定等待"

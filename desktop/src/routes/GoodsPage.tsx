@@ -44,7 +44,6 @@ import {
 } from "@/components/ui/select"
 import {
   InlineNote,
-  PageHero,
   PageSurface,
   PageSurfaceContent,
   SectionHeading,
@@ -140,7 +139,6 @@ export function GoodsPage() {
 
   if (!bootstrap) return null
 
-  const favoriteCount = bootstrap.goods.filter((item) => item.favorite).length
   const currentView =
     selectedBigCategory === "全部"
       ? "全部分类"
@@ -193,23 +191,6 @@ export function GoodsPage() {
 
   return (
     <div className="grid gap-10">
-      <PageHero
-        eyebrow="Library"
-        badges={
-          <>
-            <Badge variant="outline">总库 {bootstrap.goods.length}</Badge>
-            <Badge variant="secondary">收藏 {favoriteCount}</Badge>
-          </>
-        }
-        title="物品库"
-        actions={
-          <Button size="lg" onClick={openCreate}>
-            <Plus className="mr-2 size-4" />
-            新建物品
-          </Button>
-        }
-      />
-
       <PageSurface>
         <PageSurfaceContent className="gap-8">
           <SectionHeading
@@ -217,14 +198,20 @@ export function GoodsPage() {
             title="分类与卡片"
             description="左侧保留树状导航，右侧保持宽阔留白和整洁卡片。"
             actions={
-              <div className="flex min-w-[280px] items-center gap-3 border-b border-slate-200 pb-3 text-slate-500">
-                <Search className="size-4" />
-                <Input
-                  className="h-auto border-0 bg-transparent px-0 py-0 text-base shadow-none focus-visible:ring-0"
-                  placeholder="按名称 / 搜索词 / 子类过滤"
-                  value={keyword}
-                  onChange={(event) => setKeyword(event.target.value)}
-                />
+              <div className="flex flex-wrap items-center justify-end gap-3">
+                <div className="flex min-w-[280px] items-center gap-3 border-b border-slate-200 pb-3 text-slate-500">
+                  <Search className="size-4" />
+                  <Input
+                    className="h-auto border-0 bg-transparent px-0 py-0 text-base shadow-none focus-visible:ring-0"
+                    placeholder="按名称 / 搜索词 / 子类过滤"
+                    value={keyword}
+                    onChange={(event) => setKeyword(event.target.value)}
+                  />
+                </div>
+                <Button onClick={openCreate}>
+                  <Plus className="mr-2 size-4" />
+                  新建物品
+                </Button>
               </div>
             }
           />

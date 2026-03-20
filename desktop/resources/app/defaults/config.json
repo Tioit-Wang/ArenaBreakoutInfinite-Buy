@@ -21,12 +21,8 @@
     "output_dir": "output"
   },
   "debug": {
-    "save_roi_on_fail": false,
-    "enabled": false,
-    "overlay_sec": 5.0,
-    "step_sleep": 0.0,
-    "save_overlay_images": false,
-    "overlay_dir": "debug/overlay"
+    "single_enabled": false,
+    "multi_enabled": false
   },
   "hotkeys": {
     "toggle": "CommandOrControl+Alt+T"

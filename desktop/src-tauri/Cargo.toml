@@ -17,6 +17,7 @@ anyhow = "1.0"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 corrmatch = { version = "0.1.0", features = ["rayon", "simd"] }
+font8x8 = "0.3"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp"] }
 imageproc = { version = "0.25", default-features = false }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
