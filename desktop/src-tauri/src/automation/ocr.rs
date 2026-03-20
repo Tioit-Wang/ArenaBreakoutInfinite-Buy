@@ -91,17 +91,15 @@ impl OcrManager {
     }
 
     fn resolve_exe_path(&self, config: &UmiOcrConfig) -> Option<std::path::PathBuf> {
-        if !config.exe_path.trim().is_empty() {
-            let path = std::path::PathBuf::from(&config.exe_path);
-            if path.exists() {
-                return Some(path);
-            }
+        let trimmed = config.exe_path.trim();
+        if trimmed.is_empty() {
+            return None;
         }
-        self.paths
-            .bundled_umi_dir
-            .as_ref()
-            .map(|dir| dir.join("Umi-OCR.exe"))
-            .filter(|path| path.exists())
+        let path = std::path::PathBuf::from(trimmed);
+        if path.is_file() {
+            return Some(path);
+        }
+        None
     }
 }
 

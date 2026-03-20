@@ -288,6 +288,13 @@ export type RuntimeLogEntry = {
   payload: Record<string, unknown>
 }
 
+export type RuntimePreflightStatus = {
+  launcherReady: boolean
+  launcherMessage: string
+  umiReady: boolean
+  umiMessage: string
+}
+
 export type AppBootstrap = {
   paths: PathsSnapshot
   config: AppConfig
@@ -297,6 +304,7 @@ export type AppBootstrap = {
   multiTasks: MultiTaskRecord[]
   runtime: AutomationRunState
   ocrStatus: OcrStatus
+  runtimePreflight: RuntimePreflightStatus
   legacyCandidates: LegacyCandidate[]
   recentLogs: RuntimeLogEntry[]
 }

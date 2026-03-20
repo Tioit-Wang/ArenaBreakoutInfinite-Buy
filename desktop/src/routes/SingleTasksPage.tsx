@@ -11,6 +11,7 @@ import {
 
 import { useRuntimeStore } from "@/app/store"
 import { api } from "@/lib/api"
+import { getSingleStartBlockReason } from "@/lib/runtime-preflight"
 import type { AppBootstrap, GoodsRecord, SingleTaskRecord } from "@/lib/types"
 import { cn } from "@/lib/utils"
 import { useRegisterShellToolbar } from "@/components/shell-toolbar"
@@ -31,6 +32,7 @@ import {
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { SpinnerNumberInput } from "@/components/ui/spinner-number-input"
 import {
   Select,
   SelectContent,
@@ -72,13 +74,13 @@ const emptySingleTask = (): SingleTaskRecord => ({
 
 function SingleToolbarActions({
   isRunning,
-  hasItem,
+  startBlockedReason,
   onStartOrStop,
   onOpenTiming,
   onOpenLogs,
 }: {
   isRunning: boolean
-  hasItem: boolean
+  startBlockedReason: string | null
   onStartOrStop: () => void
   onOpenTiming: () => void
   onOpenLogs: () => void
@@ -90,7 +92,8 @@ function SingleToolbarActions({
           size="sm"
           variant={isRunning ? "destructive" : "default"}
           onClick={onStartOrStop}
-          disabled={!hasItem}
+          disabled={!isRunning && Boolean(startBlockedReason)}
+          title={startBlockedReason ?? undefined}
           className="min-w-24 rounded-lg"
         >
           {isRunning ? (
@@ -125,7 +128,7 @@ function SingleToolbarActions({
         </Button>
       </>
     ),
-    [hasItem, isRunning, onOpenLogs, onOpenTiming, onStartOrStop],
+    [isRunning, onOpenLogs, onOpenTiming, onStartOrStop, startBlockedReason],
   )
 
   useRegisterShellToolbar(toolbarActions)
@@ -144,11 +147,6 @@ export function SingleTasksPage() {
   const [timingMessageTone, setTimingMessageTone] = useState<NoticeTone>("slate")
   const [logDrawerOpen, setLogDrawerOpen] = useState(false)
   const [logsClearedAt, setLogsClearedAt] = useState<number | null>(null)
-  const [captureArchiveSaving, setCaptureArchiveSaving] = useState(false)
-  const [captureArchiveOverride, setCaptureArchiveOverride] = useState<boolean | null>(null)
-  const [captureArchiveMessage, setCaptureArchiveMessage] = useState("")
-  const [captureArchiveMessageTone, setCaptureArchiveMessageTone] =
-    useState<NoticeTone>("slate")
   const lastSavedRef = useRef("")
   const lastSavedTimingRef = useRef("")
 
@@ -196,10 +194,6 @@ export function SingleTasksPage() {
     }, 450)
     return () => window.clearTimeout(timer)
   }, [draft, saveDraft])
-
-  useEffect(() => {
-    setCaptureArchiveOverride(null)
-  }, [bootstrap?.config.debug.saveSingleCaptureImages])
 
   const saveTimingDraft = useCallback(async (nextDraft: SingleTimingDraft) => {
     if (!bootstrap) return null
@@ -290,9 +284,7 @@ export function SingleTasksPage() {
     draft.priceThreshold > 0
       ? Math.round(draft.priceThreshold * (1 + draft.pricePremiumPct / 100))
       : 0
-  const captureArchiveEnabled =
-    captureArchiveOverride ?? bootstrap.config.debug.saveSingleCaptureImages
-  const captureArchiveDir = `${bootstrap.paths.debugDir}\\single-captures\\<sessionId>`
+  const startBlockedReason = getSingleStartBlockReason(bootstrap, draft.itemId)
 
   const startOrStop = async () => {
     if (isRunning) {
@@ -300,47 +292,19 @@ export function SingleTasksPage() {
       await queryClient.invalidateQueries({ queryKey: ["bootstrap"] })
       return
     }
+    if (startBlockedReason) {
+      return
+    }
     await saveDraft()
     await api.automationStartSingle()
     await queryClient.invalidateQueries({ queryKey: ["bootstrap"] })
-  }
-
-  const toggleCaptureArchive = async () => {
-    if (!bootstrap || captureArchiveSaving || isRunning) {
-      return
-    }
-    const nextEnabled = !captureArchiveEnabled
-    setCaptureArchiveOverride(nextEnabled)
-    setCaptureArchiveSaving(true)
-    try {
-      await api.configSave({
-        ...bootstrap.config,
-        debug: {
-          ...bootstrap.config.debug,
-          saveSingleCaptureImages: nextEnabled,
-        },
-      })
-      setCaptureArchiveMessageTone("emerald")
-      setCaptureArchiveMessage(
-        nextEnabled
-          ? `已开启抓图存档。新会话会保存到 ${captureArchiveDir}`
-          : "已关闭抓图存档。后续单商品会话不再自动保存抓图。",
-      )
-      await queryClient.invalidateQueries({ queryKey: ["bootstrap"] })
-    } catch (error) {
-      setCaptureArchiveOverride(null)
-      setCaptureArchiveMessageTone("rose")
-      setCaptureArchiveMessage(`抓图存档设置保存失败：${String(error)}`)
-    } finally {
-      setCaptureArchiveSaving(false)
-    }
   }
 
   return (
     <div className="grid gap-10">
       <SingleToolbarActions
         isRunning={isRunning}
-        hasItem={!!draft.itemId}
+        startBlockedReason={startBlockedReason}
         onStartOrStop={() => void startOrStop()}
         onOpenTiming={() => setTimingDialogOpen(true)}
         onOpenLogs={() => setLogDrawerOpen(true)}
@@ -365,68 +329,13 @@ export function SingleTasksPage() {
                 单商品抢购
               </h1>
             </div>
+
+            {startBlockedReason ? (
+              <InlineNote tone="rose">{startBlockedReason}</InlineNote>
+            ) : null}
           </div>
 
         </section>
-
-        <Card className="overflow-visible rounded-[36px] border-white/60 bg-white/72 shadow-none backdrop-blur-sm">
-          <CardContent className="grid gap-6 p-6 md:p-8">
-            <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-              <div className="space-y-2">
-                <p className="text-xs font-semibold uppercase tracking-[0.28em] text-slate-400">
-                  Capture Archive
-                </p>
-                <h3 className="font-display text-2xl leading-tight tracking-tight text-slate-950">
-                  单商品抓图存档
-                </h3>
-                <p className="max-w-2xl text-sm leading-6 text-slate-600">
-                  保存单商品流程里的窗口抓图和关键 OCR ROI，目录按每次会话拆分。
-                </p>
-              </div>
-
-              <button
-                type="button"
-                role="switch"
-                aria-checked={captureArchiveEnabled}
-                aria-label="切换单商品抓图存档"
-                onClick={() => void toggleCaptureArchive()}
-                disabled={captureArchiveSaving || isRunning}
-                className={cn(
-                  "inline-flex min-h-12 items-center gap-3 rounded-full border px-4 py-2 text-sm font-medium transition",
-                  captureArchiveEnabled
-                    ? "border-emerald-200 bg-emerald-50 text-emerald-800"
-                    : "border-slate-200 bg-white text-slate-600",
-                  (captureArchiveSaving || isRunning) && "cursor-not-allowed opacity-60",
-                )}
-              >
-                <span
-                  className={cn(
-                    "relative inline-flex h-7 w-12 shrink-0 rounded-full transition",
-                    captureArchiveEnabled ? "bg-emerald-500" : "bg-slate-300",
-                  )}
-                >
-                  <span
-                    className={cn(
-                      "absolute top-1 size-5 rounded-full bg-white shadow-sm transition",
-                      captureArchiveEnabled ? "left-6" : "left-1",
-                    )}
-                  />
-                </span>
-                <span>
-                  {captureArchiveSaving
-                    ? "保存中..."
-                    : captureArchiveEnabled
-                      ? "已开启"
-                      : "已关闭"}
-                </span>
-              </button>
-            </div>
-
-            <InlineNote tone={captureArchiveMessage ? captureArchiveMessageTone : "slate"}>
-              {captureArchiveMessage || `抓图将保存到 ${captureArchiveDir}。运行中不可切换，启动前设置生效。`}
-            </InlineNote>
-          </CardContent>
-        </Card>
 
         <Card className="overflow-visible rounded-[36px] border-white/60 bg-white/72 shadow-none backdrop-blur-sm">
           <CardContent className="grid gap-12 p-6 md:p-10">
@@ -786,6 +695,7 @@ function FormNumber({
   min,
   step,
   suffix,
+  spinnerOnly,
   onChange,
 }: {
   label: string
@@ -794,6 +704,7 @@ function FormNumber({
   min?: number
   step?: string
   suffix?: string
+  spinnerOnly?: boolean
   onChange: (value: number) => void
 }) {
   return (
@@ -802,14 +713,24 @@ function FormNumber({
         <Label className="text-sm text-slate-500">{label}</Label>
         {hint ? <HoverHint text={hint} /> : null}
       </div>
-      <Input
-        type="number"
-        min={min}
-        step={step}
-        value={value}
-        className="h-12 rounded-none border-x-0 border-t-0 border-b border-slate-200 bg-transparent px-0 text-lg shadow-none focus-visible:ring-0 focus-visible:ring-offset-0"
-        onChange={(event) => onChange(Number(event.target.value))}
-      />
+      {spinnerOnly ? (
+        <SpinnerNumberInput
+          min={min}
+          step={step}
+          value={value}
+          className="h-12 rounded-none border-x-0 border-t-0 border-b border-slate-200 bg-transparent px-0 text-lg shadow-none focus-visible:ring-0 focus-visible:ring-offset-0"
+          onChange={(event) => onChange(Number(event.target.value))}
+        />
+      ) : (
+        <Input
+          type="number"
+          min={min}
+          step={step}
+          value={value}
+          className="h-12 rounded-none border-x-0 border-t-0 border-b border-slate-200 bg-transparent px-0 text-lg shadow-none focus-visible:ring-0 focus-visible:ring-offset-0"
+          onChange={(event) => onChange(Number(event.target.value))}
+        />
+      )}
       {suffix ? (
         <p className="text-xs leading-5 text-slate-400">当前单位：{suffix}</p>
       ) : null}
@@ -906,6 +827,7 @@ function StrategyEditor({
         label={priceLabel}
         hint="填 0 关闭。"
         value={priceValue}
+        spinnerOnly
         onChange={onPriceChange}
       />
       <FormNumber
@@ -913,6 +835,7 @@ function StrategyEditor({
         hint="例如 5 代表 5%。"
         value={premiumValue}
         step="0.1"
+        spinnerOnly
         onChange={onPremiumChange}
       />
       <p className="text-sm leading-6 text-slate-500">

@@ -36,7 +36,7 @@ impl AppState {
         let config_service = Arc::new(ConfigService::new(paths.clone(), repo.clone()));
         config_service.ensure_seeded(app)?;
 
-        let automation = Arc::new(AutomationManager::new(repo.clone()));
+        let automation = Arc::new(AutomationManager::new(paths.clone(), repo.clone()));
         let ocr = Arc::new(OcrManager::new(paths.clone(), repo.clone()));
         let legacy_importer = Arc::new(LegacyImporter::new(paths.clone(), repo.clone()));
 

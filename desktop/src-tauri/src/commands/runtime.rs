@@ -4,6 +4,7 @@ use crate::app::state::AppState;
 use crate::app::types::{AutomationRunState, OcrStatus};
 use crate::automation::input::{click_point, type_text};
 use crate::runtime::events::{OCR_STATUS_EVENT, SIDECAR_STATUS_EVENT};
+use crate::runtime::requirements::{validate_automation_start, validate_ocr_start};
 
 #[tauri::command]
 pub fn automation_start_single(
@@ -14,6 +15,7 @@ pub fn automation_start_single(
         .config_service
         .get()
         .map_err(|error| error.to_string())?;
+    validate_automation_start(&config)?;
     let ocr_status = state
         .ocr
         .ensure_started(&config.umi_ocr)
@@ -54,6 +56,7 @@ pub fn automation_start_multi(
         .config_service
         .get()
         .map_err(|error| error.to_string())?;
+    validate_automation_start(&config)?;
     let ocr_status = state
         .ocr
         .ensure_started(&config.umi_ocr)
@@ -116,6 +119,7 @@ pub fn ocr_start(app: AppHandle, state: State<'_, AppState>) -> Result<OcrStatus
         .config_service
         .get()
         .map_err(|error| error.to_string())?;
+    validate_ocr_start(&config)?;
     let status = state
         .ocr
         .ensure_started(&config.umi_ocr)
@@ -140,11 +144,12 @@ pub fn ocr_stop(app: AppHandle, state: State<'_, AppState>) -> Result<OcrStatus,
 
 #[tauri::command]
 pub fn ocr_restart(app: AppHandle, state: State<'_, AppState>) -> Result<OcrStatus, String> {
-    state.ocr.stop().map_err(|error| error.to_string())?;
     let config = state
         .config_service
         .get()
         .map_err(|error| error.to_string())?;
+    validate_ocr_start(&config)?;
+    state.ocr.stop().map_err(|error| error.to_string())?;
     let status = state
         .ocr
         .ensure_started(&config.umi_ocr)

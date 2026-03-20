@@ -15,6 +15,7 @@ import {
 
 import { api } from "@/lib/api"
 import { useRuntimeStore } from "@/app/store"
+import { getMultiStartBlockReason } from "@/lib/runtime-preflight"
 import type { AppBootstrap, GoodsRecord, MultiTaskRecord } from "@/lib/types"
 import { useRegisterShellToolbar } from "@/components/shell-toolbar"
 import {
@@ -39,6 +40,7 @@ import {
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { ScrollArea, ScrollBar } from "@/components/ui/scroll-area"
+import { SpinnerNumberInput } from "@/components/ui/spinner-number-input"
 import {
   Select,
   SelectContent,
@@ -86,13 +88,13 @@ type MultiTimingDraft = {
 
 function MultiToolbarActions({
   isRunning,
-  enabledCount,
+  startBlockedReason,
   onStartOrStop,
   onOpenTiming,
   onOpenLogs,
 }: {
   isRunning: boolean
-  enabledCount: number
+  startBlockedReason: string | null
   onStartOrStop: () => void
   onOpenTiming: () => void
   onOpenLogs: () => void
@@ -104,7 +106,8 @@ function MultiToolbarActions({
           size="sm"
           variant={isRunning ? "destructive" : "default"}
           onClick={onStartOrStop}
-          disabled={!isRunning && enabledCount === 0}
+          disabled={!isRunning && Boolean(startBlockedReason)}
+          title={startBlockedReason ?? undefined}
           className="min-w-24 rounded-lg"
         >
           {isRunning ? (
@@ -139,7 +142,7 @@ function MultiToolbarActions({
         </Button>
       </>
     ),
-    [enabledCount, isRunning, onOpenLogs, onOpenTiming, onStartOrStop],
+    [isRunning, onOpenLogs, onOpenTiming, onStartOrStop, startBlockedReason],
   )
 
   useRegisterShellToolbar(toolbarActions)
@@ -164,7 +167,7 @@ type ModalState =
 export function MultiTasksPage() {
   const bootstrap = useRuntimeStore((state) => state.bootstrap)
   const runtime = useRuntimeStore((state) => state.runtime)
-  const progress = useRuntimeStore((state) => state.progress)
+  const logs = useRuntimeStore((state) => state.logs)
   const queryClient = useQueryClient()
   const [modal, setModal] = useState<ModalState>({ open: false })
   const [timingDialogOpen, setTimingDialogOpen] = useState(false)
@@ -199,8 +202,8 @@ export function MultiTasksPage() {
 
   const multiLogs = useMemo(
     () =>
-      progress.filter((item) => {
-        if (item.mode !== "multi") {
+      logs.filter((item) => {
+        if (item.scope !== "automation:multi") {
           return false
         }
         if (runtime.mode === "multi" && runtime.sessionId) {
@@ -208,7 +211,7 @@ export function MultiTasksPage() {
         }
         return true
       }),
-    [progress, runtime.mode, runtime.sessionId],
+    [logs, runtime.mode, runtime.sessionId],
   )
 
   const visibleLogs = useMemo(() => {
@@ -228,12 +231,16 @@ export function MultiTasksPage() {
       : runtime.state === "failed"
         ? "destructive"
         : "outline"
+  const startBlockedReason = getMultiStartBlockReason(bootstrap, bootstrap?.multiTasks.filter((item) => item.enabled).length ?? 0)
 
   const startOrStop = async () => {
     if (!bootstrap) return
     if (isRunning) {
       await api.automationStop()
       await queryClient.invalidateQueries({ queryKey: ["bootstrap"] })
+      return
+    }
+    if (startBlockedReason) {
       return
     }
     await api.automationStartMulti()
@@ -399,7 +406,7 @@ export function MultiTasksPage() {
     <div className="grid gap-10">
       <MultiToolbarActions
         isRunning={isRunning}
-        enabledCount={enabledCount}
+        startBlockedReason={startBlockedReason}
         onStartOrStop={() => void startOrStop()}
         onOpenTiming={() => setTimingDialogOpen(true)}
         onOpenLogs={() => setLogDrawerOpen(true)}
@@ -415,6 +422,8 @@ export function MultiTasksPage() {
         }
         title="收藏商品抢购"
       />
+
+      {startBlockedReason ? <InlineNote tone="rose">{startBlockedReason}</InlineNote> : null}
 
       <PageSurface>
         <PageSurfaceContent className="gap-8">
@@ -571,6 +580,7 @@ export function MultiTasksPage() {
                 <FormNumber
                   label="价格阈值"
                   value={modal.draft.price}
+                  spinnerOnly
                   onChange={(value) =>
                     setModal({
                       ...modal,
@@ -582,6 +592,7 @@ export function MultiTasksPage() {
                   label="浮动 %"
                   value={modal.draft.premiumPct}
                   step="0.1"
+                  spinnerOnly
                   onChange={(value) =>
                     setModal({
                       ...modal,
@@ -854,7 +865,7 @@ export function MultiTasksPage() {
               <div className="space-y-2">
                 <DialogTitle className="font-display text-3xl tracking-tight">运行日志</DialogTitle>
                 <DialogDescription className="text-sm leading-6">
-                  底部抽屉只显示多商品抢购的最近事件。
+                  底部抽屉只显示多商品抢购的最近日志。
                 </DialogDescription>
               </div>
               <Button
@@ -881,14 +892,7 @@ export function MultiTasksPage() {
                     <span className="text-xs font-semibold uppercase tracking-[0.18em] text-emerald-700">
                       {item.level}
                     </span>
-                    <div className="space-y-1">
-                      {item.step ? (
-                        <p className="text-xs uppercase tracking-[0.18em] text-slate-400">
-                          {item.step}
-                        </p>
-                      ) : null}
-                      <p className="text-sm leading-6 text-slate-700">{item.message}</p>
-                    </div>
+                    <p className="text-sm leading-6 text-slate-700">{item.message}</p>
                   </div>
                 ))
               ) : (
@@ -906,23 +910,34 @@ function FormNumber({
   label,
   value,
   step,
+  spinnerOnly,
   onChange,
 }: {
   label: string
   value: number
   step?: string
+  spinnerOnly?: boolean
   onChange: (value: number) => void
 }) {
   return (
     <div className="space-y-3">
       <Label>{label}</Label>
-      <Input
-        className={minimalFieldClassName}
-        type="number"
-        step={step}
-        value={value}
-        onChange={(event) => onChange(Number(event.target.value))}
-      />
+      {spinnerOnly ? (
+        <SpinnerNumberInput
+          className={minimalFieldClassName}
+          step={step}
+          value={value}
+          onChange={(event) => onChange(Number(event.target.value))}
+        />
+      ) : (
+        <Input
+          className={minimalFieldClassName}
+          type="number"
+          step={step}
+          value={value}
+          onChange={(event) => onChange(Number(event.target.value))}
+        />
+      )}
     </div>
   )
 }

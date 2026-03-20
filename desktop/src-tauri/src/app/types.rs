@@ -464,6 +464,15 @@ pub struct RuntimeLogEntry {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RuntimePreflightStatus {
+    pub launcher_ready: bool,
+    pub launcher_message: String,
+    pub umi_ready: bool,
+    pub umi_message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AppBootstrap {
     pub paths: PathsSnapshot,
     pub config: AppConfig,
@@ -473,6 +482,7 @@ pub struct AppBootstrap {
     pub multi_tasks: Vec<MultiTaskRecord>,
     pub runtime: AutomationRunState,
     pub ocr_status: OcrStatus,
+    pub runtime_preflight: RuntimePreflightStatus,
     pub legacy_candidates: Vec<LegacyCandidate>,
     pub recent_logs: Vec<RuntimeLogEntry>,
 }

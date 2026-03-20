@@ -26,13 +26,15 @@ struct RuntimeControl {
 
 #[derive(Clone)]
 pub struct AutomationManager {
+    paths: Arc<AppPaths>,
     repo: Arc<Repository>,
     control: Arc<Mutex<RuntimeControl>>,
 }
 
 impl AutomationManager {
-    pub fn new(repo: Arc<Repository>) -> Self {
+    pub fn new(paths: Arc<AppPaths>, repo: Arc<Repository>) -> Self {
         Self {
+            paths,
             repo,
             control: Arc::new(Mutex::new(RuntimeControl::default())),
         }
@@ -216,7 +218,7 @@ impl AutomationManager {
     fn handle_event(&self, app: &AppHandle, event: AutomationEvent) -> Result<()> {
         let scope = format!("automation:{}", event.mode);
         let log = append_log(
-            &self.repo,
+            &self.paths.logs_dir,
             Some(event.session_id.clone()),
             event.level.clone(),
             scope,

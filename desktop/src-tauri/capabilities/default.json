@@ -11,9 +11,6 @@
     "core:webview:allow-create-webview-window",
     "dialog:default",
     "log:default",
-    "shell:default",
-    "global-shortcut:default",
-    "global-shortcut:allow-register",
-    "global-shortcut:allow-unregister"
+    "shell:default"
   ]
 }

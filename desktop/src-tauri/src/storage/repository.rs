@@ -10,8 +10,7 @@ use serde_json::json;
 use crate::app::types::{
     AppConfig, AutomationRunState, GoodsRecord, HistorySummary, ImportReport,
     ItemPriceTrendPoint, ItemPriceTrendResponse, MultiTaskRecord, PriceHistoryRecord,
-    PurchaseHistoryRecord, RuntimeLogEntry, SingleTaskRecord, TemplateConfig, iso_to_epoch,
-    now_iso,
+    PurchaseHistoryRecord, SingleTaskRecord, TemplateConfig, iso_to_epoch, now_iso,
 };
 use crate::storage::migrations::MIGRATIONS;
 
@@ -527,37 +526,6 @@ impl Repository {
             ],
         )?;
         Ok(())
-    }
-
-    pub fn append_runtime_log(&self, entry: &RuntimeLogEntry) -> Result<i64> {
-        let conn = self.connect()?;
-        conn.execute(
-            r#"
-            INSERT INTO runtime_logs (session_id, level, scope, message, created_at, payload_json)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-            "#,
-            params![
-                entry.session_id,
-                entry.level,
-                entry.scope,
-                entry.message,
-                entry.created_at,
-                serde_json::to_string(entry)?,
-            ],
-        )?;
-        Ok(conn.last_insert_rowid())
-    }
-
-    pub fn recent_runtime_logs(&self, limit: u32) -> Result<Vec<RuntimeLogEntry>> {
-        let conn = self.connect()?;
-        let mut statement =
-            conn.prepare("SELECT payload_json FROM runtime_logs ORDER BY id DESC LIMIT ?1")?;
-        let rows = statement.query_map(params![limit as i64], |row| row.get::<_, String>(0))?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(serde_json::from_str(&row?)?);
-        }
-        Ok(out)
     }
 
     pub fn record_import(&self, report: &ImportReport) -> Result<ImportReport> {

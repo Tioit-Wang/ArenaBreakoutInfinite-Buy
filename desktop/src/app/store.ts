@@ -41,13 +41,13 @@ export const useRuntimeStore = create<RuntimeStore>((set) => ({
   logs: [],
   progress: [],
   setBootstrap: (bootstrap) =>
-    set({
+    set((state) => ({
       bootstrap,
       runtime: bootstrap.runtime,
       ocrStatus: bootstrap.ocrStatus,
-      logs: bootstrap.recentLogs,
-      progress: [],
-    }),
+      logs: state.logs.length > 0 ? state.logs : bootstrap.recentLogs,
+      progress: state.progress,
+    })),
   setRuntime: (runtime) => set({ runtime }),
   setOcrStatus: (ocrStatus) => set({ ocrStatus }),
   pushLog: (log) =>

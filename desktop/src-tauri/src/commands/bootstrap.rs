@@ -2,6 +2,7 @@ use tauri::State;
 
 use crate::app::state::AppState;
 use crate::app::types::AppBootstrap;
+use crate::runtime::requirements::build_runtime_preflight;
 
 #[tauri::command]
 pub fn bootstrap(state: State<'_, AppState>) -> Result<AppBootstrap, String> {
@@ -10,6 +11,7 @@ pub fn bootstrap(state: State<'_, AppState>) -> Result<AppBootstrap, String> {
         .get()
         .map_err(|error| error.to_string())?;
     let ocr_status = state.ocr.status(&config.umi_ocr);
+    let runtime_preflight = build_runtime_preflight(&config);
     Ok(AppBootstrap {
         paths: state.paths.snapshot(),
         config,
@@ -28,13 +30,11 @@ pub fn bootstrap(state: State<'_, AppState>) -> Result<AppBootstrap, String> {
             .map_err(|error| error.to_string())?,
         runtime: state.automation.current_state(),
         ocr_status,
+        runtime_preflight,
         legacy_candidates: state
             .legacy_importer
             .scan()
             .map_err(|error| error.to_string())?,
-        recent_logs: state
-            .repo
-            .recent_runtime_logs(200)
-            .map_err(|error| error.to_string())?,
+        recent_logs: Vec::new(),
     })
 }

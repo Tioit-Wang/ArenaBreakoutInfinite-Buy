@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react"
 import { Outlet, useLocation, useNavigate } from "react-router-dom"
 import { useQuery } from "@tanstack/react-query"
-import { register, unregister } from "@tauri-apps/plugin-global-shortcut"
 import { Boxes, History, Settings, Sparkles, Star } from "lucide-react"
 
 import { api } from "@/lib/api"
@@ -36,8 +35,6 @@ export function ShellLayout() {
   const setOcrStatus = useRuntimeStore((state) => state.setOcrStatus)
   const pushLog = useRuntimeStore((state) => state.pushLog)
   const pushProgress = useRuntimeStore((state) => state.pushProgress)
-  const bootstrap = useRuntimeStore((state) => state.bootstrap)
-  const toggleShortcut = bootstrap?.config.hotkeys.toggle.trim()
   const [toolbarActions, setToolbarActions] = useState<ReactNode>(null)
 
   const bootstrapQuery = useQuery({
@@ -71,49 +68,6 @@ export function ShellLayout() {
       cleaners.forEach((cleanup) => cleanup())
     }
   }, [pushLog, pushProgress, setOcrStatus, setRuntime])
-
-  useEffect(() => {
-    if (!isTauriRuntime() || !toggleShortcut) {
-      return
-    }
-    let disposed = false
-    let registered = false
-    void (async () => {
-      try {
-        await register(toggleShortcut, (event) => {
-          if (disposed || event.state !== "Pressed") {
-            return
-          }
-          const currentRuntime = useRuntimeStore.getState().runtime
-          if (currentRuntime.state === "running") {
-            void api
-              .automationStop()
-              .then((nextRuntime) => {
-                if (!disposed) {
-                  setRuntime(nextRuntime)
-                }
-              })
-              .catch(console.error)
-          }
-        })
-        registered = true
-        if (disposed) {
-          await unregister(toggleShortcut)
-        }
-      } catch (error) {
-        console.warn(`failed to register shortcut ${toggleShortcut}`, error)
-      }
-    })()
-    return () => {
-      disposed = true
-      if (!registered) {
-        return
-      }
-      void unregister(toggleShortcut).catch((error) => {
-        console.warn(`failed to unregister shortcut ${toggleShortcut}`, error)
-      })
-    }
-  }, [setRuntime, toggleShortcut])
 
   const activeTab = useMemo(() => routeToTab(location.pathname), [location.pathname])
   const handleNavigate = (value: string) => {

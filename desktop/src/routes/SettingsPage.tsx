@@ -6,6 +6,7 @@ import { FolderOpen, ImageIcon, RefreshCw, RotateCw, ScanSearch } from "lucide-r
 import { useRuntimeStore } from "@/app/store"
 import { resolveImageSrc } from "@/lib/assets"
 import { api } from "@/lib/api"
+import { getLauncherBlockReason, getUmiBlockReason } from "@/lib/runtime-preflight"
 import { isTauriRuntime } from "@/lib/tauri"
 import type { AppBootstrap, AppConfig, OcrStatus, TemplateConfig } from "@/lib/types"
 import { Badge } from "@/components/ui/badge"
@@ -20,6 +21,7 @@ import {
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { ScrollArea, ScrollBar } from "@/components/ui/scroll-area"
+import { SpinnerNumberInput } from "@/components/ui/spinner-number-input"
 import {
   Table,
   TableBody,
@@ -52,7 +54,6 @@ export function SettingsPage() {
   const bootstrap = useRuntimeStore((state) => state.bootstrap)
   const setOcrStatus = useRuntimeStore((state) => state.setOcrStatus)
   const [config, setConfig] = useState<AppConfig | null>(null)
-  const [hotkeyDraft, setHotkeyDraft] = useState("")
   const [templates, setTemplates] = useState<TemplateConfig[]>([])
   const [templateStatus, setTemplateStatus] = useState<TemplateStatusMap>({})
   const [previewTemplateId, setPreviewTemplateId] = useState<string | null>(null)
@@ -60,8 +61,6 @@ export function SettingsPage() {
   const [templateMessage, setTemplateMessage] = useState("")
   const [templateMessageTone, setTemplateMessageTone] = useState<NoticeTone>("slate")
   const [toast, setToast] = useState<ToastState>(null)
-  const [settingsMessage, setSettingsMessage] = useState("")
-  const [settingsMessageTone, setSettingsMessageTone] = useState<NoticeTone>("slate")
   const [ocrMessage, setOcrMessage] = useState("")
   const queryClient = useQueryClient()
   const initializedRef = useRef(false)
@@ -79,7 +78,6 @@ export function SettingsPage() {
     const initialConfig = clone(bootstrap.config)
     const initialTemplates = clone(bootstrap.templates)
     setConfig(initialConfig)
-    setHotkeyDraft(initialConfig.hotkeys.toggle)
     setTemplates(initialTemplates)
     setTemplateStatus({})
     lastSavedTemplatesRef.current = Object.fromEntries(
@@ -146,25 +144,20 @@ export function SettingsPage() {
     }))
   }, [updateBootstrapCache])
 
-  const persistConfig = useCallback(async (
-    nextConfig: AppConfig,
-    successMessage = "设置已自动保存",
-  ) => {
+  const persistConfig = useCallback(async (nextConfig: AppConfig) => {
     try {
       const saved = await api.configSave(nextConfig)
       updateBootstrapCache((current) => ({
         ...current,
         config: clone(saved),
       }))
-      setSettingsMessageTone("emerald")
-      setSettingsMessage(successMessage)
+      await queryClient.invalidateQueries({ queryKey: ["bootstrap"] })
       return saved
     } catch (error) {
-      setSettingsMessageTone("rose")
-      setSettingsMessage(`设置自动保存失败：${describeError(error)}`)
+      showToast(`设置自动保存失败：${describeError(error)}`, "rose")
       throw error
     }
-  }, [updateBootstrapCache])
+  }, [queryClient, showToast, updateBootstrapCache])
 
   useEffect(() => {
     configRef.current = config
@@ -271,6 +264,12 @@ export function SettingsPage() {
 
   if (!bootstrap || !config) return null
 
+  const launcherBlockReason = getLauncherBlockReason(bootstrap)
+  const ocrActionBlockReason = getUmiBlockReason(bootstrap)
+  const settingsPathIssues = [launcherBlockReason, ocrActionBlockReason].filter(
+    (message): message is string => Boolean(message),
+  )
+
   const chooseExecutable = async (
     currentValue: string,
     onChange: (path: string) => void,
@@ -292,25 +291,6 @@ export function SettingsPage() {
     setTemplates((current) =>
       current.map((item) => (item.id === id ? { ...item, ...patch } : item)),
     )
-  }
-
-  const commitHotkeyDraft = async () => {
-    if (!config) {
-      return
-    }
-    const nextToggle = hotkeyDraft.trim()
-    if (nextToggle === config.hotkeys.toggle) {
-      return
-    }
-    const nextConfig: AppConfig = {
-      ...config,
-      hotkeys: {
-        ...config.hotkeys,
-        toggle: nextToggle,
-      },
-    }
-    setConfig(nextConfig)
-    await persistConfig(nextConfig, "全局热键已自动保存")
   }
 
   const runOcrAction = async (action: () => Promise<OcrStatus>) => {
@@ -434,21 +414,40 @@ export function SettingsPage() {
                   <RefreshCw className="mr-2 size-4" />
                   刷新
                 </Button>
-                <Button size="sm" variant="secondary" onClick={() => void runOcrAction(api.ocrStart)}>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={Boolean(ocrActionBlockReason)}
+                  onClick={() => void runOcrAction(api.ocrStart)}
+                  title={ocrActionBlockReason ?? undefined}
+                >
                   启动
                 </Button>
                 <Button size="sm" variant="secondary" onClick={() => void runOcrAction(api.ocrStop)}>
                   停止
                 </Button>
-                <Button size="sm" onClick={() => void runOcrAction(api.ocrRestart)}>
+                <Button
+                  size="sm"
+                  disabled={Boolean(ocrActionBlockReason)}
+                  onClick={() => void runOcrAction(api.ocrRestart)}
+                  title={ocrActionBlockReason ?? undefined}
+                >
                   <RotateCw className="mr-2 size-4" />
                   重启 Umi-OCR
                 </Button>
               </div>
 
-              {(ocrMessage || bootstrap.ocrStatus.message) && (
-                <InlineNote tone={bootstrap.ocrStatus.ready ? "emerald" : "slate"}>
-                  {ocrMessage || bootstrap.ocrStatus.message}
+              {(ocrActionBlockReason || ocrMessage || bootstrap.ocrStatus.message) && (
+                <InlineNote
+                  tone={
+                    ocrActionBlockReason
+                      ? "rose"
+                      : bootstrap.ocrStatus.ready
+                        ? "emerald"
+                        : "slate"
+                  }
+                >
+                  {ocrActionBlockReason || ocrMessage || bootstrap.ocrStatus.message}
                 </InlineNote>
               )}
             </div>
@@ -471,24 +470,6 @@ export function SettingsPage() {
                   )
                 }
               />
-              <PathField
-                label="Umi-OCR 路径"
-                value={config.umiOcr.exePath}
-                placeholder="点击右侧按钮选择 Umi-OCR.exe"
-                onPick={() =>
-                  void chooseExecutable(config.umiOcr.exePath, (path) =>
-                    setConfig((current) =>
-                      current
-                        ? {
-                            ...current,
-                            umiOcr: { ...current.umiOcr, exePath: path },
-                          }
-                        : current,
-                    ),
-                  )
-                }
-              />
-
               <div className="space-y-3">
                 <Label htmlFor="launchArgs">启动参数</Label>
                 <Input
@@ -507,30 +488,31 @@ export function SettingsPage() {
                   }
                 />
               </div>
-
-              <div className="space-y-3">
-                <Label htmlFor="hotkey">全局热键</Label>
-                <Input
-                  id="hotkey"
-                  className={minimalFieldClassName}
-                  value={hotkeyDraft}
-                  onChange={(event) => setHotkeyDraft(event.target.value)}
-                  onBlur={() => void commitHotkeyDraft()}
-                  onKeyDown={(event) => {
-                    if (event.key !== "Enter") {
-                      return
-                    }
-                    event.preventDefault()
-                    void commitHotkeyDraft()
-                  }}
+              <div className="md:col-span-2">
+                <PathField
+                  label="Umi-OCR 路径"
+                  value={config.umiOcr.exePath}
+                  placeholder="点击右侧按钮选择 Umi-OCR.exe"
+                  onPick={() =>
+                    void chooseExecutable(config.umiOcr.exePath, (path) =>
+                      setConfig((current) =>
+                        current
+                          ? {
+                              ...current,
+                              umiOcr: { ...current.umiOcr, exePath: path },
+                            }
+                          : current,
+                      ),
+                    )
+                  }
                 />
               </div>
             </div>
-          </div>
 
-          {settingsMessage ? (
-            <InlineNote tone={settingsMessageTone}>{settingsMessage}</InlineNote>
-          ) : null}
+            {settingsPathIssues.length > 0 ? (
+              <InlineNote tone="rose">{settingsPathIssues.join("；")}</InlineNote>
+            ) : null}
+          </div>
         </PageSurfaceContent>
       </PageSurface>
 
@@ -600,9 +582,8 @@ export function SettingsPage() {
                         </Badge>
                       </TableCell>
                       <TableCell className="py-5">
-                        <Input
+                        <SpinnerNumberInput
                           className="h-10 rounded-full border-white/70 bg-white"
-                          type="number"
                           step="0.01"
                           value={template.confidence}
                           onChange={(event) =>

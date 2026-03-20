@@ -57,6 +57,7 @@ pnpm-debug.log*
 /desktop_old/
 /desktop/node_modules/
 /desktop/dist/
+/desktop/src-tauri/Cargo.lock
 /desktop/src-tauri/target/
 /desktop/src-tauri/gen/
 node_modules/
